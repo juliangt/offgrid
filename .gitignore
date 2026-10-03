@@ -1,6 +1,7 @@
 # --- Go build artifacts (Module B) ---
 # dtn-node binaries (local build and cross-compile outputs of node/build.sh)
 node/dtn-node
+node/dtn-node-dev
 node/dtn-node-linux-arm
 node/dtn-node-linux-arm64
 dtn-node
