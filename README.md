@@ -48,7 +48,7 @@ Development follows five sprints (see `PLAN_DESARROLLO.md` §5):
 | Sprint | Scope | Status |
 |---|---|---|
 | 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocolo.md`, threat model | **Complete** |
-| 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | Pending |
+| 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | **Complete** |
 | 2 | Module C: SPA + crypto engine + mule engine | Pending |
 | 3 | Module A: Raspberry Pi infrastructure | Pending |
 | 4 | E2E integration, Module D final docs, build/deploy guide | Pending |
