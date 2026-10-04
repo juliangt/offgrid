@@ -22,7 +22,7 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 |---|---|---|
 | **A — Node network configuration** | `hostapd` (open AP), `dnsmasq` (DHCP + wildcard DNS), `iptables` (captive-portal redirects, client isolation), power optimizations for solar + LiFePO4 | `raspberry/` |
 | **B — Node daemon** | Single static Go binary: HTTP API, SQLite storage (`WAL`), canonical-host middleware, 15-minute cleanup worker, `index.html` embedded via `embed.FS` | `node/` |
-| **C — SPA + crypto engine** | Single-file `web/index.html` (inline HTML/CSS/JS) with `tweetnacl.js` embedded, IndexedDB store (`identity`, `inbox`, `transit_queue`), mule sync engine | `node/web/` |
+| **C — SPA + crypto engine** | Modular same-origin SPA (`index.html` + `css/app.css` + ES5 scripts under `js/`) with `tweetnacl.js` vendored, IndexedDB store (`identity`, `inbox`, `transit_queue`), mule sync engine | `node/web/` |
 | **D — Protocol evolution mapping** | How the universal Envelope maps to BLE L2CAP CoC with `hop_count <= 7` (Phase 2) and to LoRa SX1262 at 915 MHz in CBOR within a 222-byte MTU (Phase 3) | `docs/protocol.md` |
 
 ## Documentation
@@ -45,7 +45,7 @@ offgrid/
 
 ## Architecture recap
 
-One self-contained static Go binary (`node/`, with the single-file SPA embedded via `go:embed`) serves, behind a canonical-host redirect that forces every browser onto the shared origin `http://portal.red.local:8080`, a blind SQLite dead-drop API: clients do all cryptography (X25519 + XSalsa20-Poly1305 boxes, Ed25519 signatures, sign-then-encrypt — tweetnacl embedded in `node/web/index.html`), so nodes store and serve opaque envelopes deduplicated by client-computed ids, TTL-filtered, and swept by a 15-minute janitor. Phones are the transport: each portal visit pushes what a mule carries and pulls what it does not know into a 100-envelope `IndexedDB` transit queue, and physical movement between identical nodes delivers mail — the same envelope format maps, without rewrites, onto BLE L2CAP (Phase 2) and LoRa CBOR (Phase 3) per `docs/protocol.md` §14. See `docs/` for the normative protocol, the build/deploy guide and the hardware design.
+One self-contained static Go binary (`node/`, with the SPA's `index.html`, `css/` and `js/` files embedded via `go:embed`) serves, behind a canonical-host redirect that forces every browser onto the shared origin `http://portal.red.local:8080`, a blind SQLite dead-drop API: clients do all cryptography (X25519 + XSalsa20-Poly1305 boxes, Ed25519 signatures, sign-then-encrypt — tweetnacl vendored under `node/web/js/`), so nodes store and serve opaque envelopes deduplicated by client-computed ids, TTL-filtered, and swept by a 15-minute janitor. Phones are the transport: each portal visit pushes what a mule carries and pulls what it does not know into a 100-envelope `IndexedDB` transit queue, and physical movement between identical nodes delivers mail — the same envelope format maps, without rewrites, onto BLE L2CAP (Phase 2) and LoRa CBOR (Phase 3) per `docs/protocol.md` §14. See `docs/` for the normative protocol, the build/deploy guide and the hardware design.
 
 ## Verification
 
@@ -53,7 +53,8 @@ From the repository root (expected outputs in `docs/BUILD.md` §4):
 
 ```bash
 cd node && go test ./... -count=1 && cd ..   # Go unit tests (storage, api, envelope, main, sdnotify)
-node tests/crypto_roundtrip.mjs              # 44 assertions against the SPA's embedded crypto engine
+node tests/crypto_roundtrip.mjs              # 44 assertions against the SPA crypto engine
+node tests/spa_structure.mjs                 # 91 assertions on the SPA layout (assets, CSP, DTN API)
 bash tests/sync_e2e.sh                       # 31 assertions: two real daemons + mule walk, curl only
 ```
 
@@ -72,12 +73,12 @@ Translation of `docs/DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance
 | SQLite: exact tables, columns and indexes | `node/internal/storage/storage.go` (`schema`, pragmas, single connection) |
 | Exact API endpoints (`GET /`, probes, directory GET/POST, sync) | `node/internal/api/handlers.go` (routes + limits), served from `node/main.go` |
 | 15-minute cleanup worker | `node/internal/cleanup/cleanup.go` (+ startup sweep), wired in `node/main.go` |
-| `embed.FS` with a single `index.html` | `node/main.go` (`webFS`, `//go:embed web`) |
-| X25519+Ed25519 client-side, server without keys | `node/web/index.html` (embedded tweetnacl engine), verified by `tests/crypto_roundtrip.mjs` |
-| `dtn_local_store`: identity / inbox / transit_queue (capacity 100) | `node/web/index.html` (IndexedDB layer, `TRANSIT_CAPACITY`) |
-| Sync on page load + own/foreign envelope classification | `node/web/index.html` (mule sync engine), exercised E2E by `tests/sync_e2e.sh` |
-| UI: registration, directory, composer with byte counter, inbox, mule telemetry | `node/web/index.html` (sections 6+) |
-| bitchat L2CAP mapping (`hop_count ≤ 7`) and LoRa CBOR within 222 B | `docs/protocol.md` §14 (+ §14.4 anchors table), mirrored in `node/internal/envelope/envelope.go` and above `buildEnvelope` in `node/web/index.html` |
+| `embed.FS` with the portal web assets | `node/main.go` (`webFS`, `//go:embed web`) |
+| X25519+Ed25519 client-side, server without keys | `node/web/js/` (tweetnacl vendored + engine scripts), verified by `tests/crypto_roundtrip.mjs` |
+| `dtn_local_store`: identity / inbox / transit_queue (capacity 100) | `node/web/js/store.js` (IndexedDB layer), `TRANSIT_CAPACITY` in `node/web/js/constants.js` |
+| Sync on page load + own/foreign envelope classification | `node/web/js/ui.js` (mule sync engine) + `node/web/js/mule.js`, exercised E2E by `tests/sync_e2e.sh` |
+| UI: registration, directory, composer with byte counter, inbox, mule telemetry | `node/web/index.html` + `node/web/js/ui.js` |
+| bitchat L2CAP mapping (`hop_count ≤ 7`) and LoRa CBOR within 222 B | `docs/protocol.md` §14 (+ §14.4 anchors table), mirrored in `node/internal/envelope/envelope.go` and above `buildEnvelope` in `node/web/js/envelopes.js` |
 | Complete code without `TODO` placeholders | repo-wide; `gofmt`/`go vet` clean, no placeholders in any shipped file |
 | Step-by-step build/run/test instructions | `docs/BUILD.md` |
 

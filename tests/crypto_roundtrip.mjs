@@ -1,9 +1,9 @@
-// Crypto round-trip test for the SPA embedded engine (Sprint 2, plan 2.8).
+// Crypto round-trip test for the SPA engine (Sprint 2, plan 2.8).
 //
-// Extracts the TWEETNACL_EMBED block and the app script straight out of
-// node/web/index.html (regex on the fence markers), evaluates them in a Node
-// vm context (Node 22 provides crypto.getRandomValues; window/self are
-// stubbed so the tweetnacl UMD and the window.DTN export land on the
+// Loads the shipped scripts in the exact order declared by
+// node/web/index.html (via tests/helpers/spa_loader.mjs) and evaluates them
+// in a Node vm context (Node 22 provides crypto.getRandomValues; window/self
+// are stubbed so the tweetnacl UMD and the window.DTN export land on the
 // sandbox), and asserts:
 //
 //   (a) dest_hint test vector of spec §6.1 (RFC 7748 Alice X25519 key)
@@ -17,42 +17,14 @@
 //
 // Run: node tests/crypto_roundtrip.mjs   (exit 0 = pass)
 
-import fs from "node:fs";
-import vm from "node:vm";
 import crypto from "node:crypto";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { loadSpaSandbox } from "./helpers/spa_loader.mjs";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const htmlPath = path.join(root, "node", "web", "index.html");
-const html = fs.readFileSync(htmlPath, "utf8");
-
-function extract(startMarker, endMarker) {
-  const i = html.indexOf(startMarker);
-  const j = html.indexOf(endMarker);
-  if (i < 0 || j < 0 || j <= i) {
-    throw new Error(`fence markers not found in ${htmlPath} (${startMarker.slice(0, 40)}...)`);
-  }
-  return html.slice(i + startMarker.length, j);
-}
-
-const tweetnaclSource = extract(
-  "/* === TWEETNACL_EMBED_START (tweetnacl 1.0.3, Unlicense) === */",
-  "/* === TWEETNACL_EMBED_END === */"
-);
-const appSource = extract("/* === DTN_APP_SCRIPT_START === */", "/* === DTN_APP_SCRIPT_END === */");
-
-// The DOM wiring is guarded behind `typeof document`, so no document stub is
-// needed; window/self let the tweetnacl UMD and window.DTN export attach.
-const sandbox = { crypto: globalThis.crypto, console: { log() {}, error: console.error } };
-sandbox.window = sandbox;
-sandbox.self = sandbox;
-vm.createContext(sandbox);
-vm.runInContext(tweetnaclSource + "\n" + appSource, sandbox, { filename: "node/web/index.html" });
+const sandbox = loadSpaSandbox();
 
 const DTN = sandbox.DTN;
 if (!DTN || typeof DTN.buildEnvelope !== "function" || !DTN.nacl) {
-  throw new Error("DTN engine did not load from index.html (nacl or buildEnvelope missing)");
+  throw new Error("DTN engine did not load from the index.html script list (nacl or buildEnvelope missing)");
 }
 
 let passed = 0;
@@ -351,4 +323,4 @@ console.log("== engine exposure ==");
 ok(sandbox.window.DTN === DTN && sandbox.self.DTN === DTN,
    "the shipped file exposes window.DTN with the pure engine (DOM-free)");
 
-console.log(`\nPASS: ${passed} assertions against node/web/index.html embedded engine`);
+console.log(`\nPASS: ${passed} assertions against the SPA engine (index.html script order)`);

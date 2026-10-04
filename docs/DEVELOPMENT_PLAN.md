@@ -222,7 +222,15 @@ offgrid/
 │   │   ├── api/middleware.go
 │   │   ├── cleanup/cleanup.go           # 15 min ticker
 │   │   └── envelope/envelope.go         # Envelope type + validation + Phase 2/3 doc
-│   ├── web/index.html                   # Module C (SPA source, embedded)
+│   ├── web/                             # Module C (SPA source, embedded)
+│   │   ├── index.html                   # page skeleton; links css/ + js/ (CSP: 'self')
+│   │   ├── css/app.css                  # all styles
+│   │   └── js/                          # plain ES5 scripts, loaded in dependency order
+│   │       ├── vendor/nacl.min.js       # tweetnacl 1.0.3, verbatim embed (Unlicense)
+│   │       ├── constants.js … mule.js   # pure protocol engine (§5/§6/§8/§11)
+│   │       ├── engine.js                # window.DTN export (headless-testable)
+│   │       ├── store.js                 # IndexedDB local store
+│   │       └── ui.js                    # DOM wiring (initUi)
 │   ├── build.sh                         # cross-compile linux/arm64 + linux/arm
 │   └── storage_test.go / api_test.go …  # unit tests
 ├── raspberry/                           # Module A — infrastructure
