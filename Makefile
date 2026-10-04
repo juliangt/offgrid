@@ -5,7 +5,7 @@
 #
 #   make build       host dev binary (node/dtn-node-dev, the go:embeded SPA inside)
 #   make build-all   the full cross-compile matrix of node/build.sh (arm64/armv7/armv6 + dev)
-#   make test        the full suite: go test, the 3 headless SPA tests, the
+#   make test        the full suite: go test, the 4 headless SPA tests, the
 #                    curl E2E and the Pi hardening structure test
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
@@ -39,6 +39,7 @@ test:
 	node tests/crypto_roundtrip.mjs
 	node tests/spa_structure.mjs
 	node tests/version_migration.mjs
+	node tests/chunking.mjs
 	bash tests/sync_e2e.sh
 	bash tests/hardening_structure.sh
 

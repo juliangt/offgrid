@@ -56,6 +56,17 @@
 #       (The per-IP 429 shed of the diagnostics budget is unit-covered:
 #       driving 61 requests through curl here would be slow and flaky.)
 #
+#   13. §4.4 long-message chunking (issue #24): a 1 KiB UTF-8 message built
+#       with the SHIPPED SPA engine (loaded headlessly via
+#       tests/helpers/spa_loader.mjs) travels as ordinary chunk envelopes
+#       Alice -> node A -> mule (carrying the exact served bytes) -> node B
+#       -> Bob; Bob's side decrypts and reassembles the SERVED envelopes —
+#       fed reversed and with one duplicate — into ONE message whose
+#       sha256 equals the original text; every served envelope is a valid
+#       §3.1 v1 envelope within the §8.2 payload bounds [248, 400] (the
+#       daemons accepted nothing a node would reject); a one-chunk-short
+#       partial never renders as a complete message.
+#
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
 # spec; the expected id is asserted, so parser drift fails loudly). Its
@@ -81,9 +92,11 @@
 # Usage:  bash tests/sync_e2e.sh
 # Env:    PORT_A (default 18091), PORT_B (default 18092), PORT_C (default
 #         18093), PORT_E (default 18094)
-# Needs:  go (daemon build), curl, and for sections 11-12 (§15.7 a/b) the
-#         sqlite3 CLI plus shasum (macOS) / sha256sum (GNU) for the database
-#         fixtures and the §15.7 b byte fingerprint.
+# Needs:  go (daemon build), curl, node (the §4.4 chunking E2E drives the
+#         shipped SPA engine via tests/helpers/spa_loader.mjs), and for
+#         sections 11-12 (§15.7 a/b) the sqlite3 CLI plus shasum (macOS) /
+#         sha256sum (GNU) for the database fixtures and the §15.7 b byte
+#         fingerprint.
 # Exit:   0 = every assertion passed; 1 = at least one failed.
 
 set -euo pipefail
@@ -320,7 +333,7 @@ check "spec §3.2 verbatim envelope is expired at run time (created_at + ttl < n
 #   bob   X25519 pubkey  : RFC 7748 §6.1 "Bob" key, Base64
 # ---------------------------------------------------------------------------
 ALICE_DIR='{"alias":"alice","pubkey":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","x25519":"hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="}'
-BOB_DIR='{"alias":"bob","pubkey":"MAyclgO5Kks57TlYv5JAEUgE20/TcwEsDKR0MtY0Ja4=","x25519":"PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw="}'
+BOB_DIR='{"alias":"bob","pubkey":"MAyclgO5Kks57TlYv5JAEUgE20/TcwEsDKR0MtY0Ja4=","x25519":"3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08="}'
 
 printf '%s' "$ALICE_DIR" > "$WORK/reg_alice.json"
 printf '%s' "$BOB_DIR"   > "$WORK/reg_bob.json"
@@ -773,6 +786,82 @@ for secret in "$ENV_ID" "$ENV_HINT" "$ENV_PAYLOAD" "alice" "bob" \
     if grep -qF "$secret" "$WORK/status_body" 2>/dev/null; then PRIVACY=leak; fi
 done
 check "no envelope id, hint, payload, alias or key appears in health or status (§13)" "clean" "$PRIVACY"
+
+# ---------------------------------------------------------------------------
+# 13. §4.4 long-message chunking (issue #24): a 1 KiB message survives the
+#     full Alice -> node A -> mule -> node B -> Bob path as ordinary
+#     envelopes and reassembles into ONE message at Bob's client. Both
+#     endpoints run the SHIPPED SPA engine headlessly
+#     (tests/helpers/spa_loader.mjs loads exactly the files index.html
+#     serves): the fixture builds real chunk envelopes, the mule carries
+#     the exact bytes it pulled, and Bob decrypts + reassembles the
+#     envelopes the REAL daemon served. Nodes and mules see nothing new
+#     (§4.4 lives inside the box; the §8.2 payload bounds still bind per
+#     envelope and are asserted on the SERVED bytes).
+#     (Runs after section 12 so the §10.7 counter assertions on node A
+#     describe the same aggregate history.)
+# ---------------------------------------------------------------------------
+log "building the §4.4 1 KiB chunk fixture with the shipped SPA engine"
+node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" fixture "$WORK/chunk_fixture.json" >"$WORK/chunk_fixture.log" 2>&1 || {
+    log "fixture build failed"; cat "$WORK/chunk_fixture.log" >&2; exit 1;
+}
+CHUNK_PARTS="$(sed -n 's/^parts=//p' "$WORK/chunk_fixture.log")"
+CHUNK_BYTES="$(sed -n 's/^text_bytes=//p' "$WORK/chunk_fixture.log")"
+CHUNK_SHA="$(sed -n 's/^text_sha256=//p' "$WORK/chunk_fixture.log")"
+check "§4.4 fixture text is exactly 1 KiB (1024 UTF-8 bytes)" "1024" "$CHUNK_BYTES"
+check "§4.4 fixture splits into 2..16 envelopes (the §4.4 cap)" \
+    "ok" "$([ "$CHUNK_PARTS" -ge 2 ] 2>/dev/null && [ "$CHUNK_PARTS" -le 16 ] && echo ok || echo bad)"
+
+node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" bodies "$WORK/chunk_fixture.json" "$WORK" "$ENV_ID" >/dev/null 2>&1 || {
+    log "chunk sync bodies failed to build"; exit 1;
+}
+
+# Alice pushes ALL chunk envelopes to node A in one sync (§10.4: their ids
+# ride in known_ids — plus the §3 fixture envelope's id, still servable on
+# node A — so nothing is pulled back).
+code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/alice_push.json")"
+check "alice pushes the 1 KiB message as $CHUNK_PARTS chunk envelopes to node A -> 200" "200" "$code"
+check "chunk push response pulls nothing back (own ids in known_ids)" "0" "$(json_count_envelopes)"
+
+# The mule pulls everything it does not know from node A and carries the
+# SERVED bytes to node B (the §3 fixture envelope is already known to it).
+make_sync_body "$WORK/sync_mule_chunk_a.json" "[\"$ENV_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_mule_chunk_a.json")"
+check "mule syncs with node A for the chunk envelopes -> 200" "200" "$code"
+check "mule pulls exactly $CHUNK_PARTS chunk envelopes from node A" "$CHUNK_PARTS" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/mule_chunk_pull.json"
+node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" carry "$WORK/mule_chunk_pull.json" "$WORK/mule_chunk_push.json" >"$WORK/chunk_carry.log" 2>&1
+check "mule carries exactly the envelopes it pulled" "$CHUNK_PARTS" "$(sed -n 's/^carried=//p' "$WORK/chunk_carry.log")"
+code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/mule_chunk_push.json")"
+check "mule drops the chunk envelopes at node B -> 200 (nothing a node would reject)" "200" "$code"
+
+# Bob pulls from node B — known_ids exclude the §3 fixture envelope; the
+# expired §6b verbatim envelope is TTL-filtered — so exactly the chunks
+# arrive, in the node's own (id-tiebreak) order.
+make_sync_body "$WORK/sync_bob_chunk.json" "[\"$ENV_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_bob_chunk.json")"
+check "bob pulls from node B -> 200" "200" "$code"
+check "bob pulls exactly the $CHUNK_PARTS chunk envelopes" "$CHUNK_PARTS" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/bob_chunk_pull.json"
+
+# Bob's client (the shipped SPA engine): decrypt + reassemble the served
+# bytes, fed REVERSED and with one DUPLICATE envelope. The verify mode
+# always exits 0; the checks below carry its verdicts.
+CHUNK_VERIFY="$(node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" verify "$WORK/chunk_fixture.json" "$WORK/bob_chunk_pull.json" 2>"$WORK/chunk_verify.log" || true)"
+check "§4.4 reassembly: every served envelope within the §8.2 payload bounds [248,400]" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^bounds=//p')"
+check "§4.4 reassembly: every served envelope is a valid ordinary §3.1 envelope" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^shapes=//p')"
+check "§4.4 reassembly: reversed arrival order yields ONE complete message" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^reassembled=//p')"
+check "§4.4 reassembly: the duplicated chunk was absorbed (first write wins)" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^duplicates=//p')"
+check "§4.4 reassembly: one chunk short stays an incomplete partial (never rendered)" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^nocomplete=//p')"
+check "§4.4 reassembly: sha256 of the reassembled text equals the original 1 KiB text" \
+    "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^sha=//p')"
+check "§4.4 reassembly: reassembled text sha256 matches the fixture (E2E, real daemons)" \
+    "$CHUNK_SHA" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^reassembled_sha256=//p')"
 
 # ---------------------------------------------------------------------------
 # Summary.
