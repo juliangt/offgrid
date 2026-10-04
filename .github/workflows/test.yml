@@ -1,6 +1,11 @@
-# test.yml — CI gate for pushes to main and every pull request (issue #16
-# Phase 4). Runs the FULL documented suite (docs/BUILD.md §4) plus the chaos
-# suite:
+# test.yml — CI gate, MANUAL DISPATCH ONLY (coordination decision of
+# 2026-10-04). This workflow no longer runs on push or pull_request: it is
+# heavy (full documented suite + chaos failure-injection on ubuntu runners)
+# and is now fired on demand with `gh workflow run test [--ref <branch>]`.
+# Do NOT restore the old `push:`/`pull_request:` triggers; see the
+# coordination notice in AGENTS.md at the repo root. The job body below is
+# unchanged and still runs the FULL documented suite (docs/BUILD.md §4)
+# plus the chaos suite:
 #   * make test  — go unit tests, the 3 headless SPA tests, the curl E2E and
 #     the Pi hardening structure test (rootless, artifact-level);
 #   * make chaos — the failure-injection harness of tests/chaos/FAILURE_MATRIX.md.
@@ -12,10 +17,7 @@
 name: test
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -53,5 +55,5 @@ jobs:
       - name: Full suite (go test + SPA tests + E2E + hardening)
         run: make test
 
-      - name: Chaos suite (failure injection: kill/corrupt/full-disk/restart/flood/fuzz)
+      - name: "Chaos suite (failure injection: kill/corrupt/full-disk/restart/flood/fuzz)"
         run: make chaos
