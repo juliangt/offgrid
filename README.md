@@ -50,7 +50,7 @@ Development follows five sprints (see `PLAN_DESARROLLO.md` §5):
 | 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocolo.md`, threat model | **Complete** |
 | 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | **Complete** |
 | 2 | Module C: SPA + crypto engine + mule engine | **Complete** |
-| 3 | Module A: Raspberry Pi infrastructure | Pending |
+| 3 | Module A: Raspberry Pi infrastructure | **Complete** |
 | 4 | E2E integration, Module D final docs, build/deploy guide | Pending |
 
 Sprint 2 delivered the single-file SPA (`node/web/index.html`) with the
@@ -60,3 +60,14 @@ telemetry panel, the captive "open in your full browser" banner, the IndexedDB
 store (`dtn_local_store` v1) and the full mule sync engine (push/pull with
 FIFO transit capacity 100). The engine is verified by
 `node tests/crypto_roundtrip.mjs` (spec §6 test vectors included).
+
+Sprint 3 delivered the Module A network infrastructure in `raspberry/`: an
+open-AP `hostapd.conf` (channel 6, `ap_isolate=1`), `dnsmasq.conf` (DHCP pool
+10.42.0.50–250 with options 3/6 pointing at the node, wildcard DNS +
+`portal.red.local`), an idempotent firewall script (TCP/80 → 8080 REDIRECT,
+FORWARD policy DROP as the L3 half of client isolation), power trim
+(`config.txt` snippet + `dtn-power.service`, ~1 W target), a hardened
+`dtn-node.service` with sd_notify watchdog support (`internal/sdnotify`, pure
+Go) and a strictly idempotent `provision.sh` that switches Bookworm from
+NetworkManager to the classic ifupdown + hostapd + dnsmasq + iptables stack
+and never starts services mid-run — a reboot is the activation step.

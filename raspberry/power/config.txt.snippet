@@ -1,0 +1,38 @@
+# config.txt power-optimization snippet — off-grid DTN dead-drop node (Module A)
+# Install path: appended to /boot/firmware/config.txt (Raspberry Pi OS
+# Bookworm) or /boot/config.txt (legacy layouts). provision.sh resolves the
+# correct path and appends this block only once (idempotently).
+#
+# Goal: trim every watt the portal does not need. The node targets a ~1 W
+# continuous draw so a small solar panel + LiFePO4 battery can run it
+# indefinitely (sizing note: docs/hardware.md, Sprint 4).
+
+# Onboard analog audio output is unused by the portal; the codec burns a
+# little power and its module is dead weight.
+dtparam=audio=off
+
+# Bluetooth controller is unused (no Phase 1 transport); disabling it frees
+# the PL011 UART (handy for a serial console) and removes a radio from the
+# power budget.
+dtoverlay=disable-bt
+
+# LEDs: kill both front LEDs. A node is installed out in the field where a
+# blinking light attracts attention and wastes power. "activelow=on" is the
+# polarity needed to actually switch the LED off on Pi boards whose LEDs are
+# wired active-low; on boards where an LED is hardwired to the power rail
+# (e.g. PWR on some Zero models) these lines are ignored harmlessly.
+dtparam=act_led_trigger=none
+dtparam=act_led_activelow=on
+dtparam=pwr_led_trigger=none
+dtparam=pwr_led_activelow=on
+
+# Let HDMI blank fully instead of just dimming. Complemented by
+# dtn-power.service, which powers the display output off entirely after boot
+# (vcgencmd display_power 0 off) — config.txt alone cannot do that.
+hdmi_blanking=2
+
+# Wi-Fi power management: intentionally NOT disabled here and intentionally
+# NOT allowed to power-save either. An AP with radio power-save enabled drops
+# idle clients and mangles beacon timing; hostapd needs the radio always on.
+# The interface's power_save is forced off by provision.sh (post-up line in
+# /etc/network/interfaces.d/wlan0: "iw dev wlan0 set power_save off").

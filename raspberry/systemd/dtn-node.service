@@ -1,0 +1,53 @@
+# dtn-node.service — portal daemon unit for the off-grid DTN node (Module A)
+# Install path: /etc/systemd/system/dtn-node.service
+# Installed and enabled by provision.sh; provision.sh also creates the
+# unprivileged "dtn" user and /var/lib/dtn-node this unit depends on.
+
+[Unit]
+# network-online.target: the daemon binds :8080 on the static 10.42.0.1
+# address configured by provision.sh (ifupdown), which must exist first.
+# dtn-firewall.service: the port-80 -> 8080 redirect and the INPUT accepts must
+# be in place before the portal starts answering.
+Description=DTN dead-drop node daemon (portal.red.local:8080)
+Wants=network-online.target
+After=network-online.target dtn-firewall.service
+
+[Service]
+# Type=notify pairs with the daemon's internal/sdnotify package: the unit is
+# "started" only once the listener is actually bound (READY=1), and the
+# WatchdogSec below only counts because the daemon keeps pinging WATCHDOG=1.
+# A wedged daemon stops pinging and systemd kills and restarts it after
+# WatchdogSec; healthy pings arrive every WatchdogSec/2.
+Type=notify
+WatchdogSec=30
+Restart=always
+RestartSec=5
+
+# Unprivileged service account (nologin shell) created by provision.sh; the
+# database lives under /var/lib/dtn-node, writable only by this user/group.
+User=dtn
+Group=dtn
+
+ExecStart=/opt/dtn-node/dtn-node -addr :8080 -db /var/lib/dtn-node/node_storage.db
+
+# Hardening. The daemon is exposed to an open Wi-Fi network, so it runs with
+# the minimum set of privileges it needs:
+NoNewPrivileges=yes
+# Whole filesystem read-only except the database directory (SQLite WAL needs
+# real write access only there).
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dtn-node
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+# The Go runtime needs AF_UNIX (sd_notify, DNS nss), AF_INET/AF_INET6 (the
+# portal) and AF_NETLINK (interface/route lookups); everything else is barred.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Cap memory at 192M: the Zero 2 W has 512 MB shared with hostapd, dnsmasq
+# and the kernel; a runaway daemon must not OOM the AP stack. Normal RSS is
+# well under 32 MB, so 192M is a generous ceiling, not a budget.
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

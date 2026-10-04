@@ -1,0 +1,28 @@
+# dtn-firewall.service — boot-time firewall loader for the DTN node (Module A)
+# Install path: /etc/systemd/system/dtn-firewall.service
+# Runs /usr/local/sbin/dtn-firewall.sh (installed from raspberry/firewall/iptables.sh)
+# once at boot. The script is idempotent, so a manual re-run is always safe.
+
+[Unit]
+Description=DTN node firewall rules (port 80 to 8080 redirect, client isolation)
+
+# Deliberate ordering choice: WantedBy=multi-user.target with
+# Before=dtn-node.service — NOT network-pre.target.
+#
+# Why not network-pre: that target exists so firewall rules land before ANY
+# interface is configured, which matters for address-based rules on routers.
+# This ruleset is self-contained and matches purely by interface NAME
+# (-i wlan0), which iptables resolves lazily, so installing it before wlan0
+# exists is not required. Hooking network-pre would additionally couple our
+# start order to hostapd/dnsmasq (both order themselves after network-pre),
+# adding fragility for no benefit. The only ordering that actually matters is
+# "rules exist before the portal daemon answers", expressed by Before below.
+Before=dtn-node.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/dtn-firewall.sh
+
+[Install]
+WantedBy=multi-user.target
