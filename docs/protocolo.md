@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `PLAN_DESARROLLO.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `prompt_maestro_de_desarrollo.md` |
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Date** | 2026-10-03 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -224,6 +224,7 @@ All key generation and all nonces draw entropy exclusively from `crypto.getRando
 | Push envelopes per sync | ≤ 100 | More → 400. |
 | Sync request body | ≤ 1 MiB (1,048,576 bytes) | Larger → 413. |
 | `known_ids` per sync | ≤ 500 entries | More → 400. |
+| **Per-node envelope cap** | **5000 envelopes** | Anti-abuse storage guard (plan §7, "Llenado del nodo por abuso"): at or over the cap every push is rejected with `429 {"status":"error","error":"node_full"}` and nothing is stored (fail closed, §10.4). Pulls keep working on a full node. A batch accepted just below the cap may overshoot it by at most one request's worth of envelopes (≤ 100). |
 | Directory GET | ≤ 500 entries | 500 most recent by `last_seen DESC`. |
 | Cleanup worker interval | 15 minutes | Plus one run at daemon startup. |
 
@@ -286,7 +287,7 @@ Pragmas and connection policy (binding):
 - Listen address defaults to `:8080`. All API request/response bodies are `application/json; charset=utf-8` (the HTML endpoint is `text/html; charset=utf-8`).
 - Requests with a body MUST declare `Content-Type: application/json`, otherwise `400`.
 - Body size limit for POST endpoints: 1 MiB → `413` if exceeded.
-- Error responses use HTTP status codes `400` (malformed/invalid), `404` (unknown path), `405` (wrong method), `413` (body too large) with JSON body `{"status":"error","error":"<short_code>"}`.
+- Error responses use HTTP status codes `400` (malformed/invalid), `404` (unknown path), `405` (wrong method), `413` (body too large), `429` (node envelope cap reached, §8.1) with JSON body `{"status":"error","error":"<short_code>"}`.
 - Unknown paths → `404`. There is no SPA fallback: only `GET /` serves `index.html`.
 
 ### 10.2 Canonical-host middleware
@@ -510,11 +511,26 @@ So a short message fits one frame **iff `M ≤ 48`**; larger messages use genera
 - `alias` is omitted; receivers resolve the sender's alias from the directory via `k`. The signature covers `ts ‖ k ‖ m` (the exact analogue of §5.1 in binary form).
 - Sign-then-encrypt is preserved: `k` and `s` remain inside the ciphertext.
 
+### 14.4 Implementation anchors (where each mapping lives in the code)
+
+Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at every place a developer will touch the envelope. This §14 remains the **normative source**; the code comments below are summaries and MUST NOT diverge from it — when they do, this section wins.
+
+| Location (file + symbol) | What is anchored there |
+|---|---|
+| `node/internal/envelope/envelope.go` — doc comment on type `Envelope` | Complete mapping for the node implementation: frozen semantic field list, the JSON → CBOR field/type table, the L2CAP CoC frame layout (length prefix, one envelope = one SDU, MTU ≥ 512 B), `hop_count ≤ 7` reserved semantics (always 0/absent in Phase 1), the LoRa 222-byte budget with the 1-byte fragment header `win_id(4) \| idx(2) \| total(2)` and the short-message single-frame mode; references §14 as normative source. |
+| `node/web/index.html` — comment block immediately above `buildEnvelope` (pure-engine section 5) | Same mapping mirrored on the client implementation that produces Phase 1 envelopes, so SPA-side changes stay aware of the frozen fields and the Phase 2/3 encodings. |
+| `docs/protocolo.md` §14.2 / §14.3 (this document) | Normative math the anchors summarize: CBOR size derivation, fragment capacity (`2 × 221 = 442 ≥ 399`), short-mode 222-byte table. |
+
 ## 15. Conformance checklist
 
 **Module B (node daemon) MUST:** implement the schema and pragmas of §9; the six endpoints with the exact status codes, limits and redirect/exemption behavior of §10; envelope validation of §10.5; `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; no decryption, no signature verification, no `id` recomputation requirement.
 
 **Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the sync algorithm and silent-corruption handling of §11; display the canonical URL and the full-browser banner (§12, §13.4).
+
+## Changelog
+
+- **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `PLAN_DESARROLLO.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).
+- **1.0.0 (2026-10-03):** initial normative release.
 
 ---
 
