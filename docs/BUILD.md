@@ -99,9 +99,10 @@ bash tests/hardening_structure.sh
 
 Expected outputs:
 
-1. `go test ./... -count=1` — one `ok` line per package (the `main` package has no test files):
+1. `go test ./... -count=1` — one `ok` line per package:
 
    ```
+   ok  	offgrid/dtn-node
    ok  	offgrid/dtn-node/internal/api
    ok  	offgrid/dtn-node/internal/envelope
    ok  	offgrid/dtn-node/internal/sdnotify
@@ -143,6 +144,8 @@ Expected outputs:
    ```
 
    It needs no root, no hardware and no network: it asserts the anti-circumvention hardening of issue #16 Track 1 ("the AP is not free Internet") on the GENERATED artifacts — `bash -n` over every provisioning script; hostapd `ap_isolate=1` plus the control socket; dnsmasq's authoritative wildcard for the portal with the query log confined to tmpfs; the complete firewall ruleset via `raspberry/firewall/iptables.sh --print` (rootless rule-generation separation): FORWARD policy DROP with every rule scoped to the client subnet, the explicit VPN/DoT/proxy/DNS-egress escape-route kills, per-source DNS/ICMP rate limits, portal connlimit + SYN hashlimit on 8080, the captive-portal REDIRECT and the runtime shield chains; the tc cake shaping stream (`traffic-shaping.sh --dry-run`: dual-dsthost egress, IFB-mirrored dual-srchost ingress); and both shields' dry-run behavior against synthetic fixtures (shed the flooder/quota hog/connection hoarder, keep honest clients, never emit or persist DNS names or MACs). The Track 3 section (issue #16, hostile clients + node hardening) extends the same artifact-level approach: the firewall's client→tcp/22 INPUT kill (explicit drop by default, `ALLOW_SSH=1` opt-in accept); the daemon unit's hardening set (unprivileged `User=`, `ProtectSystem=strict` + `ReadWritePaths`, `Restart=always`, `WatchdogSec`, `RestrictSUIDSGID`, `MemoryDenyWriteExecute`); the sshd drop-in (keys only, no root login) and `harden-ssh.sh`'s validate-before-install; the read-only-root twins (`--dry-run`/`--status`, the durable `/var/lib/dtn-node` bind-mount inside the generated initramfs script, the rollback twin); the network watchdog (per-component restart plan, restart-storm guard gating, tmpfs budget state); and the counters-only telemetry (one aggregated integer line, no IP/MAC ever leaves the parsers, `all_sta` never invoked).
+
+   The design behind these artifact assertions — the adversarial assumptions, the per-defense mapping with regression tests, the deliberate non-defenses and the shed → survive → self-recover contract — is `docs/hardening.md`.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
@@ -251,7 +254,7 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 
 ## 8. Chaos suite
 
-`make chaos` (or `bash tests/chaos/run_all.sh`) is the failure-injection harness of issue #16 Phase 4, Track 4: it breaks the node ON PURPOSE, one injection per script, and asserts the three chaos properties — **degrade** (clean shed, never chaos), **auto-recover** (ready again without operator help) and **honest data expectations** (stored legitimate envelopes survive byte-identical, or the loss is explicitly accepted and evidenced). The authoritative failure-mode matrix — one row per (component × failure), with the injection, expected behavior, data expectation and verifying artifact per row — lives in `tests/chaos/FAILURE_MATRIX.md`. Rows that cannot be automated (AP process death, power yanks, SD pulls — hardware by nature) point at the FIELD procedures section of that same document and are manual by design.
+`make chaos` (or `bash tests/chaos/run_all.sh`) is the failure-injection harness of issue #16 Phase 4, Track 4: it breaks the node ON PURPOSE, one injection per script, and asserts the three chaos properties — **degrade** (clean shed, never chaos), **auto-recover** (ready again without operator help) and **honest data expectations** (stored legitimate envelopes survive byte-identical, or the loss is explicitly accepted and evidenced). The authoritative failure-mode matrix — one row per (component × failure), with the injection, expected behavior, data expectation and verifying artifact per row — lives in `tests/chaos/FAILURE_MATRIX.md`. Rows that cannot be automated (AP process death, power yanks, SD pulls — hardware by nature) point at the FIELD procedures section of that same document and are manual by design. The field-operations half — reading the counters-only telemetry, detecting abuse, and the quarantine/remount/reflash procedures that matrix references — is `docs/RUNBOOK.md`.
 
 The automated scripts, in `run_all.sh` order (each also runs standalone; they own `127.0.0.1` ports `18095-18099`, disjoint from the E2E's `18091-18094`):
 

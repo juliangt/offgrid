@@ -113,6 +113,8 @@ offgrid/
 | [`docs/BUILD.md`](docs/BUILD.md) | Build, run locally, test and deploy to a Pi (online / offline / manual), plus troubleshooting and on-site checklists |
 | [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
+| [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), escalation |
 | [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
 | [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
 

@@ -26,7 +26,7 @@ Reading guide:
   - *accepted loss* — the failure mode may legitimately destroy data. A
     **quarantine counts as loss WITH evidence preserved**: every envelope in
     the `.corrupt-<ts>` file is gone forever, but the file stays on disk as
-    operator-recoverable evidence (runbook of a later phase covers examining
+    operator-recoverable evidence (`docs/RUNBOOK.md` §4.3 covers examining
     and discarding it). Un-ACKed in-flight writes are always accepted loss
     (no client ever saw a 200 for them).
 
