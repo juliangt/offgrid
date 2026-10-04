@@ -1,0 +1,57 @@
+# test.yml — CI gate for pushes to main and every pull request (issue #16
+# Phase 4). Runs the FULL documented suite (docs/BUILD.md §4) plus the chaos
+# suite:
+#   * make test  — go unit tests, the 3 headless SPA tests, the curl E2E and
+#     the Pi hardening structure test (rootless, artifact-level);
+#   * make chaos — the failure-injection harness of tests/chaos/FAILURE_MATRIX.md.
+#     The chaos scripts are Linux-first for exactly this job: on the ubuntu
+#     runner every injection runs, including the full-disk one (sudo loop
+#     mount is available); a host without volume tooling would SKIP that
+#     injection instead of failing.
+# Lint gates (gofmt/go vet, docs/BUILD.md §4) run as their own fast step.
+name: test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain versions follow the repo's documented pins (docs/BUILD.md
+      # §1): Go from node/go.mod, Node 22 for the headless SPA tests.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: node/go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The E2E (§15.7 a/b fixtures) and the chaos corrupt/janitor scripts
+      # need the sqlite3 CLI; install it only if the runner image lacks it.
+      - name: Ensure sqlite3 CLI
+        run: |
+          if ! command -v sqlite3 >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y sqlite3
+          fi
+
+      - name: Lint gates (gofmt, go vet)
+        run: |
+          cd node
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+
+      - name: Full suite (go test + SPA tests + E2E + hardening)
+        run: make test
+
+      - name: Chaos suite (failure injection: kill/corrupt/full-disk/restart/flood/fuzz)
+        run: make chaos

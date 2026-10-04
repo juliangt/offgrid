@@ -8,9 +8,10 @@ Step-by-step instructions to build, test, run and deploy the off-grid DTN node (
 |---|---|---|
 | Go | ≥ 1.22 (verified with go1.27.1) | node daemon build and unit tests |
 | Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs`, `tests/spa_structure.mjs` and `tests/version_migration.mjs` only; nothing in the product needs Node |
-| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `tests/hardening_structure.sh`, `raspberry/provision.sh`, `raspberry/install.sh` |
-| curl | any | `tests/sync_e2e.sh`, deployment verification |
-| sqlite3 | any (CLI) | `tests/sync_e2e.sh` §15 coverage only: schema-1 fixture crafting, migration and downgrade-refusal assertions (with `shasum`/`sha256sum` for the §15.7 b byte fingerprint) |
+| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `tests/hardening_structure.sh`, the chaos suite (`tests/chaos/`), `raspberry/provision.sh`, `raspberry/install.sh` |
+| make | any | the one-command entries `make test` / `make chaos` / `make build` (optional: every recipe is a plain shell command listed below) |
+| curl | any | `tests/sync_e2e.sh`, the chaos suite, deployment verification |
+| sqlite3 | any (CLI) | `tests/sync_e2e.sh` §15 coverage: schema-1 fixture crafting, migration and downgrade-refusal assertions (with `shasum`/`sha256sum` for the §15.7 b byte fingerprint); chaos suite: corrupt-database and flooded-store fixtures (with `truncate`/`dd`) |
 | git | any | checking out this repository |
 
 No C toolchain is needed: the daemon uses the pure-Go SQLite driver (`modernc.org/sqlite`), so `CGO_ENABLED=0` builds are fully static.
@@ -64,10 +65,17 @@ Flags:
 
 ## 4. Run all tests
 
-From the repository root:
+One command from the repository root (the exact sequence below, wrapped):
 
 ```bash
-# 1. Go unit tests (storage, api, envelope, sdnotify)
+make test
+```
+
+The explicit steps, for CI copies and non-make shells:
+
+```bash
+# 1. Go unit tests (storage, api, envelope, sdnotify — including the fuzz
+#    targets' seed corpora)
 cd node && go test ./... -count=1 && cd ..
 
 # 2. Crypto round-trip against the SPA engine (scripts in index.html order)
@@ -136,7 +144,9 @@ Expected outputs:
 
    It needs no root, no hardware and no network: it asserts the anti-circumvention hardening of issue #16 Track 1 ("the AP is not free Internet") on the GENERATED artifacts — `bash -n` over every provisioning script; hostapd `ap_isolate=1` plus the control socket; dnsmasq's authoritative wildcard for the portal with the query log confined to tmpfs; the complete firewall ruleset via `raspberry/firewall/iptables.sh --print` (rootless rule-generation separation): FORWARD policy DROP with every rule scoped to the client subnet, the explicit VPN/DoT/proxy/DNS-egress escape-route kills, per-source DNS/ICMP rate limits, portal connlimit + SYN hashlimit on 8080, the captive-portal REDIRECT and the runtime shield chains; the tc cake shaping stream (`traffic-shaping.sh --dry-run`: dual-dsthost egress, IFB-mirrored dual-srchost ingress); and both shields' dry-run behavior against synthetic fixtures (shed the flooder/quota hog/connection hoarder, keep honest clients, never emit or persist DNS names or MACs). The Track 3 section (issue #16, hostile clients + node hardening) extends the same artifact-level approach: the firewall's client→tcp/22 INPUT kill (explicit drop by default, `ALLOW_SSH=1` opt-in accept); the daemon unit's hardening set (unprivileged `User=`, `ProtectSystem=strict` + `ReadWritePaths`, `Restart=always`, `WatchdogSec`, `RestrictSUIDSGID`, `MemoryDenyWriteExecute`); the sshd drop-in (keys only, no root login) and `harden-ssh.sh`'s validate-before-install; the read-only-root twins (`--dry-run`/`--status`, the durable `/var/lib/dtn-node` bind-mount inside the generated initramfs script, the rollback twin); the network watchdog (per-component restart plan, restart-storm guard gating, tmpfs budget state); and the counters-only telemetry (one aggregated integer line, no IP/MAC ever leaves the parsers, `all_sta` never invoked).
 
-Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors.
+Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
+
+All of section 4 runs in CI on every push to `main` and every pull request (`.github/workflows/test.yml`, ubuntu-latest: setup-go pinned by `node/go.mod`, Node 22, `make test` then `make chaos`, minimal `contents: read` permissions). The chaos suite has its own section below.
 
 ## 5. Deploy to a Raspberry Pi (Zero W or newer)
 
@@ -238,3 +248,24 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 - Database default location on a provisioned node: `/var/lib/dtn-node/node_storage.db` (plus `-wal`/`-shm` while running), owned `dtn:dtn`, mode 0750 on the directory.
 - On first start the daemon creates the database file and its parent directory if missing and logs it, applies the schema of spec §9 idempotently, runs the expired-envelope sweep once, then binds the socket and announces readiness.
 - Backup = stop the unit and copy the three files (or use `sqlite3 .backup`). Envelope data is disposable by design (E2EE dead drop), the directory table is the only state worth keeping.
+
+## 8. Chaos suite
+
+`make chaos` (or `bash tests/chaos/run_all.sh`) is the failure-injection harness of issue #16 Phase 4, Track 4: it breaks the node ON PURPOSE, one injection per script, and asserts the three chaos properties — **degrade** (clean shed, never chaos), **auto-recover** (ready again without operator help) and **honest data expectations** (stored legitimate envelopes survive byte-identical, or the loss is explicitly accepted and evidenced). The authoritative failure-mode matrix — one row per (component × failure), with the injection, expected behavior, data expectation and verifying artifact per row — lives in `tests/chaos/FAILURE_MATRIX.md`. Rows that cannot be automated (AP process death, power yanks, SD pulls — hardware by nature) point at the FIELD procedures section of that same document and are manual by design.
+
+The automated scripts, in `run_all.sh` order (each also runs standalone; they own `127.0.0.1` ports `18095-18099`, disjoint from the E2E's `18091-18094`):
+
+| Script | Injection | Core assertions |
+|---|---|---|
+| `chaos_kill_mid_sync.sh` | SIGKILL mid-sync under a background flood of 100-envelope POSTs | ready again, zero `.corrupt-*` (WAL atomicity), seeded envelopes byte-identical, fresh sync works |
+| `chaos_corrupt_db.sh` | db truncated to 30% / garbage header / `-wal` truncated after SIGKILL | the `storage.Open` contract: quarantine `.corrupt-<ts>` + rebuilt store serving (or loud non-zero exit without side effects) — never a half-broken serve; healthy main db never quarantined; pushes accepted again |
+| `chaos_full_disk.sh` | 8 MiB loopback volume filled to ENOSPC while the daemon runs on it | push sheds cleanly in the 507/429 family, daemon alive, read path serves, no quarantine; pushes accepted again once space is freed |
+| `chaos_restart_under_load.sh` | 6 concurrent workers (valid + junk + pull-only) while the daemon is SIGTERM-restarted 4 times | only the clean answer set (200/400/413/429/507), zero hangs (hard curl timeouts), connection drops confined to restart windows, seeded data survives |
+| `chaos_janitor_flood.sh` | store crafted to the 5000-row cap (4500 expired + 500 live) + background writer hammering during startup | §10.6 sweep completes within a bounded time under write pressure (not starved), expired purged, live kept byte-identical, capacity reclaimed |
+| `chaos_fuzz_parsers.sh` | Go native fuzzing of the parsers (`FuzzParseEnvelope`, `FuzzSyncHandler`, committed in-package) | untrusted bytes → decode/validation error or 200 — never a panic, never a 5xx; seed corpora run under plain `go test` |
+
+**SKIP semantics.** A script whose injection the host cannot perform prints `SKIP: <reason>` lines and exits 0 — a skip NEVER fails the run (`run_all.sh` aggregates them into its summary as `PASS (N skip(s))`). This is the platform escape hatch: the full-disk injection needs volume tooling (macOS: `hdiutil`, rootless; Linux: `sudo` + `losetup` + `mkfs.ext*`, present on CI runners), the corrupt/janitor scripts need the `sqlite3` CLI and `truncate`. The four core scripts (kill, corrupt, restart, janitor) have no such dependency and must actually PASS everywhere.
+
+**Exit codes and determinism.** Every script follows the `tests/sync_e2e.sh` PASS/FAIL counter style, exits 0 all-pass / 1 any-fail, builds its own daemon binary into a temp dir, and cleans up after itself via EXIT traps (daemons killed, volumes detached, temp dirs removed) even on failure.
+
+**Field chaos.** The hardware half of the discipline — repeated power yanks, reboot storms, a hostile station saturating the AP while a legitimate mule syncs, SD pull mid-write, hostapd/dnsmasq process death — is manual by nature and recorded in the FIELD section of `tests/chaos/FAILURE_MATRIX.md`, each procedure with its pass/degrade/fail template. Run it on real hardware before any deployment; the automated suite above is the machine-checked subset of the same matrix.
