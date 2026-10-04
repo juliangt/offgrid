@@ -29,7 +29,7 @@
 #   COUNTRY=AR ./provision.sh   # regulatory country written into hostapd.conf
 #   ALLOW_SSH=1 ./provision.sh  # firewall accepts SSH from AP clients (off by default)
 #
-# See DEVELOPMENT_PLAN.md §1.6 (NetworkManager vs classic stack — BINDING
+# See docs/DEVELOPMENT_PLAN.md §1.6 (NetworkManager vs classic stack — BINDING
 # DECISION), §5 Sprint 3 and docs/protocol.md §12 (canonical origin).
 
 set -euo pipefail

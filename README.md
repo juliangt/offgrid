@@ -30,8 +30,8 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 - **`docs/protocol.md`** — the *normative* protocol specification: envelope format, canonical serialization, key derivations (`id`, `dest_hint`), crypto primitives, binding limits, node SQLite schema and API behavior, threat model and the Phase 2/3 evolution mapping (§14, with §14.4 listing where each mapping lives in the code). If you implement Modules B or C, start there.
 - **`docs/BUILD.md`** — step-by-step build, run, test and Raspberry Pi deployment guide, with troubleshooting.
 - **`docs/hardware.md`** — solar + LiFePO4 sizing math, wiring, SD/enclosure guidance and the node assembly checklist.
-- **`DEVELOPMENT_PLAN.md`** — binding development plan: design decisions, architecture, sprint breakdown and acceptance criteria.
-- **`MASTER_DEVELOPMENT_PROMPT.md`** — original master specification (source of truth for requirements).
+- **`docs/DEVELOPMENT_PLAN.md`** — binding development plan: design decisions, architecture, sprint breakdown and acceptance criteria.
+- **`docs/MASTER_DEVELOPMENT_PROMPT.md`** — original master specification (source of truth for requirements).
 
 ## Repository layout
 
@@ -61,7 +61,7 @@ All three must pass; `bash tests/sync_e2e.sh` additionally simulates the full Al
 
 ## Acceptance traceability
 
-Translation of `DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance criterion and where it is implemented:
+Translation of `docs/DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance criterion and where it is implemented:
 
 | Master-prompt criterion | Where implemented |
 |---|---|
@@ -83,7 +83,7 @@ Translation of `DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance crit
 
 ## Status
 
-Development follows five sprints (see `DEVELOPMENT_PLAN.md` §5):
+Development follows five sprints (see `docs/DEVELOPMENT_PLAN.md` §5):
 
 | Sprint | Scope | Status |
 |---|---|---|

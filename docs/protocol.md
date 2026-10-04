@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Document source** | `DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `MASTER_DEVELOPMENT_PROMPT.md` |
+| **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
 | **Version** | 1.1.1 |
 | **Date** | 2026-10-03 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
@@ -529,10 +529,10 @@ Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at ever
 
 ## Changelog
 
-- **1.1.1 (2026-10-04, documentation migration):** documentation-only change — this file was renamed from `docs/protocolo.md` to `docs/protocol.md` and its source references updated to the renamed `DEVELOPMENT_PLAN.md` and `MASTER_DEVELOPMENT_PROMPT.md`, as part of the repository-wide English documentation migration (issue #6). No field, limit, endpoint behavior or other normative content changed.
-- **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `DEVELOPMENT_PLAN.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).
+- **1.1.1 (2026-10-04, documentation migration):** documentation-only change — this file was renamed from `docs/protocolo.md` to `docs/protocol.md` and its source references updated to the renamed `docs/DEVELOPMENT_PLAN.md` and `docs/MASTER_DEVELOPMENT_PROMPT.md`, as part of the repository-wide English documentation migration (issue #6). No field, limit, endpoint behavior or other normative content changed.
+- **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `docs/DEVELOPMENT_PLAN.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).
 - **1.0.0 (2026-10-03):** initial normative release.
 
 ---
 
-*End of normative specification. Changes require a version bump of this document and a corresponding update to `DEVELOPMENT_PLAN.md` §1.7.*
+*End of normative specification. Changes require a version bump of this document and a corresponding update to `docs/DEVELOPMENT_PLAN.md` §1.7.*
