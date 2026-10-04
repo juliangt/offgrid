@@ -176,6 +176,11 @@ func (s *Store) PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelo
 		if err := rows.Scan(&e.ID, &e.DestHint, &e.CreatedAt, &e.TTL, &e.Payload); err != nil {
 			return nil, fmt.Errorf("storage: scan envelope: %w", err)
 		}
+		// The §9 schema does not persist `v`: only envelopes with v == 1 pass
+		// push validation (§10.5), so every stored row IS a v=1 envelope and
+		// the reconstruction must say so — a pulled envelope marshaled with
+		// v=0 is invalid per §3.1 and clients would rightly reject it.
+		e.V = 1
 		result = append(result, e)
 	}
 	if err := rows.Err(); err != nil {
