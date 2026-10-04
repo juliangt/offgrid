@@ -17,12 +17,14 @@ import (
 	"embed"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -45,6 +47,28 @@ const cleanupInterval = 15 * time.Minute
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
 
+// ensureDBDir creates the parent directory of dbPath when it does not exist
+// yet, so a cold start succeeds on a fresh filesystem — e.g. -db
+// /var/lib/dtn-node/node_storage.db on a stock system, where provision.sh
+// normally owns that directory but a manual run must not die on first boot.
+// It reports whether a directory was created (so the caller can log it);
+// bare filenames in the current directory (dir == ".") are a no-op.
+func ensureDBDir(dbPath string) (bool, error) {
+	dir := filepath.Dir(dbPath)
+	if dir == "" || dir == "." {
+		return false, nil
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		// Directory exists, or stat failed for another reason: in that case
+		// storage.Open below surfaces the real error.
+		return false, nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return false, fmt.Errorf("create data directory %s: %w", dir, err)
+	}
+	return true, nil
+}
+
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("dtn-node: ")
@@ -56,6 +80,16 @@ func main() {
 	indexHTML, err := fs.ReadFile(webFS, "web/index.html")
 	if err != nil {
 		log.Fatalf("embedded web/index.html is missing: %v", err)
+	}
+
+	// Cold start: create the -db parent directory when missing (log it, since
+	// an unexpected directory in the filesystem is worth knowing about).
+	created, err := ensureDBDir(*dbPath)
+	if err != nil {
+		log.Fatalf("cannot prepare database location: %v", err)
+	}
+	if created {
+		log.Printf("cold start: created data directory %s", filepath.Dir(*dbPath))
 	}
 
 	store, err := storage.Open(*dbPath)

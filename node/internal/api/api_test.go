@@ -459,6 +459,58 @@ func TestSyncDefaultsAndLimits(t *testing.T) {
 	}
 }
 
+// TestSyncNodeFullReturns429 verifies the per-node envelope cap of §8.1
+// (anti-abuse hardening, plan §7): a store filled to the 5000-envelope cap
+// rejects further pushes with 429 and the node_full error code, while pulls
+// keep serving.
+func TestSyncNodeFullReturns429(t *testing.T) {
+	h, store := newTestHandler(t)
+	now := time.Now().Unix()
+
+	fill := make([]envelope.Envelope, 0, 5000)
+	for i := 0; i < 5000; i++ {
+		fill = append(fill, validEnv(hexID(i), now))
+	}
+	if inserted, err := store.InsertEnvelopes(fill); err != nil || inserted != 5000 {
+		t.Fatalf("fill store to cap: got %d inserted, err=%v", inserted, err)
+	}
+
+	// One more envelope over the API: 429 with the node_full code.
+	rec := postJSON(t, h, "/api/v1/sync", map[string]any{
+		"push_envelopes": []envelope.Envelope{validEnv(hexID(99999), now)},
+	})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("push at node capacity: got %d, want 429 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil || errBody["error"] != "node_full" {
+		t.Fatalf("429 must carry the node_full code, got %s", rec.Body.String())
+	}
+
+	// The rejected envelope must not have been stored (fail closed).
+	ids := make([]string, 0, 5000)
+	for _, e := range fill {
+		ids = append(ids, e.ID)
+	}
+	leftover, err := store.PullEnvelopes(ids, 200, now)
+	if err != nil || len(leftover) != 0 {
+		t.Fatalf("rejected push must store nothing, got %+v err=%v", leftover, err)
+	}
+
+	// Pulls keep working on the full node.
+	rec = postJSON(t, h, "/api/v1/sync", map[string]any{})
+	var resp struct {
+		Status        string              `json:"status"`
+		PullEnvelopes []envelope.Envelope `json:"pull_envelopes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rec.Code != http.StatusOK || resp.Status != "ok" || len(resp.PullEnvelopes) != 50 {
+		t.Fatalf("pull on a full node must still work, got %d / %+v", rec.Code, resp)
+	}
+}
+
 // TestSyncInvalidEnvelopes verifies the §10.5 push-path validation: any
 // invalid envelope rejects the whole request (fail closed) and stores nothing.
 func TestSyncInvalidEnvelopes(t *testing.T) {

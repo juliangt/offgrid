@@ -21,13 +21,13 @@ cd node
 ./build.sh
 ```
 
-The script cross-compiles fully static binaries (`-trimpath -ldflags "-s -w"`, CGO disabled). Outputs, all gitignored (sizes measured with go1.27.1, darwin/arm64 host):
+The script cross-compiles fully static binaries (`-trimpath -ldflags "-s -w"`, CGO disabled). Outputs, all gitignored (measured with go1.27.1, darwin/arm64 host, after the Sprint 4 hardening pass):
 
 | Output | Target | Size |
 |---|---|---|
 | `node/dtn-node-linux-arm64` | Raspberry Pi Zero 2 W (primary) | 10,682,528 bytes (~10.2 MiB) |
 | `node/dtn-node-linux-arm` | 32-bit ARMv7 (fallback) | 11,141,280 bytes (~10.6 MiB) |
-| `node/dtn-node-dev` | host OS/arch (development) | 10,751,298 bytes (~10.3 MiB) |
+| `node/dtn-node-dev` | host OS/arch (development) | 10,751,314 bytes (~10.3 MiB) |
 
 The web SPA (`node/web/index.html`) is embedded inside the binary via `go:embed` — a deployed node is exactly one file plus its SQLite database.
 

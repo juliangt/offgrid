@@ -18,7 +18,10 @@ import (
 //   - sync limit param: default 50, must be within [1, 200] (outside → 400);
 //   - push_envelopes: at most 100 per request (more → 400);
 //   - known_ids: at most 500 entries (more → 400);
-//   - body size: capped by the limitBody middleware (1 MiB → 413).
+//   - body size: capped by the limitBody middleware (1 MiB → 413);
+//   - per-node envelope cap: storage.maxEnvelopes (5000) — at or over the
+//     cap the whole push is rejected with 429 node_full (anti-abuse guard,
+//     plan §7 risk "Llenado del nodo por abuso").
 const (
 	defaultSyncLimit  = 50
 	maxSyncLimit      = 200
@@ -92,6 +95,7 @@ const (
 	codeInvalidAlias     = "invalid_alias"
 	codeInvalidPubkey    = "invalid_pubkey"
 	codeInvalidX25519    = "invalid_x25519"
+	codeNodeFull         = "node_full"
 	codeNotFound         = "not_found"
 	codeMethodNotAllowed = "method_not_allowed"
 	codeInternal         = "internal"
@@ -296,6 +300,13 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.store.InsertEnvelopes(req.PushEnvelopes); err != nil {
+		// The per-node envelope cap (§8.1, plan §7 anti-abuse risk): the node
+		// is full, so pushes are shed with 429 instead of 500 — a capacity
+		// condition is expected behavior, not an internal error.
+		if errors.Is(err, storage.ErrCapacity) {
+			writeError(w, http.StatusTooManyRequests, codeNodeFull)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
 	}

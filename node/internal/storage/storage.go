@@ -10,6 +10,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -44,6 +45,22 @@ CREATE TABLE IF NOT EXISTS directory (
 // host-parameter limit (conservatively 999) even though the API layer caps
 // known_ids at 500 entries.
 const knownIDChunkSize = 900
+
+// maxEnvelopes is the per-node hard cap on stored envelopes (5000): the open
+// access point accepts anonymous pushes, so without a ceiling the node could
+// be filled by abuse (plan §7 risk "Llenado del nodo por abuso"; normative
+// row in docs/protocolo.md §8.1). At or over the cap, InsertEnvelopes rejects
+// the whole batch with ErrCapacity (fail closed, §10.4) and the API maps that
+// to 429 node_full.
+//
+// It is a var instead of a const purely as a test hook: tests lower it to
+// exercise the guard without inserting 5000 rows. Production code must never
+// reassign it.
+var maxEnvelopes = 5000
+
+// ErrCapacity is returned by InsertEnvelopes when the node is at or over its
+// envelope capacity (maxEnvelopes). Callers should surface it as HTTP 429.
+var ErrCapacity = errors.New("storage: envelope capacity reached")
 
 // DirectoryEntry is one registered identity in the node's public directory,
 // served as JSON by GET /api/v1/directory with exactly these field names
@@ -101,9 +118,21 @@ func (s *Store) Close() error {
 // INSERT OR IGNORE: rows whose id already exists are silently skipped. This
 // is the global deduplication mechanism across nodes (§10.4 step 2). It
 // returns the number of newly inserted rows.
+//
+// Before inserting, it counts the table and rejects the WHOLE batch with
+// ErrCapacity when the store is already at or over maxEnvelopes (fail closed,
+// §10.4 step 1). A batch accepted just below the cap may overshoot it by at
+// most one request's worth of envelopes (≤ 100, the §8.1 push limit).
 func (s *Store) InsertEnvelopes(envs []envelope.Envelope) (int, error) {
 	if len(envs) == 0 {
 		return 0, nil
+	}
+	var current int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM envelopes`).Scan(&current); err != nil {
+		return 0, fmt.Errorf("storage: count envelopes: %w", err)
+	}
+	if current >= maxEnvelopes {
+		return 0, ErrCapacity
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

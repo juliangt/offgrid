@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,74 @@ func TestPullTTLBoundaryAndDeleteExpired(t *testing.T) {
 	}
 	if len(pulled) != 1 || pulled[0].ID != hexID(1) {
 		t.Fatalf("boundary envelope must survive cleanup, got %+v", pulled)
+	}
+}
+
+// TestInsertEnvelopesCapacityGuard exercises the anti-abuse cap of §8.1
+// (plan §7 risk "Llenado del nodo por abuso"): the unexported maxEnvelopes
+// var is lowered as a test hook, the store is filled to the cap, and the next
+// insert is rejected with the typed ErrCapacity while pulls keep working.
+func TestInsertEnvelopesCapacityGuard(t *testing.T) {
+	s := newTestStore(t)
+
+	old := maxEnvelopes
+	maxEnvelopes = 5
+	t.Cleanup(func() { maxEnvelopes = old })
+
+	for i := 0; i < 5; i++ {
+		inserted, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(i), 100)})
+		if err != nil || inserted != 1 {
+			t.Fatalf("insert %d below cap: got %d inserted, err=%v", i, inserted, err)
+		}
+	}
+
+	// At the cap: a new envelope is rejected with the typed error.
+	if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(99), 100)}); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("insert at cap: want ErrCapacity, got %v", err)
+	}
+
+	// Fail closed (§10.4 step 1): even a dedup-only re-push of an existing id
+	// is rejected while the node is full — the batch is refused before any
+	// row is touched.
+	if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(0), 100)}); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("re-push at cap must fail closed with ErrCapacity, got %v", err)
+	}
+
+	// Pulls must keep working at the cap (a full node still serves mail).
+	pulled, err := s.PullEnvelopes(nil, 10, 200)
+	if err != nil {
+		t.Fatalf("pull at cap: %v", err)
+	}
+	if len(pulled) != 5 {
+		t.Fatalf("pull at cap must return the 5 stored envelopes, got %d", len(pulled))
+	}
+}
+
+// TestInsertEnvelopesDefaultCapacity pins the real default cap (5000) with a
+// full-scale run: one batch of 5000 tiny rows is accepted, the next insert
+// hits ErrCapacity, and pulls still serve (capped by the limit).
+func TestInsertEnvelopesDefaultCapacity(t *testing.T) {
+	s := newTestStore(t)
+
+	batch := make([]envelope.Envelope, 0, maxEnvelopes)
+	for i := 0; i < maxEnvelopes; i++ {
+		batch = append(batch, makeEnv(hexID(i), 100))
+	}
+	inserted, err := s.InsertEnvelopes(batch)
+	if err != nil || inserted != maxEnvelopes {
+		t.Fatalf("full-capacity batch: got %d inserted, err=%v", inserted, err)
+	}
+
+	if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(maxEnvelopes), 100)}); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("insert past the default cap: want ErrCapacity, got %v", err)
+	}
+
+	pulled, err := s.PullEnvelopes(nil, 200, 200)
+	if err != nil {
+		t.Fatalf("pull at full capacity: %v", err)
+	}
+	if len(pulled) != 200 {
+		t.Fatalf("pull at full capacity must serve up to the limit, got %d", len(pulled))
 	}
 }
 
