@@ -170,6 +170,21 @@
   </style>
 </head>
 <body>
+  <!-- Captive mini-browser banner (plan §1.4, spec §13.4): shown on every
+       load — mini-browser storage is isolated from the real browser, so
+       identity and inbox must live in the full browser to survive nodes.
+       Detection only sharpens the wording. -->
+  <div id="banner-captive" class="banner" role="note" hidden>
+    <div class="banner-row">
+      <div class="banner-text">
+        <strong id="banner-title">Ábrelo en tu navegador completo</strong>
+        <span id="banner-text"></span>
+        <code id="banner-url">http://portal.red.local:8080</code>
+      </div>
+      <button id="banner-copy" type="button" class="small">Copiar</button>
+      <button id="banner-close" type="button" class="small" aria-label="Cerrar aviso">✕</button>
+    </div>
+  </div>
   <main id="dtn-app">
     <!-- Registration screen (plan 2.4): alias → keys → directory upsert → seed backup. -->
     <section id="screen-register" hidden>
@@ -1068,15 +1083,32 @@
     });
   }
 
+  /* Single-request read helpers: the promise must settle with the request's
+   * RESULT (not the request object), so these get their own wrappers instead
+   * of withStore (whose resolution value is the fn(store) return). */
   function storeGet(storeName, key) {
-    return withStore(storeName, "readonly", function (store) {
-      return store.get(key);
+    return getDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(storeName, "readonly");
+        var req = tx.objectStore(storeName).get(key);
+        req.onsuccess = function () { resolve(req.result); };
+        tx.oncomplete = function () { /* settled by req.onsuccess */ };
+        tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
+        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+      });
     });
   }
 
   function storeCount(storeName) {
-    return withStore(storeName, "readonly", function (store) {
-      return store.count();
+    return getDB().then(function (db) {
+      return new Promise(function (resolve, reject) {
+        var tx = db.transaction(storeName, "readonly");
+        var req = tx.objectStore(storeName).count();
+        req.onsuccess = function () { resolve(req.result); };
+        tx.oncomplete = function () { /* settled by req.onsuccess */ };
+        tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
+        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+      });
     });
   }
 
@@ -1278,8 +1310,7 @@
   var uiState = {
     identity: null,   /* identity record incl. alias, loaded from the store */
     directory: [],    /* last GET /api/v1/directory result */
-    sending: false,
-    syncing: false
+    sending: false
   };
 
   /* ----- tiny network helpers (XHR works on every WebView; fetch may not) -- */
@@ -1541,9 +1572,22 @@
         return DTN.setMeta("sent_count", (typeof n === "number" ? n : 0) + 1);
       });
     }).then(function () {
-      return pushOutgoingEnvelope(env);
-    }).then(function () {
+      /* §11: hand the envelope to the node immediately (it rides the same
+       * mule cycle as every other sync). */
+      return performSync([env]);
+    }).then(function (summary) {
       uiState.sending = false;
+      if (!summary || summary.status !== "ok") {
+        /* The node was unreachable: the envelope joins the transit queue and
+         * retries automatically on the next sync. */
+        return DTN.addTransitEnvelopes([env]).then(function () {
+          $("compose-text").value = "";
+          updateCounter();
+          updateSendEnabled();
+          showStatus(statusEl, "error", "No se pudo entregar al nodo todavía. El mensaje quedó en tu cola de tránsito y se reintentará al sincronizar.");
+          renderTelemetry();
+        });
+      }
       $("compose-text").value = "";
       updateCounter();
       updateSendEnabled();
@@ -1552,18 +1596,8 @@
     }, function (err) {
       uiState.sending = false;
       updateSendEnabled();
-      showStatus(statusEl, "error", "No se pudo contactar al nodo (" + err.message + "). El mensaje no se envió; reintenta.");
+      showStatus(statusEl, "error", "Error al enviar (" + err.message + "). Reintenta.");
       renderTelemetry();
-    });
-  }
-
-  /* Direct push of a just-written envelope (§10.4: the pushed id travels in
-   * known_ids so the node never hands it back to us). */
-  function pushOutgoingEnvelope(env) {
-    return postJson("/api/v1/sync", {
-      known_ids: [env.id],
-      push_envelopes: [env],
-      limit: 50
     });
   }
 
@@ -1777,7 +1811,13 @@
     renderTelemetry();
     renderInbox();
     refreshDirectory();
-    /* The mule sync engine hooks its load-time sync here (section 10). */
+    /* §11: sync automatically on page load (push + pull cycle). */
+    performSync([]).then(function () {
+      renderTelemetry();
+      renderInbox();
+    }, function () {
+      renderTelemetry();
+    });
   }
 
   function showRegister() {
@@ -1805,16 +1845,22 @@
     $("btn-sync").addEventListener("click", onManualSync);
   }
 
-  /* Manual refresh button: reloads every local view from the store and the
-   * directory. The full push/pull sync against the node arrives with the
-   * mule engine (section 10), which takes over this handler. */
+  /* Manual sync button (§11): full push/pull cycle against the node. */
   function onManualSync() {
-    renderTelemetry();
-    renderInbox();
-    refreshDirectory();
+    var btn = $("btn-sync");
+    btn.disabled = true;
+    performSync([]).then(function () {
+      btn.disabled = false;
+      renderTelemetry();
+      renderInbox();
+    }, function () {
+      btn.disabled = false;
+      renderTelemetry();
+    });
   }
 
   function initUi() {
+    setupBanner();
     wireStaticHandlers();
     DTN.loadIdentity().then(function (identity) {
       if (identity && DTN.validateAlias(identity.alias) && identity.signPublicB64 && identity.boxPublicB64) {
@@ -1828,10 +1874,249 @@
     });
   }
 
-  /* DOM wiring is complete above; the mule sync engine (section 10) hooks
-   * into onManualSync/enterApp and is appended before this guard. The guard
-   * keeps the whole file loadable headless from Node, where document does
-   * not exist. */
+  /* ---------------------------------------------------------------------
+   * 10. Mule sync engine (§10.4 + §11, plan 2.6) and captive banner
+   *     (plan §1.4).
+   * ------------------------------------------------------------------- */
+
+  var SYNC_KNOWN_CHUNK = 500;   /* §8.1 known_ids cap per request */
+  var SYNC_PUSH_CHUNK = 100;    /* §8.1 push cap per request */
+  var SYNC_LIMIT_FIRST = 50;    /* §11: pull with limit 50 */
+  var SYNC_LIMIT_MORE = 200;    /* §8.1 max: drain remaining known_ids chunks */
+
+  /* Syncs serialize through this tail so a send during a running sync is
+   * never lost (it runs right after). */
+  var syncChain = Promise.resolve();
+
+  function chunkArray(arr, size) {
+    var out = [];
+    for (var i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+    return out;
+  }
+
+  /* One full mule cycle:
+   *   - known_ids = inbox ids ∪ transit ids ∪ seen ids ∪ ids being pushed
+   *     (§11). Beyond 500, known_ids are split across several POSTs; the
+   *     first request always lists the ids it pushes (§10.4) and uses
+   *     limit 50, the drain requests use the maximum 200.
+   *   - push = outgoing envelopes (own sends) + the whole transit queue,
+   *     chunked at 100 per request. Carried envelopes whose push succeeded
+   *     leave the queue (the node holds a copy now); failed chunks stay and
+   *     retry on the next sync.
+   *   - pull classification (§11): dest_hint == own hint → decrypt+verify,
+   *     success → inbox, ANY failure → silent reject counted in telemetry;
+   *     everything else → transit_queue with FIFO eviction at capacity 100.
+   *   - every pulled id lands in seen_ids either way.
+   * Resolves a summary; never rejects (per-request errors are counted). */
+  function performSync(outgoing) {
+    outgoing = outgoing || [];
+    var run = function () { return runSync(outgoing); };
+    var p = syncChain.then(run, run);
+    var settled = p.then(function (summary) {
+      return recordSyncMeta(summary).then(function () { return summary; });
+    }, function (err) {
+      /* Storage failure outside the HTTP cycle: record it and rethrow so
+       * callers can show feedback. */
+      return DTN.setMeta("last_sync", {
+        status: "error",
+        at: nowSec(),
+        detail: err && err.message ? String(err.message) : "error"
+      }).then(function () { throw err; });
+    });
+    syncChain = settled.then(function () {}, function () {});
+    return settled;
+  }
+
+  function runSync(outgoing) {
+    return DTN.loadIdentity().then(function (identity) {
+      if (!identity || !identity.hint || !identity.boxSecret) {
+        return { status: "error", reason: "no_identity", pulled: 0, fresh: 0,
+                 mine: 0, inboxAdded: 0, rejected: 0, transitAdded: 0,
+                 evicted: 0, errors: 0 };
+      }
+      var outgoingIds = [];
+      for (var i = 0; i < outgoing.length; i++) {
+        if (outgoing[i] && typeof outgoing[i].id === "string") outgoingIds.push(outgoing[i].id);
+      }
+      /* §10.4: pushed ids must be in known_ids; marking them seen up front
+       * also survives a lost response (the node may hold them anyway). */
+      return DTN.markSeenIds(outgoingIds).then(function () {
+        return Promise.all([DTN.listInbox(), DTN.listTransit(), DTN.listSeenIds()]);
+      }).then(function (lists) {
+        var inboxRows = lists[0];
+        var transitRows = lists[1];
+        var seenIds = lists[2];
+        var known = {};
+        var i;
+        for (i = 0; i < inboxRows.length; i++) known[inboxRows[i].id] = true;
+        for (i = 0; i < transitRows.length; i++) known[transitRows[i].id] = true;
+        for (i = 0; i < seenIds.length; i++) known[seenIds[i]] = true;
+        for (i = 0; i < outgoingIds.length; i++) known[outgoingIds[i]] = true;
+
+        var pushList = outgoing.slice();
+        for (i = 0; i < transitRows.length; i++) pushList.push(DTN.toEnvelopeWire(transitRows[i]));
+
+        /* outgoing ids first so the first request's known_ids always cover
+         * its own push_envelopes (§10.4). */
+        var knownKeys = outgoingIds.slice();
+        var inKeys = {};
+        for (i = 0; i < knownKeys.length; i++) inKeys[knownKeys[i]] = true;
+        var allKnown = Object.keys(known);
+        for (i = 0; i < allKnown.length; i++) {
+          if (!inKeys[allKnown[i]]) {
+            inKeys[allKnown[i]] = true;
+            knownKeys.push(allKnown[i]);
+          }
+        }
+
+        var knownChunks = chunkArray(knownKeys, SYNC_KNOWN_CHUNK);
+        var pushChunks = chunkArray(pushList, SYNC_PUSH_CHUNK);
+        var requestCount = Math.max(knownChunks.length, pushChunks.length, 1);
+
+        var pulled = [];
+        var errors = [];
+        var pushOk = [];
+        var seq = Promise.resolve();
+        var request = function (idx) {
+          seq = seq.then(function () {
+            var body = {
+              known_ids: knownChunks[idx] || [],
+              push_envelopes: pushChunks[idx] || [],
+              limit: idx === 0 ? SYNC_LIMIT_FIRST : SYNC_LIMIT_MORE
+            };
+            return postJson("/api/v1/sync", body).then(function (resp) {
+              pushOk.push(idx);
+              if (resp && Array.isArray(resp.pull_envelopes)) {
+                for (var j = 0; j < resp.pull_envelopes.length; j++) pulled.push(resp.pull_envelopes[j]);
+              }
+            }, function (err) {
+              errors.push(err);
+            });
+          });
+        };
+        for (i = 0; i < requestCount; i++) request(i);
+
+        return seq.then(function () {
+          /* Empty the queue of everything delivered; failed chunks stay. */
+          var delivered = [];
+          for (var c = 0; c < pushOk.length; c++) {
+            var chunk = pushChunks[pushOk[c]] || [];
+            for (var k = 0; k < chunk.length; k++) delivered.push(chunk[k].id);
+          }
+          return DTN.removeTransitIds(delivered).then(function () {
+            return processPulled(pulled, known, identity);
+          });
+        }).then(function (summary) {
+          summary.errors = errors.length;
+          summary.pushed = pushList.length;
+          return summary;
+        });
+      });
+    });
+  }
+
+  /* §11 classification of the pulled envelopes + persistence. */
+  function processPulled(pulled, known, identity) {
+    var fresh = [];
+    var pulledIds = [];
+    var dedup = {};
+    for (var i = 0; i < pulled.length; i++) {
+      var env = pulled[i];
+      if (!env || typeof env.id !== "string" || dedup[env.id]) continue;
+      dedup[env.id] = true;
+      pulledIds.push(env.id);
+      if (known[env.id]) continue; /* replay of an envelope we already have */
+      fresh.push(env);
+    }
+    var cls = DTN.classifyPullEnvelopes(fresh, identity.hint);
+    var inboxRecords = [];
+    var rejected = 0;
+    for (var j = 0; j < cls.mine.length; j++) {
+      var res = DTN.decryptEnvelope(cls.mine[j], identity, nowSec());
+      if (res.ok) {
+        inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: nowSec() });
+      } else {
+        rejected += 1; /* silent reject (§4.3): counted, never surfaced */
+      }
+    }
+    return DTN.addInboxMessages(inboxRecords).then(function () {
+      return DTN.addTransitEnvelopes(cls.foreign);
+    }).then(function (transitOutcome) {
+      return DTN.markSeenIds(pulledIds).then(function () {
+        return {
+          status: "ok",
+          pulled: pulled.length,
+          fresh: fresh.length,
+          mine: cls.mine.length,
+          inboxAdded: inboxRecords.length,
+          rejected: rejected,
+          transitAdded: transitOutcome.added,
+          evicted: transitOutcome.evicted.length
+        };
+      });
+    });
+  }
+
+  function recordSyncMeta(summary) {
+    if (!summary) return Promise.resolve();
+    if (summary.status === "error" && summary.reason === "no_identity") {
+      return Promise.resolve(); /* nothing to record without a mule */
+    }
+    var meta = {
+      status: summary.errors > 0 ? "error" : "ok",
+      at: nowSec(),
+      pulled: summary.pulled || 0,
+      inbox_added: summary.inboxAdded || 0,
+      transit_added: summary.transitAdded || 0,
+      evicted: summary.evicted || 0,
+      rejected: summary.rejected || 0,
+      pushed: summary.pushed || 0
+    };
+    return DTN.setMeta("last_sync", meta).then(function () {
+      if (meta.evicted > 0) {
+        return DTN.getMeta("evicted_total").then(function (n) {
+          return DTN.setMeta("evicted_total", (typeof n === "number" ? n : 0) + meta.evicted);
+        });
+      }
+    });
+  }
+
+  /* ----- captive mini-browser banner (plan §1.4, spec §13.4) -----
+   * Best-effort detection: the iOS CNA marks its user agent with
+   * CaptiveNetworkSupport; wispr is the legacy captive-flow marker. Only
+   * the wording changes — the banner itself is shown on EVERY load, because
+   * mini-browser storage is isolated from the real browser and the identity
+   * must live in Chrome/Safari to survive across nodes (same origin). */
+  function detectCaptiveBrowser() {
+    var ua = navigator.userAgent || "";
+    return /CaptiveNetworkSupport|wispr/i.test(ua);
+  }
+
+  function setupBanner() {
+    var banner = $("banner-captive");
+    if (!banner) return;
+    if (detectCaptiveBrowser()) {
+      setText("banner-title", "Estás en el mini-navegador del portal cautivo");
+      setText("banner-text", "Este navegador restringido puede borrar tus datos. Ábrelo en tu navegador completo (Chrome o Safari) para que tu identidad y tus mensajes persistan entre nodos:");
+    } else {
+      setText("banner-title", "Ábrelo en tu navegador completo");
+      setText("banner-text", "Si llegaste desde el aviso del Wi-Fi, escribe esta dirección en Chrome o Safari para que tus datos persistan entre nodos:");
+    }
+    showEl(banner);
+    $("banner-close").addEventListener("click", function () {
+      hideEl(banner);
+    });
+    $("banner-copy").addEventListener("click", function () {
+      copyText(DTN.CANONICAL_URL, function (ok) {
+        var btn = $("banner-copy");
+        btn.textContent = ok ? "¡Copiado!" : "No se pudo copiar";
+        setTimeout(function () { btn.textContent = "Copiar"; }, 1500);
+      });
+    });
+  }
+
+  /* DOM wiring is complete above; the guard keeps the whole file loadable
+   * headless from Node, where document does not exist. */
   if (typeof document !== "undefined" && document.getElementById("dtn-app")) {
     initUi();
   }
