@@ -1,13 +1,41 @@
 # Off-Grid DTN Messaging System
 
-Asynchronous, end-to-end encrypted (E2EE) messaging that works with **no Internet, no cellular network and no satellites**. It is a delay-tolerant network (DTN) built from two moving parts:
+Asynchronous, end-to-end encrypted (E2EE) messaging that works with **no Internet, no cellular network and no satellites** — just Wi-Fi access points, ordinary phone browsers, and people walking between them.
 
-- **Fixed dead-drop nodes** — Raspberry Pi boards (baseline: the **Pi Zero W**; every model with on-board Wi-Fi works, and the rest through an AP-capable USB Wi-Fi adapter — see `docs/pi-models.md`) running an open Wi-Fi access point with a captive portal and a self-contained HTTP daemon (Go + SQLite). Nodes are *blind mailboxes*: they store and serve opaque encrypted envelopes without ever seeing plaintext, keys or sender identities.
-- **Mobile data mules** — ordinary users' phone browsers. While moving between nodes, a mule's browser carries other people's encrypted envelopes in its `IndexedDB` (capacity 100 envelopes) and drops them off at the next portal it reaches.
+## Initial inspiration
 
-All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confidentiality, Ed25519 for identity/signatures, via an embedded `tweetnacl.js`). The envelope format is designed from day one to migrate, without rewriting the data structure, to BLE L2CAP (Phase 2) and LoRa P2P (Phase 3).
+The project combines three ideas:
 
-## How a message travels
+- **Delay-tolerant networking (DTN) / store-and-forward** — messages are atomic envelopes that sit in untrusted mailboxes until a path to the recipient shows up. Nodes never talk to each other; *physical human movement is the transport layer*.
+- **Sneakernet / data mules** — anyone who opens the portal at one node and later at another carries other people's encrypted envelopes in their browser, extending the network wherever its users go.
+- **bitchat and Nostr** — the envelope format follows their model of small, self-contained, signed events (~180–250 bytes), so the same data structure can later migrate, without rewrites, to Bluetooth LE (Phase 2) and LoRa point-to-point radio (Phase 3).
+
+## Objective
+
+Enable asynchronous, private communication between people in zones without connectivity — rural areas, remote trails, disaster response, community networks — using commodity hardware:
+
+- **Fixed dead-drop nodes** — Raspberry Pi boards (baseline: the **Pi Zero W**; every model with on-board Wi-Fi works, and the rest through an AP-capable USB adapter — see [`docs/pi-models.md`](docs/pi-models.md)) broadcasting an open Wi-Fi access point with a captive portal. Each node is a **blind mailbox**: one self-contained Go binary with SQLite that stores and serves opaque encrypted envelopes without ever seeing plaintext, keys or sender identities.
+- **Mobile data mules** — ordinary users' phone browsers. While moving between nodes, a mule's browser carries other people's encrypted envelopes in its `IndexedDB` (capacity: 100 envelopes) and drops them off at the next portal it reaches.
+
+All cryptography happens on the client: X25519 + XSalsa20-Poly1305 for confidentiality, Ed25519 for identity and signatures (via a vendored `tweetnacl.js`). Private keys never leave the browser.
+
+## Architecture
+
+```
+   Alice ──► Node A ──► mule (any phone in transit) ──► Node B ──► Bob
+        Wi-Fi       encrypted envelopes ride in             Wi-Fi
+     (captive       the mule's IndexedDB queue           (captive
+      portal)                                             portal)
+```
+
+Key design decisions:
+
+- **Same-origin trick** — every node serves the portal at the same URL, `http://portal.red.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
+- **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Nodes and mules see only random bytes and a truncated key hash — never content, sender identity or the full recipient key.
+- **Self-contained nodes** — a single static Go binary serves the API and the whole SPA (embedded via `go:embed`). No CDNs, no cloud calls, nothing external; everything is served from the Pi.
+- **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
+
+### How a message travels
 
 1. Alice registers once on the portal: alias + key pairs generated on her device; private keys never leave her browser's `IndexedDB`.
 2. She picks Bob from the node's public directory and writes a message (up to 128 bytes). Her client signs, encrypts, addresses the envelope with a blind `dest_hint` and computes its `id`.
@@ -16,146 +44,80 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
 6. Bob syncs, recognizes his own `dest_hint`, decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox.
 
-## Quick install on a Raspberry Pi
+## Installation
 
-One command on a fresh Raspberry Pi OS **Lite** install (Zero W or newer —
-the per-model matrix, including which OS image and binary each board needs,
-is `docs/pi-models.md`):
+### Raspberry Pi node (one command)
+
+On a fresh Raspberry Pi OS **Lite** install (Zero W or newer — the per-model matrix, including which OS image and binary each board needs, is [`docs/pi-models.md`](docs/pi-models.md)):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/juliangt/offgrid/main/raspberry/install.sh \
   | sudo bash -s -- --country AR
 ```
 
-The installer detects the board, fetches the matching release binary
-(checksum-verified) plus the provisioning tree, runs the verified
-`provision.sh`, and asks to reboot — the reboot is the activation step; the
-node then announces the open `Red-Comunitaria` AP with the captive portal on
-its own. No Internet at the deployment site? Copy a release's assets onto a
-USB stick or the SD card's FAT partition and run
-`sudo ./install.sh --offline /media/usb --country AR` — the full manual path
-is in `docs/BUILD.md` §5.
+The installer detects the board, fetches the matching release binary (checksum-verified) plus the provisioning tree, runs the verified `provision.sh`, and asks to reboot — the reboot is the activation step. The node then announces the open `Red-Comunitaria` access point with the captive portal on its own.
 
-## Phase 1 components
+**No Internet at the deployment site?** Copy a release's assets onto a USB stick or the SD card's FAT partition and run:
 
-| Module | Scope | Location |
-|---|---|---|
-| **A — Node network configuration** | `hostapd` (open AP), `dnsmasq` (DHCP + wildcard DNS), `iptables` (captive-portal redirects, client isolation), power optimizations for solar + LiFePO4, board-aware provisioning (`provision.sh`) and the one-step installer (`install.sh`, online + offline) | `raspberry/` |
-| **B — Node daemon** | Single static Go binary: HTTP API, SQLite storage (`WAL`), canonical-host middleware, 15-minute cleanup worker, `index.html` embedded via `embed.FS` | `node/` |
-| **C — SPA + crypto engine** | Modular same-origin SPA (`index.html` + `css/app.css` + ES5 scripts under `js/`) with `tweetnacl.js` vendored, IndexedDB store (`identity`, `inbox`, `transit_queue`), mule sync engine | `node/web/` |
-| **D — Protocol evolution mapping** | How the universal Envelope maps to BLE L2CAP CoC with `hop_count <= 7` (Phase 2) and to LoRa SX1262 at 915 MHz in CBOR within a 222-byte MTU (Phase 3) | `docs/protocol.md` |
+```bash
+sudo ./install.sh --offline /media/usb --country AR
+```
 
-## Documentation
+The full manual path (build + copy) is in [`docs/BUILD.md`](docs/BUILD.md) §5. Prebuilt binaries for armv6/armv7/arm64 plus `SHA256SUMS` are attached to every release tag.
 
-- **`docs/protocol.md`** — the *normative* protocol specification: envelope format, canonical serialization, key derivations (`id`, `dest_hint`), crypto primitives, binding limits, node SQLite schema and API behavior, threat model and the Phase 2/3 evolution mapping (§14, with §14.4 listing where each mapping lives in the code). If you implement Modules B or C, start there.
-- **`docs/BUILD.md`** — step-by-step build, run, test and Raspberry Pi deployment guide, with troubleshooting.
-- **`docs/pi-models.md`** — per-model support matrix: OS image, binary and Wi-Fi caveats for every Raspberry Pi variant (Zero W is the baseline), plus per-class power and performance notes.
-- **`docs/hardware.md`** — solar + LiFePO4 sizing math, wiring, SD/enclosure guidance and the node assembly checklist.
-- **`docs/DEVELOPMENT_PLAN.md`** — binding development plan: design decisions, architecture, sprint breakdown and acceptance criteria.
-- **`docs/MASTER_DEVELOPMENT_PROMPT.md`** — original master specification (source of truth for requirements).
+### Hardware
+
+For solar-powered deployment (~1 W continuous target): solar + LiFePO4 sizing math, wiring, SD card and enclosure guidance are in [`docs/hardware.md`](docs/hardware.md).
+
+## Usage
+
+Each node broadcasts the open Wi-Fi network `Red-Comunitaria`. Anyone in range:
+
+1. **Joins the network** — the captive portal opens automatically (or browse to `http://portal.red.local:8080`).
+2. **Registers once** — picks an alias; key pairs are generated on the device and stay there (with an optional seed backup).
+3. **Writes messages** — picks a recipient from the public directory (alias + public key) and sends up to 128 bytes of UTF-8 text.
+4. **Syncs automatically on page load** — pushes what it carries, pulls what's addressed to it into the inbox, and keeps unknown envelopes (up to 100) in the transit queue for the next node. A telemetry panel shows what the phone is carrying: *"Foreign envelopes in transit: X / Capacity: Y"*.
+
+That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.
+
+## Building and testing from source
+
+Requirements: Go 1.26+ and Node.js (tests only). From the repository root:
+
+```bash
+cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev binary
+cd node && go test ./... -count=1 && cd ..
+node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
+node tests/spa_structure.mjs       # 91 assertions on the SPA layout, CSP and API surface
+bash tests/sync_e2e.sh             # 31 assertions: two real daemons + full mule walk (curl only)
+```
+
+`tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.
 
 ## Repository layout
 
 ```
 offgrid/
 ├── .github/         # release workflow: binaries + per-model DEPLOY.md per tag
-├── docs/            # normative protocol spec, build and hardware docs, per-model matrix
-├── node/            # Module B: Go daemon (internal: storage, api, cleanup, envelope; web/: SPA)
-├── raspberry/       # Module A: install.sh, provision.sh, hostapd, dnsmasq, firewall, power, systemd
-└── tests/           # crypto round-trip (Node) and E2E sync (curl) tests
+├── docs/            # protocol spec, build/hardware docs, per-model matrix
+├── node/            # Go daemon (internal: storage, api, cleanup, envelope; web/: SPA)
+├── raspberry/       # install.sh, provision.sh, hostapd, dnsmasq, firewall, power, systemd
+└── tests/           # crypto round-trip (Node), SPA structure, E2E sync (bash/curl)
 ```
 
-## Architecture recap
+## Documentation
 
-One self-contained static Go binary (`node/`, with the SPA's `index.html`, `css/` and `js/` files embedded via `go:embed`) serves, behind a canonical-host redirect that forces every browser onto the shared origin `http://portal.red.local:8080`, a blind SQLite dead-drop API: clients do all cryptography (X25519 + XSalsa20-Poly1305 boxes, Ed25519 signatures, sign-then-encrypt — tweetnacl vendored under `node/web/js/`), so nodes store and serve opaque envelopes deduplicated by client-computed ids, TTL-filtered, and swept by a 15-minute janitor. Phones are the transport: each portal visit pushes what a mule carries and pulls what it does not know into a 100-envelope `IndexedDB` transit queue, and physical movement between identical nodes delivers mail — the same envelope format maps, without rewrites, onto BLE L2CAP (Phase 2) and LoRa CBOR (Phase 3) per `docs/protocol.md` §14. See `docs/` for the normative protocol, the build/deploy guide and the hardware design.
-
-## Verification
-
-From the repository root (expected outputs in `docs/BUILD.md` §4):
-
-```bash
-cd node && go test ./... -count=1 && cd ..   # Go unit tests (storage, api, envelope, main, sdnotify)
-node tests/crypto_roundtrip.mjs              # 44 assertions against the SPA crypto engine
-node tests/spa_structure.mjs                 # 91 assertions on the SPA layout (assets, CSP, DTN API)
-bash tests/sync_e2e.sh                       # 31 assertions: two real daemons + mule walk, curl only
-```
-
-All three must pass; `bash tests/sync_e2e.sh` additionally simulates the full Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, the 1 MiB/400 rejections and the canonical-host/captive-probe redirect pair.
-
-## Acceptance traceability
-
-Translation of `docs/DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance criterion and where it is implemented:
-
-| Master-prompt criterion | Where implemented |
+| Document | Contents |
 |---|---|
-| `/etc/hostapd/hostapd.conf` (open AP, channel 6, `ap_isolate=1`) | `raspberry/hostapd/hostapd.conf`, installed by `raspberry/provision.sh` |
-| `/etc/dnsmasq.conf` (DHCP 10.42.0.50–250, GW/DNS 10.42.0.1, wildcard DNS) | `raspberry/dnsmasq/dnsmasq.conf` |
-| `iptables` (80→8080 redirect, captive probes) | `raspberry/firewall/iptables.sh` + probe endpoints `node/internal/api/handlers.go` (`handleProbe`) and their redirect exemption in `node/internal/api/middleware.go` |
-| Power optimization (HDMI, LEDs, solar/LiFePO4) | `raspberry/power/config.txt.snippet`, `raspberry/power/dtn-power.service`, sizing in `docs/hardware.md` |
-| SQLite: exact tables, columns and indexes | `node/internal/storage/storage.go` (`schema`, pragmas, single connection) |
-| Exact API endpoints (`GET /`, probes, directory GET/POST, sync) | `node/internal/api/handlers.go` (routes + limits), served from `node/main.go` |
-| 15-minute cleanup worker | `node/internal/cleanup/cleanup.go` (+ startup sweep), wired in `node/main.go` |
-| `embed.FS` with the portal web assets | `node/main.go` (`webFS`, `//go:embed web`) |
-| X25519+Ed25519 client-side, server without keys | `node/web/js/` (tweetnacl vendored + engine scripts), verified by `tests/crypto_roundtrip.mjs` |
-| `dtn_local_store`: identity / inbox / transit_queue (capacity 100) | `node/web/js/store.js` (IndexedDB layer), `TRANSIT_CAPACITY` in `node/web/js/constants.js` |
-| Sync on page load + own/foreign envelope classification | `node/web/js/ui.js` (mule sync engine) + `node/web/js/mule.js`, exercised E2E by `tests/sync_e2e.sh` |
-| UI: registration, directory, composer with byte counter, inbox, mule telemetry | `node/web/index.html` + `node/web/js/ui.js` |
-| bitchat L2CAP mapping (`hop_count ≤ 7`) and LoRa CBOR within 222 B | `docs/protocol.md` §14 (+ §14.4 anchors table), mirrored in `node/internal/envelope/envelope.go` and above `buildEnvelope` in `node/web/js/envelopes.js` |
-| Complete code without `TODO` placeholders | repo-wide; `gofmt`/`go vet` clean, no placeholders in any shipped file |
-| Step-by-step build/run/test instructions | `docs/BUILD.md` |
+| [`docs/protocol.md`](docs/protocol.md) | **Normative protocol spec**: envelope format, canonical serialization, key derivations, crypto primitives, binding limits, node schema and API, threat model, Phase 2 (BLE) / Phase 3 (LoRa) mapping |
+| [`docs/BUILD.md`](docs/BUILD.md) | Build, run locally, test and deploy to a Pi (online / offline / manual), plus troubleshooting and on-site checklists |
+| [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
+| [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
+| [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
+| [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
 
-## Status
+## Status and roadmap
 
-Development follows five sprints (see `docs/DEVELOPMENT_PLAN.md` §5):
-
-| Sprint | Scope | Status |
-|---|---|---|
-| 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocol.md`, threat model | **Complete** |
-| 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | **Complete** |
-| 2 | Module C: SPA + crypto engine + mule engine | **Complete** |
-| 3 | Module A: Raspberry Pi infrastructure | **Complete** |
-| 4 | E2E integration, Module D final docs, build/deploy guide | **Complete** |
-
-Sprint 2 delivered the single-file SPA (`node/web/index.html`) with the
-tweetnacl crypto engine embedded inline: registration with seed backup/import,
-directory-driven composition with a 128-byte UTF-8 counter, inbox, mule
-telemetry panel, the captive "open in your full browser" banner, the IndexedDB
-store (`dtn_local_store` v1) and the full mule sync engine (push/pull with
-FIFO transit capacity 100). The engine is verified by
-`node tests/crypto_roundtrip.mjs` (spec §6 test vectors included).
-
-Sprint 3 delivered the Module A network infrastructure in `raspberry/`: an
-open-AP `hostapd.conf` (channel 6, `ap_isolate=1`), `dnsmasq.conf` (DHCP pool
-10.42.0.50–250 with options 3/6 pointing at the node, wildcard DNS +
-`portal.red.local`), an idempotent firewall script (TCP/80 → 8080 REDIRECT,
-FORWARD policy DROP as the L3 half of client isolation), power trim
-(`config.txt` snippet + `dtn-power.service`, ~1 W target), a hardened
-`dtn-node.service` with sd_notify watchdog support (`internal/sdnotify`, pure
-Go) and a strictly idempotent `provision.sh` that switches Bookworm from
-NetworkManager to the classic ifupdown + hostapd + dnsmasq + iptables stack
-and never starts services mid-run — a reboot is the activation step.
-
-Sprint 4 closed the plan: `tests/sync_e2e.sh` reproduces the complete mule
-journey without hardware (two real daemons, the §3.2 spec envelope parsed
-verbatim from `docs/protocol.md`, byte-integrity assertions through the
-mule, dedup/TTL/limit/redirect negatives); the Module D Phase 2/3 mapping is
-anchored on all three surfaces (Go `Envelope` doc-comment, SPA
-`buildEnvelope` comment, spec §14.4); `docs/BUILD.md` and
-`docs/hardware.md` document the whole build→deploy→verify path; and a
-hardening pass added the cold-start `-db` directory bootstrap plus the
-5000-envelope anti-abuse node cap (`429 node_full`, spec §8.1). Remaining
-manual items require physical hardware (two-node walk test and captive
-mini-browser on real Android/iOS) — see `docs/BUILD.md` §5 and §7 for
-the on-site checklists.
-
-After Sprint 4, the deployment story was widened from the Zero 2 W to
-**every Raspberry Pi with the Pi Zero W as the baseline target**
-(issue #15): `node/build.sh` now emits an ARMv6 binary alongside the
-arm64/armv7 ones, `provision.sh` detects the board model and userland ISA
-(strict `uname -m` → binary mapping, 60 s watchdog ceiling on single-core
-boards), `raspberry/install.sh` turns installation into one online line or
-an offline USB/SD bundle, the release workflow attaches binaries +
-`SHA256SUMS` + a per-model `DEPLOY.md` to every tag, and
-`docs/pi-models.md` documents the OS/binary/caveats matrix for each board.
-On-hardware acceptance on a physical Zero W (issue #15, W7) is the
-remaining manual item.
+- **Phase 1 (this repository) — complete**: Wi-Fi dead-drop nodes + browser data mules over HTTP, covered by the automated test suite above. The remaining manual item is on-hardware acceptance with a physical Pi Zero W (see [`docs/BUILD.md`](docs/BUILD.md) §5 and §7).
+- **Phase 2 — BLE**: direct phone-to-phone transfer over BLE L2CAP connection-oriented channels with `hop_count ≤ 7`; the envelope format and the code-level mapping are already defined in [`docs/protocol.md`](docs/protocol.md) §14.
+- **Phase 3 — LoRa**: long-range radio backhaul between zones, envelope packed as CBOR within the 222-byte SX1262 MTU at 915 MHz (same spec section).
