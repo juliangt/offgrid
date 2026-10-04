@@ -112,7 +112,7 @@ wait_ready() {
 # lands in $WORK/last_body.
 http() {
     local method=$1 url=$2 body=${3:-}
-    local args=(-sS -o "$WORK/last_body" -w '%{http_code}' -H 'Host: portal.red.local:8080')
+    local args=(-sS -o "$WORK/last_body" -w '%{http_code}' -H 'Host: offgrid.local:8080')
     if [ -n "$body" ]; then
         args+=(-H 'Content-Type: application/json' --data-binary @"$body")
     fi
@@ -318,13 +318,13 @@ check "envelope with malformed id (bad hex) rejected with 400" "400" "$code"
 # ---------------------------------------------------------------------------
 code="$(curl -sS -o /dev/null -D "$WORK/hdr_root" -w '%{http_code}' "http://127.0.0.1:$PORT_A/")"
 check "raw-IP GET / redirects with 301 to the canonical origin" "301" "$code"
-if tr -d '\r' < "$WORK/hdr_root" | grep -qi '^Location: http://portal\.red\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
-check "301 Location is exactly http://portal.red.local:8080/" "canonical" "$LOC"
+if tr -d '\r' < "$WORK/hdr_root" | grep -qi '^Location: http://offgrid\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
+check "301 Location is exactly http://offgrid.local:8080/" "canonical" "$LOC"
 
 code="$(curl -sS -o /dev/null -D "$WORK/hdr_probe" -w '%{http_code}' "http://127.0.0.1:$PORT_A/generate_204")"
 check "captive probe with default Host answers 302 (never 204, never 301)" "302" "$code"
-if tr -d '\r' < "$WORK/hdr_probe" | grep -qi '^Location: http://portal\.red\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
-check "302 Location is exactly http://portal.red.local:8080/" "canonical" "$LOC"
+if tr -d '\r' < "$WORK/hdr_probe" | grep -qi '^Location: http://offgrid\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
+check "302 Location is exactly http://offgrid.local:8080/" "canonical" "$LOC"
 
 # ---------------------------------------------------------------------------
 # Summary.

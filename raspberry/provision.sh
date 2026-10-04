@@ -240,7 +240,7 @@ install_configs() {
     sed "s/^country_code=.*/country_code=${COUNTRY}/" "$SCRIPT_DIR/hostapd/hostapd.conf" > "$tmp"
     install_file "$tmp" /etc/hostapd/hostapd.conf 0644
     rm -f "$tmp"
-    verify "hostapd.conf installed" grep -q "^ssid=Red-Comunitaria$" /etc/hostapd/hostapd.conf
+    verify "hostapd.conf installed" grep -q "^ssid=offgrid-messages$" /etc/hostapd/hostapd.conf
     verify "hostapd country_code=${COUNTRY}" grep -q "^country_code=${COUNTRY}$" /etc/hostapd/hostapd.conf
 
     install_file "$SCRIPT_DIR/dnsmasq/dnsmasq.conf" /etc/dnsmasq.conf 0644
@@ -384,13 +384,13 @@ final_report() {
  portal daemon in the order encoded in the unit files.
 
  Operator checklist after reboot:
-   1. Join the Wi-Fi "Red-Comunitaria" from a phone; the captive
+   1. Join the Wi-Fi "offgrid-messages" from a phone; the captive
       portal should pop up on its own and land on
-      http://portal.red.local:8080
+      http://offgrid.local:8080
    2. Verify associated stations from the Pi:
         hostapd_cli -i wlan0 all_sta
    3. Verify the portal daemon answers (canonical host):
-        curl -H 'Host: portal.red.local:8080' http://10.42.0.1:8080/
+        curl -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/
    4. Verify two clients cannot reach each other (isolation):
         ping from client A to client B must fail.
    5. Verify a full reboot restores everything by itself.

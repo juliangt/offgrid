@@ -25,5 +25,5 @@ var PAYLOAD_MIN_BYTES = 248;                   // derived bounds (§8.2)
 var PAYLOAD_MAX_BYTES = 400;
 var PUBKEY_B64_LEN = 44;                       // 32 raw bytes (§4.1)
 var SIGNATURE_B64_LEN = 88;                    // 64 raw bytes (§4.1)
-var CANONICAL_HOST = "portal.red.local:8080";  // same origin on every node (§12)
+var CANONICAL_HOST = "offgrid.local:8080";  // same origin on every node (§12)
 var CANONICAL_URL = "http://" + CANONICAL_HOST;

@@ -11,7 +11,7 @@ import (
 // CanonicalHost is the one web origin shared by every node in the network
 // (scheme + host + port). All nodes are indistinguishable in origin so a
 // mule's IndexedDB storage never fragments between nodes (§12).
-const CanonicalHost = "portal.red.local:8080"
+const CanonicalHost = "offgrid.local:8080"
 
 // MaxBodyBytes is the POST body limit: 1 MiB (1,048,576 bytes); larger
 // bodies are rejected with 413 (§8.1, §10.1).

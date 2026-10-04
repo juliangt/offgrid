@@ -35,9 +35,9 @@ Rules that hold for every row:
 - A 64-bit-capable board **flashed with a 32-bit OS** reports `armv7l` and
   gets the `armv7` binary — both combinations work; pick one OS and stay
   with it.
-- The node constant set is identical everywhere: open AP `Red-Comunitaria`
+- The node constant set is identical everywhere: open AP `offgrid-messages`
   on channel 6, gateway `10.42.0.1/24`, canonical origin
-  `http://portal.red.local:8080` (protocol spec §12). A mule must not be
+  `http://offgrid.local:8080` (protocol spec §12). A mule must not be
   able to tell which board model is behind the SSID.
 
 ## 2. Installation

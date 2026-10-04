@@ -8,7 +8,7 @@
 # address configured by provision.sh (ifupdown), which must exist first.
 # dtn-firewall.service: the port-80 -> 8080 redirect and the INPUT accepts must
 # be in place before the portal starts answering.
-Description=DTN dead-drop node daemon (portal.red.local:8080)
+Description=DTN dead-drop node daemon (offgrid.local:8080)
 Wants=network-online.target
 After=network-online.target dtn-firewall.service
 

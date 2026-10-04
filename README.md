@@ -30,7 +30,7 @@ All cryptography happens on the client: X25519 + XSalsa20-Poly1305 for confident
 
 Key design decisions:
 
-- **Same-origin trick** — every node serves the portal at the same URL, `http://portal.red.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
+- **Same-origin trick** — every node serves the portal at the same URL, `http://offgrid.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
 - **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Nodes and mules see only random bytes and a truncated key hash — never content, sender identity or the full recipient key.
 - **Self-contained nodes** — a single static Go binary serves the API and the whole SPA (embedded via `go:embed`). No CDNs, no cloud calls, nothing external; everything is served from the Pi.
 - **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/juliangt/offgrid/main/raspberry/ins
   | sudo bash -s -- --country AR
 ```
 
-The installer detects the board, fetches the matching release binary (checksum-verified) plus the provisioning tree, runs the verified `provision.sh`, and asks to reboot — the reboot is the activation step. The node then announces the open `Red-Comunitaria` access point with the captive portal on its own.
+The installer detects the board, fetches the matching release binary (checksum-verified) plus the provisioning tree, runs the verified `provision.sh`, and asks to reboot — the reboot is the activation step. The node then announces the open `offgrid-messages` access point with the captive portal on its own.
 
 **No Internet at the deployment site?** Copy a release's assets onto a USB stick or the SD card's FAT partition and run:
 
@@ -71,9 +71,9 @@ For solar-powered deployment (~1 W continuous target): solar + LiFePO4 sizing ma
 
 ## Usage
 
-Each node broadcasts the open Wi-Fi network `Red-Comunitaria`. Anyone in range:
+Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
-1. **Joins the network** — the captive portal opens automatically (or browse to `http://portal.red.local:8080`).
+1. **Joins the network** — the captive portal opens automatically (or browse to `http://offgrid.local:8080`).
 2. **Registers once** — picks an alias; key pairs are generated on the device and stay there (with an optional seed backup).
 3. **Writes messages** — picks a recipient from the public directory (alias + public key) and sends up to 128 bytes of UTF-8 text.
 4. **Syncs automatically on page load** — pushes what it carries, pulls what's addressed to it into the inbox, and keeps unknown envelopes (up to 100) in the transit queue for the next node. A telemetry panel shows what the phone is carrying: *"Foreign envelopes in transit: X / Capacity: Y"*.

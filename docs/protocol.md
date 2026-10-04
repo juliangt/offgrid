@@ -21,7 +21,7 @@ Binding design principles:
 
 1. **Zero-trust intermediaries.** Nodes and mules are blind, untrusted channels. They MUST NOT be able to read message content, learn the sender's identity, or learn the recipient's full identity.
 2. **All cryptography is client-side.** The server never holds private keys, never decrypts, never verifies signatures.
-3. **Same-origin across all nodes.** Every node serves the identical web origin `http://portal.red.local:8080` at gateway IP `10.42.0.1`, so a mule's `IndexedDB` storage never fragments (§12).
+3. **Same-origin across all nodes.** Every node serves the identical web origin `http://offgrid.local:8080` at gateway IP `10.42.0.1`, so a mule's `IndexedDB` storage never fragments (§12).
 4. **Evolution without rewrite.** The envelope is designed so the same semantic fields map onto BLE L2CAP CoC (Phase 2) and LoRa P2P SX1262 at 915 MHz (Phase 3) without changing the data structure (§14).
 
 ## 2. System model and vocabulary
@@ -292,24 +292,24 @@ Pragmas and connection policy (binding):
 
 ### 10.2 Canonical-host middleware
 
-All requests whose `Host` header is not exactly `portal.red.local:8080` (case-insensitive) MUST receive:
+All requests whose `Host` header is not exactly `offgrid.local:8080` (case-insensitive) MUST receive:
 
 ```
 301 Moved Permanently
-Location: http://portal.red.local:8080{original path and query}
+Location: http://offgrid.local:8080{original path and query}
 ```
 
-This covers direct IP access (`10.42.0.1:8080`), any spoofed domain resolved by the wildcard DNS, and bare `portal.red.local` without port. The browser always ends on the canonical origin, so `IndexedDB` never fragments.
+This covers direct IP access (`10.42.0.1:8080`), any spoofed domain resolved by the wildcard DNS, and bare `offgrid.local` without port. The browser always ends on the canonical origin, so `IndexedDB` never fragments.
 
-**Mandatory exemption:** `GET /generate_204` and `GET /hotspot-detect.html` respond `302` with `Location: http://portal.red.local:8080/` **regardless of the Host header** (they arrive with Hosts like `connectivitycheck.gstatic.com`, `captive.apple.com`) and MUST NOT be redirected to the canonical host first — the OS captive-portal probe would otherwise fail to detect the portal. These endpoints MUST NOT answer `204`.
+**Mandatory exemption:** `GET /generate_204` and `GET /hotspot-detect.html` respond `302` with `Location: http://offgrid.local:8080/` **regardless of the Host header** (they arrive with Hosts like `connectivitycheck.gstatic.com`, `captive.apple.com`) and MUST NOT be redirected to the canonical host first — the OS captive-portal probe would otherwise fail to detect the portal. These endpoints MUST NOT answer `204`.
 
 ### 10.3 Endpoints (exact surface)
 
 | Method + path | Behavior |
 |---|---|
 | `GET /` | Serve the embedded `index.html` (`embed.FS`). Non-canonical Host → `301` first (§10.2). |
-| `GET /generate_204` | `302 → http://portal.red.local:8080/` (Android probe). Never `204`. |
-| `GET /hotspot-detect.html` | `302 → http://portal.red.local:8080/` (iOS probe). |
+| `GET /generate_204` | `302 → http://offgrid.local:8080/` (Android probe). Never `204`. |
+| `GET /hotspot-detect.html` | `302 → http://offgrid.local:8080/` (iOS probe). |
 | `GET /api/v1/directory` | `200` with a JSON array of at most 500 objects `{"alias","pubkey","x25519","last_seen"}`, ordered by `last_seen DESC` (deterministic tie-break: `pubkey ASC`). |
 | `POST /api/v1/directory` | Body `{"alias","pubkey","x25519"}`. Validate alias regex and that both keys are Base64 decoding to exactly 32 bytes. Upsert keyed by `pubkey`; set `last_seen = now`. → `200 {"status":"ok"}`. Invalid → `400`. |
 | `POST /api/v1/sync` | See §10.4. |
@@ -369,18 +369,18 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
 - **Sync:** automatic on page load plus a manual button. Push the whole `transit_queue` and `known_ids` (union of inbox ids ∪ transit ids ∪ previously seen/dismissed ids ∪ ids just pushed), with `limit` = 50. Classify `pull_envelopes`:
   - `dest_hint == own hint` → attempt decrypt + verify (§4.3); success → `inbox`; failure → discard silently.
   - otherwise → `transit_queue`; if it would exceed **100** envelopes, evict oldest by `created_at` (FIFO).
-- **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://portal.red.local:8080`" (visible, copyable URL) — see §13.4.
+- **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL) — see §13.4.
 - **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number.
 
 ## 12. Same-origin policy and the deliberate absence of TLS
 
-`IndexedDB` is isolated per web origin (scheme + host + port). For a mule to keep its identity, inbox and transit queue while moving between nodes, **all nodes must be indistinguishable in origin**: same FQDN `portal.red.local`, same port `8080`, same gateway IP `10.42.0.1`. Binding consequences:
+`IndexedDB` is isolated per web origin (scheme + host + port). For a mule to keep its identity, inbox and transit queue while moving between nodes, **all nodes must be indistinguishable in origin**: same FQDN `offgrid.local`, same port `8080`, same gateway IP `10.42.0.1`. Binding consequences:
 
-1. `dnsmasq` on every node answers `address=/#/10.42.0.1` and `address=/portal.red.local/10.42.0.1` (wildcard DNS).
-2. The canonical-host middleware (§10.2) forces every request onto `http://portal.red.local:8080`.
+1. `dnsmasq` on every node answers `address=/#/10.42.0.1` and `address=/offgrid.local/10.42.0.1` (wildcard DNS).
+2. The canonical-host middleware (§10.2) forces every request onto `http://offgrid.local:8080`.
 3. Users who bookmark the raw IP would fragment their own origin; the middleware corrects this automatically and the UI always displays the canonical URL.
 
-**TLS is intentionally absent.** No valid certificate can exist for `portal.red.local` when every node uses the same IP, and offline PKI would require client-side installation. HTTP plaintext is acceptable **only because** content is E2EE at the application layer: the node is a hostile blind channel that never sees plaintext, keys, the sender's identity, or the recipient's full identity. TLS would add a false sense of security without protecting anything application-layer crypto does not already protect. (Threat analysis: §13.)
+**TLS is intentionally absent.** No valid certificate can exist for `offgrid.local` when every node uses the same IP, and offline PKI would require client-side installation. HTTP plaintext is acceptable **only because** content is E2EE at the application layer: the node is a hostile blind channel that never sees plaintext, keys, the sender's identity, or the recipient's full identity. TLS would add a false sense of security without protecting anything application-layer crypto does not already protect. (Threat analysis: §13.)
 
 ## 13. Threat model
 
@@ -411,7 +411,7 @@ This is an explicitly **ACCEPTED RISK for Phase 1**: node operators are assumed 
 
 When Android/iOS detect the captive portal they open a **restricted mini-browser** whose storage profile is isolated from — and often ephemeral compared to — the device's real browser. A user who only ever uses the mini-browser may lose identity/inbox data between sessions or nodes.
 
-**Mandatory mitigation (UI):** a context-detection banner instructing: "Open this in your full browser: `http://portal.red.local:8080`" with a visible, copyable URL. The recommended user flow is: join Wi-Fi → open the URL in Chrome/Safari. Acceptance testing (Sprint 4) covers both contexts explicitly.
+**Mandatory mitigation (UI):** a context-detection banner instructing: "Open this in your full browser: `http://offgrid.local:8080`" with a visible, copyable URL. The recommended user flow is: join Wi-Fi → open the URL in Chrome/Safari. Acceptance testing (Sprint 4) covers both contexts explicitly.
 
 ### 13.5 Residual risks (documented, accepted for Phase 1)
 

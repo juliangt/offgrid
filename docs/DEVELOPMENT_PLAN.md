@@ -30,13 +30,13 @@ This section records the detailed analysis of the master prompt. Every decision 
 
 ### 1.1 The same-origin trick and its consequences
 
-`IndexedDB` is isolated per web origin (scheme + host + port). For a mule to keep its identity, inbox and transit queue while moving between nodes, **all nodes must be indistinguishable in origin**: same FQDN (`portal.red.local`), same port (8080) and same gateway IP (`10.42.0.1`).
+`IndexedDB` is isolated per web origin (scheme + host + port). For a mule to keep its identity, inbox and transit queue while moving between nodes, **all nodes must be indistinguishable in origin**: same FQDN (`offgrid.local`), same port (8080) and same gateway IP (`10.42.0.1`).
 
 Operational consequences:
 
-1. **Canonical-host middleware in Go:** every request whose `Host` header is not `portal.red.local:8080` (e.g. `10.42.0.1:8080`, or any domain "spoofed" by the wildcard DNS) must answer `301 → http://portal.red.local:8080/`. The browser thus always ends up on the correct origin and storage never fragments.
+1. **Canonical-host middleware in Go:** every request whose `Host` header is not `offgrid.local:8080` (e.g. `10.42.0.1:8080`, or any domain "spoofed" by the wildcard DNS) must answer `301 → http://offgrid.local:8080/`. The browser thus always ends up on the correct origin and storage never fragments.
 2. **Mandatory exemption:** the portal-detection endpoints (`/generate_204`, `/hotspot-detect.html`) must answer `302` with an absolute `Location` **regardless of the Host** (they arrive with Host `connectivitycheck.gstatic.com`, `captive.apple.com`, etc. via the wildcard DNS) and must **not** be redirected to the canonical host first, or the OS will fail to detect the captive portal.
-3. **No TLS:** a valid certificate for `portal.red.local` is impossible with the same IP on every node (and offline PKI would require client-side installation). Plain HTTP is used. This is acceptable **only because** content travels E2EE-encrypted on the client: the node (a hostile channel by design) never sees plaintext, keys, the real sender or the full recipient. TLS would add a false sense of security without protecting anything the application-layer crypto does not already protect.
+3. **No TLS:** a valid certificate for `offgrid.local` is impossible with the same IP on every node (and offline PKI would require client-side installation). Plain HTTP is used. This is acceptable **only because** content travels E2EE-encrypted on the client: the node (a hostile channel by design) never sees plaintext, keys, the real sender or the full recipient. TLS would add a false sense of security without protecting anything the application-layer crypto does not already protect.
 4. **Risk of "accidental fragmentation":** if a user bookmarks the IP instead of the FQDN, their session would land on a different origin. Mitigation: the middleware of point 1 + always displaying the canonical URL in the UI.
 
 ### 1.2 Threat model and the honest limitation of the `dest_hint`
@@ -64,7 +64,7 @@ Entropy comes from `crypto.getRandomValues` (available in all modern WebViews, i
 When Android/iOS detect the captive portal, they open a restricted mini-browser whose storage profile **is isolated from the device's real browser**. Consequences:
 
 - If the user only ever uses the mini-browser, everything works *inside it* as long as they keep using it, but their data may not persist reliably across sessions/nodes.
-- **Mandatory UI mitigation:** a banner detecting the restrictive context with the instruction "Open this in your full browser: `http://portal.red.local:8080`" (visible, copyable URL). Recommended user flow: join the Wi-Fi → open the URL in Chrome/Safari.
+- **Mandatory UI mitigation:** a banner detecting the restrictive context with the instruction "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL). Recommended user flow: join the Wi-Fi → open the URL in Chrome/Safari.
 - The acceptance tests (§6) explicitly cover both contexts.
 
 ### 1.5 Byte budget: Phase 1 (JSON/Base64) vs Phase 2/3 (binary)
@@ -104,9 +104,9 @@ Current Raspberry Pi OS Lite (Bookworm) images use **NetworkManager** by default
 ```
         ┌─────────────────────────┐          ┌─────────────────────────┐
         │   NODE A (Pi Zero 2 W)  │          │   NODE B (Pi Zero 2 W)  │
-        │  SSID: Red-Comunitaria  │          │  SSID: Red-Comunitaria  │
+        │  SSID: offgrid-messages │          │  SSID: offgrid-messages │
         │  ch.6  GW 10.42.0.1     │          │  ch.6  GW 10.42.0.1     │
-        │  portal.red.local:8080  │          │  portal.red.local:8080  │
+        │   offgrid.local:8080    │          │   offgrid.local:8080    │
         │  ┌───────────────────┐  │          │  ┌───────────────────┐  │
         │  │ hostapd (open AP) │  │          │  │  (identical)      │  │
         │  │ dnsmasq (DHCP+DNS │  │          │  │                   │  │
@@ -120,7 +120,7 @@ Current Raspberry Pi OS Lite (Bookworm) images use **NetworkManager** by default
                     ▼                                    ▼
         ┌─────────────────────────────────────────────────────────┐
         │           MULE (user's mobile browser)                  │
-        │  http://portal.red.local:8080  ← SAME ORIGIN ALWAYS     │
+        │  http://offgrid.local:8080  ← SAME ORIGIN ALWAYS        │
         │  IndexedDB «dtn_local_store»:                           │
         │   · identity  (X25519 + Ed25519 + alias)                │
         │   · inbox     (own decrypted messages)                  │
@@ -186,9 +186,9 @@ CREATE TABLE directory (
 
 | Method + path | Behavior |
 |---|---|
-| `GET /` | Serves the embedded `index.html` (`embed.FS`). Non-canonical Host → `301` to `portal.red.local:8080` |
-| `GET /generate_204` | `302 → http://portal.red.local:8080/` (Android; **never** answer 204 here) |
-| `GET /hotspot-detect.html` | `302 → http://portal.red.local:8080/` (iOS) |
+| `GET /` | Serves the embedded `index.html` (`embed.FS`). Non-canonical Host → `301` to `offgrid.local:8080` |
+| `GET /generate_204` | `302 → http://offgrid.local:8080/` (Android; **never** answer 204 here) |
+| `GET /hotspot-detect.html` | `302 → http://offgrid.local:8080/` (iOS) |
 | `GET /api/v1/directory` | Lists `alias+pubkey+x25519+last_seen` (≤500, by `last_seen DESC`) |
 | `POST /api/v1/directory` | User upsert; `last_seen=now` |
 | `POST /api/v1/sync` | Input `{known_ids[], push_envelopes[], limit}` → `INSERT OR IGNORE` push; SELECT live envelopes (`created_at+ttl ≥ now`) not included in `known_ids`, by `created_at DESC` `LIMIT limit` → `{status:"ok", pull_envelopes[]}` |
@@ -294,14 +294,14 @@ offgrid/
 
 | # | Task | Key details |
 |---|---|---|
-| 3.1 | `hostapd.conf` | Open AP, SSID `Red-Comunitaria`, channel 6, `ap_isolate=1`, `wlan0`, configurable country |
-| 3.2 | `dnsmasq.conf` | DHCP `10.42.0.50–250` (12 h), options 3 and 6 → `10.42.0.1`, `address=/#/10.42.0.1`, `address=/portal.red.local/10.42.0.1`, `bind-interfaces`, `no-resolv` |
+| 3.1 | `hostapd.conf` | Open AP, SSID `offgrid-messages`, channel 6, `ap_isolate=1`, `wlan0`, configurable country |
+| 3.2 | `dnsmasq.conf` | DHCP `10.42.0.50–250` (12 h), options 3 and 6 → `10.42.0.1`, `address=/#/10.42.0.1`, `address=/offgrid.local/10.42.0.1`, `bind-interfaces`, `no-resolv` |
 | 3.3 | `firewall/iptables.sh` | `REDIRECT 80→8080` on `wlan0` (PREROUTING), FORWARD DROP policy (client-to-client isolation reinforcing `ap_isolate`), persistence |
 | 3.4 | `power/` | `config.txt`: `dtoverlay=disable-bt`, LEDs off (`act_led_trigger=none`, `act_led_activelow=on`…), `dtparam=audio=off`, HDMI off (`hdmi_blanking=2` + oneshot service `vcgencmd display_power 0`), `powersave` governor; solar sizing note (~1 W continuous) |
 | 3.5 | `provision.sh` | Idempotent: detects Bookworm/NM (disables it) vs legacy; static IP `10.42.0.1/24` on `wlan0`; installs configs; `dtn-node.service` with the binary at `/opt/dtn-node`; per-step verification |
 | 3.6 | `systemd/dtn-node.service` | `After=network-online.target`, `Restart=always`, `WatchdogSec`, unprivileged user + data directory permissions |
 
-**Verification on hardware (or VM):** the phone sees the captive portal automatically on connecting; `http://portal.red.local:8080` answers; a second device cannot talk to the first; after a Pi reboot everything restores by itself.
+**Verification on hardware (or VM):** the phone sees the captive portal automatically on connecting; `http://offgrid.local:8080` answers; a second device cannot talk to the first; after a Pi reboot everything restores by itself.
 
 ### Sprint 4 — E2E integration, final Module D and documentation (1.5 days)
 

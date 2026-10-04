@@ -111,9 +111,9 @@ Wiring rules:
 5. **First-boot checklist** (bench, before final mounting):
    - [ ] `systemctl status dtn-node` — active, `sd_notify READY=1`, no restarts.
    - [ ] `systemctl status hostapd dnsmasq dtn-firewall dtn-power` — all active.
-   - [ ] Phone joins `Red-Comunitaria`, captive portal pops up on its own and lands on `http://portal.red.local:8080`.
+   - [ ] Phone joins `offgrid-messages`, captive portal pops up on its own and lands on `http://offgrid.local:8080`.
    - [ ] `hostapd_cli -i wlan0 all_sta` lists the phone as an associated station.
-   - [ ] `curl -H 'Host: portal.red.local:8080' http://10.42.0.1:8080/` from a client answers the portal HTML.
+   - [ ] `curl -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/` from a client answers the portal HTML.
    - [ ] Two clients cannot ping each other (`ap_isolate=1` + FORWARD DROP).
    - [ ] `poweroff`, power from the PANEL only in daylight, boot again: everything restores by itself.
 6. **Final mount**: panel per §6, enclosure sealed with glands and drip loops, log the date, COUNTRY used and the BOM serial numbers on the inside lid.

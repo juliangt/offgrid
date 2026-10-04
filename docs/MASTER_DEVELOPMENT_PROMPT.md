@@ -14,7 +14,7 @@ The system must operate with no Internet, satellite or cellular network access. 
 
 1. **Zero Internet Dependency:** External CDNs, cloud API calls, or libraries requiring public DNS resolution are not allowed. Every asset, script or font must be served locally from the Raspberry Pi.
 2. **Zero Trust in the Infrastructure (Zero-Trust Intermediaries):** The fixed nodes (Raspberry Pi) and transit cellphones are blind, untrusted channels. They must not learn the content, the real sender, or the full identity of the recipient.
-3. **Cross-Node Persistence (Same Web Origin):** All Raspberry Pi boards must force the same local virtual FQDN (`http://portal.red.local:8080`) and the same gateway IP (`10.42.0.1`) to guarantee that `IndexedDB` keeps the same logical origin as the user moves from one node to another.
+3. **Cross-Node Persistence (Same Web Origin):** All Raspberry Pi boards must force the same local virtual FQDN (`http://offgrid.local:8080`) and the same gateway IP (`10.42.0.1`) to guarantee that `IndexedDB` keeps the same logical origin as the user moves from one node to another.
 4. **bitchat / Nostr Protocol-Compatible Format:** Messages must serialize as atomic, independent events/envelopes (max ~180-250 bytes in the standard payload) to allow their future direct migration to **BLE L2CAP CoC** and **LoRa P2P (SX1262)** packets without rewriting the data structure.
 
 ---
@@ -23,8 +23,8 @@ The system must operate with no Internet, satellite or cellular network access. 
 
 ### Module A: Network Configuration on Raspberry Pi OS Lite
 Generate the Linux configuration files and provisioning commands:
-* **`/etc/hostapd/hostapd.conf`**: Configure `wlan0` as an open Access Point (`SSID: Red-Comunitaria`, channel 6, `ap_isolate=1`).
-* **`/etc/dnsmasq.conf`**: DHCP server on range `10.42.0.50` to `10.42.0.250`, DNS/Gateway assignment `10.42.0.1` and wildcard DNS spoofing (`address=/#/10.42.0.1` and `address=/portal.red.local/10.42.0.1`).
+* **`/etc/hostapd/hostapd.conf`**: Configure `wlan0` as an open Access Point (`SSID: offgrid-messages`, channel 6, `ap_isolate=1`).
+* **`/etc/dnsmasq.conf`**: DHCP server on range `10.42.0.50` to `10.42.0.250`, DNS/Gateway assignment `10.42.0.1` and wildcard DNS spoofing (`address=/#/10.42.0.1` and `address=/offgrid.local/10.42.0.1`).
 * **Firewall Rules (`iptables`)**: Bash script redirecting port 80 to 8080 on `wlan0` and capturing the Android (`/generate_204`) and iOS (`/hotspot-detect.html`) connectivity-check endpoints.
 * **Power optimizations for the Raspberry Pi Zero 2 W**: Disable the HDMI output and activity LEDs for operation on a solar panel and LiFePO4 battery.
 
@@ -38,7 +38,7 @@ Develop a self-contained HTTP server in **Go**, statically compilable (`CGO_ENAB
    * Indexes on `dest_hint` and `(created_at, ttl)`.
 2. **API Endpoints:**
    * `GET /`: Serve the static `index.html` file embedded (via `embed.FS`).
-   * `GET /generate_204`, `GET /hotspot-detect.html`: Answer with an HTTP 302 redirect toward `http://portal.red.local:8080/`.
+   * `GET /generate_204`, `GET /hotspot-detect.html`: Answer with an HTTP 302 redirect toward `http://offgrid.local:8080/`.
    * `GET /api/v1/directory`: Return the list of known users (alias + pubkey + last_seen).
    * `POST /api/v1/directory`: Register or refresh a user on the node.
    * `POST /api/v1/sync`:

@@ -101,7 +101,7 @@ ensure_chain filter "$IN_CHAIN"
 # truncated responses.
 "$IPT" -A "$IN_CHAIN" -p udp --dport 53 -j ACCEPT
 "$IPT" -A "$IN_CHAIN" -p tcp --dport 53 -j ACCEPT
-# The portal daemon itself (canonical origin http://portal.red.local:8080).
+# The portal daemon itself (canonical origin http://offgrid.local:8080).
 "$IPT" -A "$IN_CHAIN" -p tcp --dport "$PORTAL_PORT" -j ACCEPT
 # Opt-in SSH for the operator, restricted to the AP subnet interface. Off by
 # default: an unattended solar node needs no listener.

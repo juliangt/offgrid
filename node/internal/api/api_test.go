@@ -121,11 +121,11 @@ func TestCanonicalHostRedirect(t *testing.T) {
 		wantCode int
 		wantLoc  string
 	}{
-		{"ip host redirects", "10.42.0.1:8080", "/", http.StatusMovedPermanently, "http://portal.red.local:8080/"},
-		{"path and query preserved", "evil.example.com", "/foo?bar=1", http.StatusMovedPermanently, "http://portal.red.local:8080/foo?bar=1"},
-		{"bare host without port redirects", "portal.red.local", "/", http.StatusMovedPermanently, "http://portal.red.local:8080/"},
-		{"canonical host passes", "portal.red.local:8080", "/", http.StatusOK, ""},
-		{"canonical host is case-insensitive", "PORTAL.RED.LOCAL:8080", "/", http.StatusOK, ""},
+		{"ip host redirects", "10.42.0.1:8080", "/", http.StatusMovedPermanently, "http://offgrid.local:8080/"},
+		{"path and query preserved", "evil.example.com", "/foo?bar=1", http.StatusMovedPermanently, "http://offgrid.local:8080/foo?bar=1"},
+		{"bare host without port redirects", "offgrid.local", "/", http.StatusMovedPermanently, "http://offgrid.local:8080/"},
+		{"canonical host passes", "offgrid.local:8080", "/", http.StatusOK, ""},
+		{"canonical host is case-insensitive", "OFFGRID.LOCAL:8080", "/", http.StatusOK, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

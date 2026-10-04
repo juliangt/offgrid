@@ -48,13 +48,13 @@ go run . -addr :8080 -db /tmp/x.db
 
 The daemon listens on all interfaces of port 8080 and stores envelopes in `/tmp/x.db` (SQLite, WAL mode; the file is created on first start).
 
-**Browser testing tip (canonical origin).** The canonical-host middleware redirects any request whose `Host` header is not `portal.red.local:8080` to `http://portal.red.local:8080/` (protocol spec §10.2), so a browser opened at `http://localhost:8080` or `http://127.0.0.1:8080` lands on the canonical origin immediately. For the most faithful experience — a real `IndexedDB` under the exact production origin — add one line to `/etc/hosts`:
+**Browser testing tip (canonical origin).** The canonical-host middleware redirects any request whose `Host` header is not `offgrid.local:8080` to `http://offgrid.local:8080/` (protocol spec §10.2), so a browser opened at `http://localhost:8080` or `http://127.0.0.1:8080` lands on the canonical origin immediately. For the most faithful experience — a real `IndexedDB` under the exact production origin — add one line to `/etc/hosts`:
 
 ```
-127.0.0.1	portal.red.local
+127.0.0.1	offgrid.local
 ```
 
-then open **http://portal.red.local:8080**. Use two browser profiles (one as Alice, one as Bob/mule) to exercise the full send → carry → receive flow, exactly as `tests/crypto_roundtrip.mjs` does headlessly.
+then open **http://offgrid.local:8080**. Use two browser profiles (one as Alice, one as Bob/mule) to exercise the full send → carry → receive flow, exactly as `tests/crypto_roundtrip.mjs` does headlessly.
 
 Flags:
 
@@ -175,11 +175,11 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 
    `provision.sh` (9 verified steps) detects the board model and userland ISA, masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables`, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files (on single-core ARMv6 boards the daemon's watchdog ceiling is relaxed to 60 s), creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the matching binary at `/opt/dtn-node/dtn-node`, and enables every unit — verifying each step with `[OK]`/`[FAIL]` and failing fast.
 
-**Verify after reboot — all paths.** From a laptop/phone joined to the `Red-Comunitaria` open AP:
+**Verify after reboot — all paths.** From a laptop/phone joined to the `offgrid-messages` open AP:
 
    ```bash
    # Portal answers on the canonical origin (host header override):
-   curl -H 'Host: portal.red.local:8080' http://10.42.0.1:8080/
+   curl -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/
    # Captive-portal probe via the firewall redirect (port 80 -> 8080):
    curl -s -o /dev/null -w '%{http_code}\n' http://10.42.0.1/generate_204   # -> 302
    # Any other hostname is wildcard-resolved by dnsmasq to the node:
@@ -194,7 +194,7 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
    journalctl -u dtn-node -b           # daemon logs; janitor runs at startup
    ```
 
-   A phone connected to the SSID should pop the captive portal on its own and land on `http://portal.red.local:8080`; two clients must not be able to reach each other (`ap_isolate=1` + FORWARD DROP); a second reboot must restore everything by itself.
+   A phone connected to the SSID should pop the captive portal on its own and land on `http://offgrid.local:8080`; two clients must not be able to reach each other (`ap_isolate=1` + FORWARD DROP); a second reboot must restore everything by itself.
 
 ## 6. Troubleshooting
 
@@ -204,8 +204,8 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 | `hostapd` fails to start (`systemctl status hostapd`) | `journalctl -u hostapd -b`. In order: (1) `rfkill list wifi` — unblock with `rfkill unblock wifi`; (2) `country_code` in `/etc/hostapd/hostapd.conf` must be a valid two-letter code matching the site's regulations, or the driver refuses the interface; (3) the Wi-Fi driver must support AP mode on `wlan0` (the on-board Pi radio does; USB dongles often do not — `docs/pi-models.md` §3); (4) confirm `DAEMON_CONF="/etc/hostapd/hostapd.conf"` in `/etc/default/hostapd` and that the unit is not `masked`. |
 | `dnsmasq` fails: port 53/67 already in use | `journalctl -u dnsmasq -b` shows `address already in use`. Another resolver (e.g. `systemd-resolved` on non-Pi OS images) owns the port: disable it (`systemctl disable --now systemd-resolved`) or remove its stub config; on the Pi this is rare because provision.sh already masks NetworkManager. Our `dnsmasq.conf` uses `bind-interfaces`, so a clash is always a real port conflict, not a wildcard bind. |
 | `dtn-node` unit keeps restarting | `journalctl -u dtn-node -b`. Under systemd the unit runs `Type=notify` with `WatchdogSec=`; the daemon pings `WATCHDOG=1` at half the interval (see `internal/sdnotify`). Restarts with `missed watchdog ping` entries mean the process was starved: check for CPU throttling, an overloaded SD card (see `docs/hardware.md` §5), or a dying battery browning out the SoC (check `vcgencmd get_throttled` and the power budget). |
-| Browser opens the portal but the app loses data between nodes | You are inside the OS captive-portal mini-browser, whose storage profile is isolated and often ephemeral (spec §13.4). Copy the URL shown in the banner — `http://portal.red.local:8080` — and open it in Chrome/Safari; only the full browser gives persistent `IndexedDB` under the shared origin. |
-| `curl` to `http://10.42.0.1:8080/` answers `301` | Expected: the canonical-host middleware redirects every non-canonical Host (spec §10.2). Verify with the `Host: portal.red.local:8080` header as in step 5, or follow redirects in a browser — you will end up on the canonical origin by design. |
+| Browser opens the portal but the app loses data between nodes | You are inside the OS captive-portal mini-browser, whose storage profile is isolated and often ephemeral (spec §13.4). Copy the URL shown in the banner — `http://offgrid.local:8080` — and open it in Chrome/Safari; only the full browser gives persistent `IndexedDB` under the shared origin. |
+| `curl` to `http://10.42.0.1:8080/` answers `301` | Expected: the canonical-host middleware redirects every non-canonical Host (spec §10.2). Verify with the `Host: offgrid.local:8080` header as in step 5, or follow redirects in a browser — you will end up on the canonical origin by design. |
 | Envelope pushed but never pulled | TTL may have expired: pulls serve only `created_at + ttl >= now` (spec §10.4) and the janitor deletes expired rows every 15 minutes. Check `created_at` of the envelope and the node's clock (`date -u`) — a node with a wrong clock silently filters valid mail. |
 
 ## 7. Cold start and data layout
