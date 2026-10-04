@@ -64,7 +64,7 @@ Entropy comes from `crypto.getRandomValues` (available in all modern WebViews, i
 When Android/iOS detect the captive portal, they open a restricted mini-browser whose storage profile **is isolated from the device's real browser**. Consequences:
 
 - If the user only ever uses the mini-browser, everything works *inside it* as long as they keep using it, but their data may not persist reliably across sessions/nodes.
-- **Mandatory UI mitigation:** a banner detecting the restrictive context with the instruction "Open it in your full browser: `http://portal.red.local:8080`" (visible, copyable URL). Recommended user flow: join the Wi-Fi → open the URL in Chrome/Safari.
+- **Mandatory UI mitigation:** a banner detecting the restrictive context with the instruction "Open this in your full browser: `http://portal.red.local:8080`" (visible, copyable URL). Recommended user flow: join the Wi-Fi → open the URL in Chrome/Safari.
 - The acceptance tests (§6) explicitly cover both contexts.
 
 ### 1.5 Byte budget: Phase 1 (JSON/Base64) vs Phase 2/3 (binary)
@@ -271,7 +271,7 @@ offgrid/
 
 | # | Task | Key details |
 |---|---|---|
-| 2.1 | `web/index.html` skeleton | Single file, inline HTML+CSS+JS, system typography (zero external assets), responsive, labels in Spanish |
+| 2.1 | `web/index.html` skeleton | Single file, inline HTML+CSS+JS, system typography (zero external assets), responsive, labels in English (amended from the original "labels in Spanish" decision by issue #8) |
 | 2.2 | tweetnacl embedded | Full source inline + base64/hex helpers; no `eval` |
 | 2.3 | `IndexedDB` layer | `dtn_local_store` v1: `identity` (singleton), `inbox`, `transit_queue`; version-based migrations |
 | 2.4 | Identity | Alias registration → X25519/Ed25519 key pair generation → `POST /api/v1/directory`; **manual seed backup** (copyable text + import) to survive browser data wipes |

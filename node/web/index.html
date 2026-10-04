@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,7 +7,7 @@
   <!-- No external assets exist in this file; the CSP only allows inline
        style/script and same-origin API calls (hardening, §1.3 plan). -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
-  <title>Mensajes — Red Comunitaria</title>
+  <title>Messages — Community Network</title>
   <style>
     /* System font stack only — zero external assets (task 2.1). */
     :root {
@@ -177,49 +177,49 @@
   <div id="banner-captive" class="banner" role="note" hidden>
     <div class="banner-row">
       <div class="banner-text">
-        <strong id="banner-title">Ábrelo en tu navegador completo</strong>
+        <strong id="banner-title">Open this in your full browser</strong>
         <span id="banner-text"></span>
         <code id="banner-url">http://portal.red.local:8080</code>
       </div>
-      <button id="banner-copy" type="button" class="small">Copiar</button>
-      <button id="banner-close" type="button" class="small" aria-label="Cerrar aviso">✕</button>
+      <button id="banner-copy" type="button" class="small">Copy</button>
+      <button id="banner-close" type="button" class="small" aria-label="Dismiss banner">✕</button>
     </div>
   </div>
   <main id="dtn-app">
     <!-- Registration screen (plan 2.4): alias → keys → directory upsert → seed backup. -->
     <section id="screen-register" hidden>
-      <h1>Únete a la red</h1>
-      <p>Crea tu identidad para enviar y recibir mensajes sin internet. Tus claves se generan aquí y nunca salen de este dispositivo.</p>
+      <h1>Join the network</h1>
+      <p>Create your identity to send and receive messages without internet. Your keys are generated here and never leave this device.</p>
       <div class="card" id="reg-card">
-        <label for="reg-alias">Tu alias</label>
-        <input id="reg-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="p. ej. ana_maria">
-        <p class="hint">De 1 a 24 caracteres: letras, números, punto, guion y guion bajo.</p>
+        <label for="reg-alias">Your alias</label>
+        <input id="reg-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. alice_77">
+        <p class="hint">1 to 24 characters: letters, numbers, dot, dash and underscore.</p>
         <div class="actions">
-          <button id="btn-register" type="button" class="primary">Crear identidad</button>
+          <button id="btn-register" type="button" class="primary">Create identity</button>
         </div>
         <p id="reg-error" class="error" hidden></p>
       </div>
       <div class="card" id="reg-backup" hidden>
-        <h2>Guarda tu semilla de respaldo</h2>
-        <p class="warn">Sin esta semilla no podrás recuperar tu identidad si se borran los datos del navegador. Cópiala y guárdala en un lugar seguro.</p>
+        <h2>Save your backup seed</h2>
+        <p class="warn">Without this seed you cannot recover your identity if the browser data is wiped. Copy it and store it somewhere safe.</p>
         <textarea id="reg-seed" readonly rows="2"></textarea>
         <div class="actions">
-          <button id="btn-copy-seed" type="button" data-copy-target="reg-seed">Copiar semilla</button>
+          <button id="btn-copy-seed" type="button" data-copy-target="reg-seed">Copy seed</button>
         </div>
-        <label class="inline"><input type="checkbox" id="reg-confirm"> Ya guardé mi semilla</label>
+        <label class="inline"><input type="checkbox" id="reg-confirm"> I have saved my seed</label>
         <div class="actions">
-          <button id="btn-finish-register" type="button" class="primary" disabled>Continuar a los mensajes</button>
+          <button id="btn-finish-register" type="button" class="primary" disabled>Continue to messages</button>
         </div>
       </div>
       <div class="card">
-        <h2>Recuperar una identidad</h2>
-        <p>Si perdiste los datos del navegador, restaura tu identidad con la semilla de respaldo que guardaste.</p>
-        <label for="import-seed">Semilla de respaldo (Base64)</label>
-        <textarea id="import-seed" rows="2" placeholder="Pega aquí la semilla"></textarea>
-        <label for="import-alias">Tu alias</label>
-        <input id="import-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Tu alias en la red">
+        <h2>Recover an identity</h2>
+        <p>If you lost the browser data, restore your identity with the backup seed you saved.</p>
+        <label for="import-seed">Backup seed (Base64)</label>
+        <textarea id="import-seed" rows="2" placeholder="Paste your seed here"></textarea>
+        <label for="import-alias">Your alias</label>
+        <input id="import-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Your alias on the network">
         <div class="actions">
-          <button id="btn-import" type="button">Importar identidad</button>
+          <button id="btn-import" type="button">Import identity</button>
         </div>
         <p id="import-error" class="error" hidden></p>
       </div>
@@ -227,33 +227,33 @@
 
     <!-- Main app screen -->
     <section id="screen-app" hidden>
-      <h1>Mensajes</h1>
+      <h1>Messages</h1>
       <!-- Telemetry panel (§11): always visible, above the tabs. -->
       <div id="telemetry" class="telemetry">
-        <span>Sobres ajenos en tránsito: <strong id="tel-transit">0</strong> / Capacidad: <strong>100</strong></span>
-        <span>Mensajes enviados: <strong id="tel-sent">0</strong></span>
-        <span id="tel-evicted-wrap" hidden>Expulsados: <strong id="tel-evicted">0</strong></span>
-        <span>Última sincronización: <span id="tel-lastsync">nunca</span></span>
-        <button id="btn-sync" type="button">Sincronizar ahora</button>
+        <span>Foreign envelopes in transit: <strong id="tel-transit">0</strong> / Capacity: <strong>100</strong></span>
+        <span>Messages sent: <strong id="tel-sent">0</strong></span>
+        <span id="tel-evicted-wrap" hidden>Evicted: <strong id="tel-evicted">0</strong></span>
+        <span>Last sync: <span id="tel-lastsync">never</span></span>
+        <button id="btn-sync" type="button">Sync now</button>
       </div>
       <nav class="tabs">
-        <button id="tab-btn-compose" class="tab active" type="button">Nuevo mensaje</button>
-        <button id="tab-btn-inbox" class="tab" type="button">Bandeja de entrada</button>
-        <button id="tab-btn-identity" class="tab" type="button">Identidad</button>
+        <button id="tab-btn-compose" class="tab active" type="button">New message</button>
+        <button id="tab-btn-inbox" class="tab" type="button">Inbox</button>
+        <button id="tab-btn-identity" class="tab" type="button">Identity</button>
       </nav>
 
       <section id="tab-compose">
         <div class="card">
-          <label for="compose-to">Para</label>
+          <label for="compose-to">To</label>
           <select id="compose-to">
-            <option value="">Cargando directorio…</option>
+            <option value="">Loading directory…</option>
           </select>
-          <button id="btn-refresh-dir" type="button" class="linkish">Actualizar directorio</button>
-          <label for="compose-text">Mensaje</label>
-          <textarea id="compose-text" rows="4" placeholder="Escribe tu mensaje…"></textarea>
+          <button id="btn-refresh-dir" type="button" class="linkish">Refresh directory</button>
+          <label for="compose-text">Message</label>
+          <textarea id="compose-text" rows="4" placeholder="Write your message…"></textarea>
           <div class="counter-row"><span id="byte-counter">0/128</span></div>
           <div class="actions">
-            <button id="btn-send" type="button" class="primary" disabled>Firmar y enviar</button>
+            <button id="btn-send" type="button" class="primary" disabled>Sign and send</button>
           </div>
           <p id="compose-status" hidden></p>
         </div>
@@ -261,40 +261,40 @@
 
       <section id="tab-inbox" hidden>
         <ul id="inbox-list" class="inbox"></ul>
-        <p id="inbox-empty" class="muted">Sin mensajes todavía. Cuando alguien te escriba, aparecerá aquí.</p>
+        <p id="inbox-empty" class="muted">No messages yet. When someone writes to you, messages will appear here.</p>
       </section>
 
       <section id="tab-identity" hidden>
         <div class="card">
-          <h2>Tu identidad</h2>
+          <h2>Your identity</h2>
           <dl>
             <dt>Alias</dt>
             <dd id="id-alias"></dd>
-            <dt>Clave pública Ed25519 (firma)</dt>
+            <dt>Ed25519 public key (signing)</dt>
             <dd><code id="id-pubkey"></code></dd>
-            <dt>Clave pública X25519 (cifrado)</dt>
+            <dt>X25519 public key (encryption)</dt>
             <dd><code id="id-x25519"></code></dd>
-            <dt>Tu dest_hint</dt>
+            <dt>Your dest_hint</dt>
             <dd><code id="id-hint"></code></dd>
           </dl>
           <div class="actions">
-            <button type="button" class="small" data-copy-target="id-pubkey">Copiar Ed25519</button>
-            <button type="button" class="small" data-copy-target="id-x25519">Copiar X25519</button>
+            <button type="button" class="small" data-copy-target="id-pubkey">Copy Ed25519</button>
+            <button type="button" class="small" data-copy-target="id-x25519">Copy X25519</button>
           </div>
         </div>
         <div class="card">
-          <h2>Semilla de respaldo</h2>
-          <p class="hint">Única forma de recuperar tu identidad si se borran los datos del navegador. Guárdala fuera de este dispositivo.</p>
+          <h2>Backup seed</h2>
+          <p class="hint">The only way to recover your identity if the browser data is wiped. Keep it off this device.</p>
           <div class="actions">
-            <button id="btn-show-seed" type="button">Mostrar semilla</button>
-            <button type="button" data-copy-target="id-seed">Copiar semilla</button>
+            <button id="btn-show-seed" type="button">Show seed</button>
+            <button type="button" data-copy-target="id-seed">Copy seed</button>
           </div>
           <textarea id="id-seed" readonly rows="2" hidden></textarea>
         </div>
       </section>
     </section>
   </main>
-  <noscript><p>Esta aplicación necesita JavaScript.</p></noscript>
+  <noscript><p>This application requires JavaScript.</p></noscript>
   <script>
   /* === TWEETNACL_EMBED_START (tweetnacl 1.0.3, Unlicense) === */
   // TweetNaCl.js v1.0.3 — port of TweetNaCl to JavaScript (https://tweetnacl.js.org)
@@ -1036,7 +1036,7 @@
   function idbOpen() {
     return new Promise(function (resolve, reject) {
       if (typeof indexedDB === "undefined") {
-        reject(new Error("IndexedDB no está disponible en este navegador"));
+        reject(new Error("IndexedDB is not available in this browser"));
         return;
       }
       var req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -1053,7 +1053,7 @@
       };
       req.onsuccess = function () { resolve(req.result); };
       req.onerror = function () { reject(req.error || new Error("no se pudo abrir IndexedDB")); };
-      req.onblocked = function () { reject(new Error("IndexedDB bloqueada por otra pestaña")); };
+      req.onblocked = function () { reject(new Error("IndexedDB blocked by another tab")); };
     });
   }
 
@@ -1082,8 +1082,8 @@
           return;
         }
         tx.oncomplete = function () { resolve(result); };
-        tx.onerror = function () { reject(tx.error || new Error("transacción fallida")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onerror = function () { reject(tx.error || new Error("transaction failed")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1105,7 +1105,7 @@
         };
         tx.oncomplete = function () { resolve(out); };
         tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1126,7 +1126,7 @@
         };
         tx.oncomplete = function () { resolve(out); };
         tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1150,7 +1150,7 @@
         req.onsuccess = function () { resolve(req.result); };
         tx.oncomplete = function () { /* settled by req.onsuccess */ };
         tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1163,7 +1163,7 @@
         req.onsuccess = function () { resolve(req.result); };
         tx.oncomplete = function () { /* settled by req.onsuccess */ };
         tx.onerror = function () { reject(tx.error || new Error("lectura fallida")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1188,8 +1188,8 @@
         var store = tx.objectStore(STORE_INBOX);
         for (var i = 0; i < records.length; i++) store.put(records[i]);
         tx.oncomplete = function () { resolve(records.length); };
-        tx.onerror = function () { reject(tx.error || new Error("no se pudo guardar el mensaje")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onerror = function () { reject(tx.error || new Error("could not save the message")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1273,8 +1273,8 @@
           for (var m = 0; m < outcome.evicted.length; m++) store.delete(outcome.evicted[m].id);
         };
         tx.oncomplete = function () { resolve({ added: added, evicted: evicted }); };
-        tx.onerror = function () { reject(tx.error || new Error("no se pudo actualizar la cola de tránsito")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onerror = function () { reject(tx.error || new Error("could not update the transit queue")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1291,8 +1291,8 @@
         var store = tx.objectStore(STORE_TRANSIT);
         for (var i = 0; i < ids.length; i++) store.delete(ids[i]);
         tx.oncomplete = function () { resolve(ids.length); };
-        tx.onerror = function () { reject(tx.error || new Error("no se pudo vaciar la cola de tránsito")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onerror = function () { reject(tx.error || new Error("could not clear the transit queue")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1310,8 +1310,8 @@
           if (typeof ids[i] === "string" && ids[i]) store.put({ id: ids[i], seen_at: seenAt }, ids[i]);
         }
         tx.oncomplete = function () { resolve(ids.length); };
-        tx.onerror = function () { reject(tx.error || new Error("no se pudo registrar el sobre como visto")); };
-        tx.onabort = function () { reject(tx.error || new Error("transacción abortada")); };
+        tx.onerror = function () { reject(tx.error || new Error("could not mark the envelope as seen")); };
+        tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
       });
     });
   }
@@ -1383,14 +1383,14 @@
             try {
               resolve(JSON.parse(xhr.responseText));
             } catch (e) {
-              reject(new Error("respuesta no válida del nodo"));
+              reject(new Error("invalid response from the node"));
             }
           } else {
             reject(new Error("HTTP " + xhr.status));
           }
         };
-        xhr.onerror = function () { reject(new Error("sin contacto con el nodo")); };
-        xhr.ontimeout = function () { reject(new Error("tiempo agotado")); };
+        xhr.onerror = function () { reject(new Error("no contact with the node")); };
+        xhr.ontimeout = function () { reject(new Error("request timed out")); };
         xhr.send(body === undefined ? null : JSON.stringify(body));
       } catch (e) {
         reject(e);
@@ -1439,7 +1439,7 @@
           var text = (target.tagName === "TEXTAREA" || target.tagName === "INPUT") ? target.value : target.textContent;
           copyText(text, function (ok) {
             var old = btn.textContent;
-            btn.textContent = ok ? "¡Copiado!" : "No se pudo copiar";
+            btn.textContent = ok ? "Copied!" : "Could not copy";
             setTimeout(function () { btn.textContent = old; }, 1500);
           });
         });
@@ -1447,7 +1447,7 @@
     }
   }
 
-  /* ----- time formatting (Spanish labels, task 2.1) ----- */
+  /* ----- time formatting (English labels, task 2.1 as amended) ----- */
 
   function nowSec() {
     return Math.floor(Date.now() / 1000);
@@ -1455,11 +1455,11 @@
 
   function relativeTime(unixSec) {
     var d = nowSec() - unixSec;
-    if (!(d >= 0)) return "en el futuro";
-    if (d < 45) return "ahora";
-    if (d < 3600) return "hace " + Math.max(1, Math.round(d / 60)) + " min";
-    if (d < 86400) return "hace " + Math.round(d / 3600) + " h";
-    if (d < 7 * 86400) return "hace " + Math.round(d / 86400) + " d";
+    if (!(d >= 0)) return "in the future";
+    if (d < 45) return "now";
+    if (d < 3600) return Math.max(1, Math.round(d / 60)) + " min ago";
+    if (d < 86400) return Math.round(d / 3600) + " h ago";
+    if (d < 7 * 86400) return Math.round(d / 86400) + " d ago";
     return new Date(unixSec * 1000).toLocaleDateString();
   }
 
@@ -1504,7 +1504,7 @@
       select.textContent = "";
       var opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "No se pudo cargar el directorio. Reintenta con «Actualizar directorio».";
+      opt.textContent = "Could not load the directory. Retry with \"Refresh directory\".";
       select.appendChild(opt);
       updateSendEnabled();
       return [];
@@ -1520,18 +1520,18 @@
     for (var i = 0; i < uiState.directory.length; i++) {
       var entry = uiState.directory[i];
       if (!entry || !entry.alias || !entry.x25519) continue;
-      if (own && entry.pubkey === own) continue; /* no enviar mensajes a uno mismo */
+      if (own && entry.pubkey === own) continue; /* never offer yourself as a recipient */
       var opt = document.createElement("option");
       opt.value = entry.x25519;
       opt.textContent = entry.alias + " · " + relativeTime(entry.last_seen || 0);
-      opt.title = "Visto por última vez: " + absoluteTime(entry.last_seen || 0);
+      opt.title = "Last seen: " + absoluteTime(entry.last_seen || 0);
       select.appendChild(opt);
       count += 1;
     }
     if (count === 0) {
       var empty = document.createElement("option");
       empty.value = "";
-      empty.textContent = "No hay otros usuarios registrados en este nodo todavía.";
+      empty.textContent = "No other users are registered on this node yet.";
       select.appendChild(empty);
     }
     updateSendEnabled();
@@ -1583,28 +1583,28 @@
 
     var entry = currentRecipient();
     if (!entry) {
-      showStatus(statusEl, "error", "Elige un destinatario del directorio.");
+      showStatus(statusEl, "error", "Pick a recipient from the directory.");
       return;
     }
     var text = $("compose-text").value;
     var len = DTN.messageByteLength(text);
     if (len < 1) {
-      showStatus(statusEl, "error", "Escribe un mensaje.");
+      showStatus(statusEl, "error", "Write a message.");
       return;
     }
     if (len > DTN.MESSAGE_MAX_BYTES) {
-      showStatus(statusEl, "error", "El mensaje supera el límite de 128 bytes.");
+      showStatus(statusEl, "error", "The message exceeds the 128-byte limit.");
       return;
     }
     var recipientRaw = DTN.b64decode(entry.x25519);
     if (!recipientRaw || recipientRaw.length !== 32) {
-      showStatus(statusEl, "error", "La clave del destinatario no es válida.");
+      showStatus(statusEl, "error", "The recipient key is not valid.");
       return;
     }
 
     uiState.sending = true;
     updateSendEnabled();
-    showStatus(statusEl, "", "Firmando y cifrando…");
+    showStatus(statusEl, "", "Signing and encrypting…");
 
     var env;
     try {
@@ -1619,7 +1619,7 @@
     } catch (e) {
       uiState.sending = false;
       updateSendEnabled();
-      showStatus(statusEl, "error", "No se pudo construir el sobre: " + e.message);
+      showStatus(statusEl, "error", "Could not build the envelope: " + e.message);
       return;
     }
 
@@ -1640,19 +1640,19 @@
           $("compose-text").value = "";
           updateCounter();
           updateSendEnabled();
-          showStatus(statusEl, "error", "No se pudo entregar al nodo todavía. El mensaje quedó en tu cola de tránsito y se reintentará al sincronizar.");
+          showStatus(statusEl, "error", "Could not deliver to the node yet. The message stayed in your transit queue and will retry on the next sync.");
           renderTelemetry();
         });
       }
       $("compose-text").value = "";
       updateCounter();
       updateSendEnabled();
-      showStatus(statusEl, "ok", "Mensaje cifrado y dejado en el nodo. Llegará cuando una mula lo lleve hasta su destinatario.");
+      showStatus(statusEl, "ok", "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.");
       renderTelemetry();
     }, function (err) {
       uiState.sending = false;
       updateSendEnabled();
-      showStatus(statusEl, "error", "Error al enviar (" + err.message + "). Reintenta.");
+      showStatus(statusEl, "error", "Send failed (" + err.message + "). Please retry.");
       renderTelemetry();
     });
   }
@@ -1711,7 +1711,7 @@
     var btn = $("btn-show-seed");
     if (!seedEl || !btn) return;
     seedEl.hidden = !seedEl.hidden;
-    btn.textContent = seedEl.hidden ? "Mostrar semilla" : "Ocultar semilla";
+    btn.textContent = seedEl.hidden ? "Show seed" : "Hide seed";
   }
 
   /* ----- telemetry panel (§11) ----- */
@@ -1724,12 +1724,12 @@
     var el = $("tel-lastsync");
     if (!el) return;
     if (!v || typeof v !== "object" || !v.at) {
-      el.textContent = "nunca";
+      el.textContent = "never";
       return;
     }
     var when = relativeTime(v.at);
-    if (v.status === "ok") el.textContent = "correcta (" + when + ")";
-    else if (v.status === "error") el.textContent = "con error (" + when + ")";
+    if (v.status === "ok") el.textContent = "ok (" + when + ")";
+    else if (v.status === "error") el.textContent = "failed (" + when + ")";
     else el.textContent = when;
   }
 
@@ -1784,13 +1784,13 @@
   function onRegister() {
     var alias = $("reg-alias").value.replace(/^\s+|\s+$/g, "");
     if (!DTN.validateAlias(alias)) {
-      setRegError("Alias inválido: usa de 1 a 24 letras, números, punto, guion o guion bajo.");
+      setRegError("Invalid alias: use 1 to 24 letters, numbers, dot, dash or underscore.");
       return;
     }
     var btn = $("btn-register");
     var btnLabel = btn.textContent;
     btn.disabled = true;
-    btn.textContent = "Generando claves…";
+    btn.textContent = "Generating keys…";
     setRegError("");
 
     var identity = DTN.createIdentity();
@@ -1810,7 +1810,7 @@
     }, function (err) {
       btn.disabled = false;
       btn.textContent = btnLabel;
-      setRegError("No se pudo registrar en el nodo (" + err.message + "). Reintenta.");
+      setRegError("Could not register on the node (" + err.message + "). Please retry.");
     });
   }
 
@@ -1825,12 +1825,12 @@
     var seedText = $("import-seed").value.replace(/^\s+|\s+$/g, "");
     var alias = $("import-alias").value.replace(/^\s+|\s+$/g, "");
     if (!DTN.validateAlias(alias)) {
-      setImportError("Alias inválido: usa de 1 a 24 letras, números, punto, guion o guion bajo.");
+      setImportError("Invalid alias: use 1 to 24 letters, numbers, dot, dash or underscore.");
       return;
     }
     var seed = DTN.b64decode(seedText);
     if (!seed || seed.length !== 32) {
-      setImportError("Semilla inválida: debe ser Base64 de 32 bytes (44 caracteres con relleno).");
+      setImportError("Invalid seed: it must be Base64 of 32 bytes (44 characters with padding).");
       return;
     }
     var btn = $("btn-import");
@@ -1842,7 +1842,7 @@
       identity = DTN.identityFromSeed(seed);
     } catch (e) {
       btn.disabled = false;
-      setImportError("Semilla inválida: " + e.message);
+      setImportError("Invalid seed: " + e.message);
       return;
     }
     identity.alias = alias;
@@ -1855,7 +1855,7 @@
       enterApp();
     }, function (err) {
       btn.disabled = false;
-      setImportError("No se pudo restaurar la identidad (" + err.message + "). Reintenta.");
+      setImportError("Could not restore the identity (" + err.message + "). Please retry.");
     });
   }
 
@@ -2152,11 +2152,11 @@
     var banner = $("banner-captive");
     if (!banner) return;
     if (detectCaptiveBrowser()) {
-      setText("banner-title", "Estás en el mini-navegador del portal cautivo");
-      setText("banner-text", "Este navegador restringido puede borrar tus datos. Ábrelo en tu navegador completo (Chrome o Safari) para que tu identidad y tus mensajes persistan entre nodos:");
+      setText("banner-title", "You are in the captive-portal mini-browser");
+      setText("banner-text", "This restricted browser may wipe your data. Open this in your full browser (Chrome or Safari) so your identity and messages persist across nodes:");
     } else {
-      setText("banner-title", "Ábrelo en tu navegador completo");
-      setText("banner-text", "Si llegaste desde el aviso del Wi-Fi, escribe esta dirección en Chrome o Safari para que tus datos persistan entre nodos:");
+      setText("banner-title", "Open this in your full browser");
+      setText("banner-text", "If you arrived from the Wi-Fi notice, type this address in Chrome or Safari so your data persists across nodes:");
     }
     showEl(banner);
     $("banner-close").addEventListener("click", function () {
@@ -2165,8 +2165,8 @@
     $("banner-copy").addEventListener("click", function () {
       copyText(DTN.CANONICAL_URL, function (ok) {
         var btn = $("banner-copy");
-        btn.textContent = ok ? "¡Copiado!" : "No se pudo copiar";
-        setTimeout(function () { btn.textContent = "Copiar"; }, 1500);
+        btn.textContent = ok ? "Copied!" : "Could not copy";
+        setTimeout(function () { btn.textContent = "Copy"; }, 1500);
       });
     });
   }
