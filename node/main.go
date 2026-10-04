@@ -19,6 +19,7 @@ import (
 	"flag"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -27,6 +28,7 @@ import (
 
 	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/cleanup"
+	"offgrid/dtn-node/internal/sdnotify"
 	"offgrid/dtn-node/internal/storage"
 )
 
@@ -77,12 +79,29 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Bind before serving so readiness is a hard fact: the sd_notify READY=1
+	// below must only be sent once the socket truly accepts connections.
+	// (Outside systemd sdnotify is a no-op and this behaves like plain
+	// ListenAndServe.)
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		log.Fatalf("cannot listen on %s: %v", *addr, err)
+	}
+
 	serverErr := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
 	}()
+
+	// Type=notify contract (raspberry/systemd/dtn-node.service): announce
+	// readiness once listening, then keep the watchdog fed at half its
+	// interval. Both are silent no-ops when not running under systemd.
+	if err := sdnotify.Ready(); err != nil {
+		log.Printf("sd_notify READY failed (continuing): %v", err)
+	}
+	sdnotify.StartWatchdog()
 
 	log.Printf("listening on %s (db: %s) — canonical origin http://%s/", *addr, *dbPath, api.CanonicalHost)
 
