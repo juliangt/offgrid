@@ -23,6 +23,22 @@
 #                                  or /boot/config.txt (legacy), once only
 #   power/dtn-power.service     -> /etc/systemd/system/dtn-power.service
 #   systemd/dtn-node.service    -> /etc/systemd/system/dtn-node.service
+#   hardening/sshd-hardening.conf -> /usr/local/sbin/dtn-sshd-hardening.conf
+#                                  (staged; harden-ssh.sh installs it to
+#                                  /etc/ssh/sshd_config.d/00-dtn-hardening.conf)
+#   hardening/harden-ssh.sh     -> /usr/local/sbin/dtn-harden-ssh.sh (run in step 8)
+#   hardening/harden-services.sh -> /usr/local/sbin/dtn-harden-services.sh (step 8)
+#   hardening/harden-upgrades.sh -> /usr/local/sbin/dtn-harden-upgrades.sh (step 8)
+#   hardening/dtn-network-watchdog.sh -> /usr/local/sbin/dtn-network-watchdog.sh
+#   hardening/dtn-network-watchdog.service -> /etc/systemd/system/
+#   hardening/dtn-network-watchdog.timer   -> /etc/systemd/system/
+#   hardening/dtn-telemetry.sh  -> /usr/local/sbin/dtn-telemetry.sh
+#   hardening/dtn-telemetry.service -> /etc/systemd/system/
+#   hardening/dtn-telemetry.timer   -> /etc/systemd/system/
+#   hardening/enable-readonly-root.sh  -> /usr/local/sbin/dtn-enable-readonly-root.sh
+#                                         (staged only — NEVER run by provision,
+#                                         see the Track 3 note below)
+#   hardening/disable-readonly-root.sh -> /usr/local/sbin/dtn-disable-readonly-root.sh
 #   ../node/dtn-node-linux-arm64|armv7|armv6 -> /opt/dtn-node/dtn-node
 #                                 (picked by uname -m: aarch64/armv7l/armv6l)
 #
@@ -40,6 +56,14 @@
 # Customization:
 #   COUNTRY=AR ./provision.sh   # regulatory country written into hostapd.conf
 #   ALLOW_SSH=1 ./provision.sh  # firewall accepts SSH from AP clients (off by default)
+#
+# Issue #16 Track 3 note: the read-only-root feature is deliberately NOT
+# wired here (it changes the boot path and every later config change needs a
+# remount cycle). It is an explicit operator step on the provisioned Pi:
+#   sudo /usr/local/sbin/enable-readonly-root.sh   # then reboot; --dry-run/--status available
+# (enable-readonly-root.sh / disable-readonly-root.sh live in
+# raspberry/hardening/ and are documented for manual deployment — their
+# default is OFF.)
 #
 # See docs/DEVELOPMENT_PLAN.md §1.6 (NetworkManager vs classic stack — BINDING
 # DECISION), §5 Sprint 3 and docs/protocol.md §12 (canonical origin).
@@ -105,7 +129,7 @@ install_file() {
 # --- step 1: preflight --------------------------------------------------------
 
 preflight() {
-    log "step 1/9: preflight"
+    log "step 1/10: preflight"
     verify "running as root" test "$(id -u)" -eq 0
     verify "Raspberry Pi hardware" grep -q "Raspberry Pi" /proc/device-tree/model
     verify "OS release file present" test -f /etc/os-release
@@ -139,7 +163,7 @@ preflight() {
 # ap_isolate), so it is disabled and masked and ifupdown is installed instead.
 # Legacy (dhcpcd-based) images already use the classic stack: nothing to do.
 disable_networkmanager() {
-    log "step 2/9: network manager selection"
+    log "step 2/10: network manager selection"
     if ! systemctl cat NetworkManager.service >/dev/null 2>&1; then
         log "no NetworkManager unit: legacy stack in place, nothing to do"
         verify_not "NetworkManager absent" systemctl cat NetworkManager.service
@@ -157,11 +181,15 @@ disable_networkmanager() {
 # --- step 3: packages ---------------------------------------------------------
 
 install_packages() {
-    log "step 3/9: packages"
+    log "step 3/10: packages"
     apt-get update -qq >/dev/null
     # hostapd (AP), dnsmasq (DHCP+DNS), iptables (firewall), iw (used by the
     # post-up power_save line in interfaces.d/wlan0).
     DEBIAN_FRONTEND=noninteractive apt-get install -y hostapd dnsmasq iptables iw >/dev/null
+    # dnsutils + curl (issue #16 Track 3): the network watchdog's probes —
+    # a dig against the node's own AP address and the canonical-origin
+    # captive-probe curl — and the operator checklist's verification tools.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y dnsutils curl >/dev/null
     # Optional persistence: when present, dtn-firewall.sh saves rules.v4 for
     # netfilter-persistent to replay at boot; otherwise dtn-firewall.service
     # re-applies the rules itself on every boot.
@@ -173,6 +201,8 @@ install_packages() {
     verify "dnsmasq installed" dpkg -s dnsmasq
     verify "iptables installed" dpkg -s iptables
     verify "iw installed" dpkg -s iw
+    verify "dnsutils installed (watchdog dig probe)" dpkg -s dnsutils
+    verify "curl installed (watchdog portal probe)" dpkg -s curl
     # Raspberry Pi OS ships hostapd masked (it would conflict with the default
     # client mode); unmask so it can be enabled for boot.
     systemctl unmask hostapd
@@ -191,7 +221,7 @@ install_packages() {
 # same-origin design (docs/protocol.md §12: all nodes must share the
 # gateway IP). Wi-Fi power save stays OFF for AP beacon stability.
 static_ip() {
-    log "step 4/9: static IP 10.42.0.1/24 on wlan0"
+    log "step 4/10: static IP 10.42.0.1/24 on wlan0"
     local tmp
     tmp="$(mktemp)"
     cat > "$tmp" <<'EOF'
@@ -240,7 +270,7 @@ EOF
 # --- step 5: config files -------------------------------------------------------
 
 install_configs() {
-    log "step 5/9: config files"
+    log "step 5/10: config files"
     local tmp
     tmp="$(mktemp)"
 
@@ -333,6 +363,23 @@ install_configs() {
     install_file "$SCRIPT_DIR/firewall/dtn-station-shield.service" /etc/systemd/system/dtn-station-shield.service 0644
     install_file "$SCRIPT_DIR/firewall/dtn-station-shield.timer" /etc/systemd/system/dtn-station-shield.timer 0644
     install_file "$SCRIPT_DIR/power/dtn-power.service" /etc/systemd/system/dtn-power.service 0644
+    # Issue #16 Track 3: field hardening (run in step 8) + the self-healing
+    # watchdog and the counters-only telemetry, wired as units/timers like
+    # the Track-1 shields above.
+    install_file "$SCRIPT_DIR/hardening/sshd-hardening.conf" /usr/local/sbin/dtn-sshd-hardening.conf 0644
+    install_file "$SCRIPT_DIR/hardening/harden-ssh.sh" /usr/local/sbin/dtn-harden-ssh.sh 0755
+    install_file "$SCRIPT_DIR/hardening/harden-services.sh" /usr/local/sbin/dtn-harden-services.sh 0755
+    install_file "$SCRIPT_DIR/hardening/harden-upgrades.sh" /usr/local/sbin/dtn-harden-upgrades.sh 0755
+    install_file "$SCRIPT_DIR/hardening/dtn-network-watchdog.sh" /usr/local/sbin/dtn-network-watchdog.sh 0755
+    install_file "$SCRIPT_DIR/hardening/dtn-network-watchdog.service" /etc/systemd/system/dtn-network-watchdog.service 0644
+    install_file "$SCRIPT_DIR/hardening/dtn-network-watchdog.timer" /etc/systemd/system/dtn-network-watchdog.timer 0644
+    install_file "$SCRIPT_DIR/hardening/dtn-telemetry.sh" /usr/local/sbin/dtn-telemetry.sh 0755
+    install_file "$SCRIPT_DIR/hardening/dtn-telemetry.service" /etc/systemd/system/dtn-telemetry.service 0644
+    install_file "$SCRIPT_DIR/hardening/dtn-telemetry.timer" /etc/systemd/system/dtn-telemetry.timer 0644
+    # Read-only root: staged for the operator, NEVER applied here (default
+    # OFF — see the Track 3 note in this file's header).
+    install_file "$SCRIPT_DIR/hardening/enable-readonly-root.sh" /usr/local/sbin/dtn-enable-readonly-root.sh 0755
+    install_file "$SCRIPT_DIR/hardening/disable-readonly-root.sh" /usr/local/sbin/dtn-disable-readonly-root.sh 0755
     verify "dtn-node.service installed" test -f /etc/systemd/system/dtn-node.service
     verify "dtn-firewall.service installed" test -f /etc/systemd/system/dtn-firewall.service
     verify "dtn-traffic-shaping.service installed" test -f /etc/systemd/system/dtn-traffic-shaping.service
@@ -341,6 +388,18 @@ install_configs() {
     verify "dtn-station-shield.service installed" test -f /etc/systemd/system/dtn-station-shield.service
     verify "dtn-station-shield.timer installed" test -f /etc/systemd/system/dtn-station-shield.timer
     verify "dtn-power.service installed" test -f /etc/systemd/system/dtn-power.service
+    verify "dtn-harden-ssh.sh installed" test -x /usr/local/sbin/dtn-harden-ssh.sh
+    verify "dtn-harden-services.sh installed" test -x /usr/local/sbin/dtn-harden-services.sh
+    verify "dtn-harden-upgrades.sh installed" test -x /usr/local/sbin/dtn-harden-upgrades.sh
+    verify "dtn-sshd-hardening.conf staged" test -f /usr/local/sbin/dtn-sshd-hardening.conf
+    verify "dtn-network-watchdog.sh installed" test -x /usr/local/sbin/dtn-network-watchdog.sh
+    verify "dtn-network-watchdog.service installed" test -f /etc/systemd/system/dtn-network-watchdog.service
+    verify "dtn-network-watchdog.timer installed" test -f /etc/systemd/system/dtn-network-watchdog.timer
+    verify "dtn-telemetry.sh installed" test -x /usr/local/sbin/dtn-telemetry.sh
+    verify "dtn-telemetry.service installed" test -f /etc/systemd/system/dtn-telemetry.service
+    verify "dtn-telemetry.timer installed" test -f /etc/systemd/system/dtn-telemetry.timer
+    verify "dtn-enable-readonly-root.sh staged (OFF by default)" test -x /usr/local/sbin/dtn-enable-readonly-root.sh
+    verify "dtn-disable-readonly-root.sh staged" test -x /usr/local/sbin/dtn-disable-readonly-root.sh
 
     # Older Debian hostapd.service units have no default DAEMON_CONF; newer
     # ones do. Setting it explicitly works everywhere and matches our path.
@@ -355,7 +414,7 @@ install_configs() {
 # --- step 6: service user, data dir and binary ----------------------------------
 
 install_binary() {
-    log "step 6/9: service user, data dir and binary"
+    log "step 6/10: service user, data dir and binary"
     if id "$NODE_USER" >/dev/null 2>&1; then
         echo "[SKIP] user $NODE_USER already exists"
     else
@@ -385,17 +444,19 @@ install_binary() {
 # --- step 7: enable units (nothing is started) -----------------------------------
 
 enable_units() {
-    log "step 7/9: enable units (no service is started; reboot activates)"
+    log "step 7/10: enable units (no service is started; reboot activates)"
     systemctl daemon-reload
     # networking: brings up wlan0 (10.42.0.1) via ifupdown at boot.
     # hostapd + dnsmasq: the classic AP stack. The dtn-* units: firewall,
-    # bandwidth shaping, portal daemon, power trim, plus the two shield
-    # TIMERS (the services they trigger are enabled through the timers —
-    # a timer starts its unit regardless of the unit's own enablement).
+    # bandwidth shaping, portal daemon, power trim, the two shield TIMERS and
+    # the Track-3 network-watchdog/telemetry TIMERS (the services they
+    # trigger are enabled through the timers — a timer starts its unit
+    # regardless of the unit's own enablement).
     # Boot order is encoded in the unit files. Nothing is started: the
     # reboot is the activation step.
     systemctl enable networking hostapd dnsmasq dtn-firewall dtn-traffic-shaping \
-        dtn-dns-shield.timer dtn-station-shield.timer dtn-node dtn-power
+        dtn-dns-shield.timer dtn-station-shield.timer \
+        dtn-network-watchdog.timer dtn-telemetry.timer dtn-node dtn-power
     verify "networking enabled" systemctl is-enabled networking
     verify "hostapd enabled" systemctl is-enabled hostapd
     verify "dnsmasq enabled" systemctl is-enabled dnsmasq
@@ -403,14 +464,42 @@ enable_units() {
     verify "dtn-traffic-shaping enabled" systemctl is-enabled dtn-traffic-shaping
     verify "dtn-dns-shield.timer enabled" systemctl is-enabled dtn-dns-shield.timer
     verify "dtn-station-shield.timer enabled" systemctl is-enabled dtn-station-shield.timer
+    verify "dtn-network-watchdog.timer enabled" systemctl is-enabled dtn-network-watchdog.timer
+    verify "dtn-telemetry.timer enabled" systemctl is-enabled dtn-telemetry.timer
     verify "dtn-node enabled" systemctl is-enabled dtn-node
     verify "dtn-power enabled" systemctl is-enabled dtn-power
 }
 
-# --- step 8: firewall persistence --------------------------------------------------
+# --- step 8: field hardening (issue #16 Track 3) ---------------------------------
+
+# Runs the three idempotent hardening steps in dependency order. None of them
+# starts a service; unattended-upgrades' timers and the journald drop-in take
+# effect at the reboot that activates everything else. The read-only root is
+# deliberately NOT part of provisioning: it is an explicit operator step
+# (see the header note and final_report's checklist).
+field_hardening() {
+    log "step 8/10: field hardening (ssh surface, unprivileged daemon, security upgrades)"
+    # Each script is fail-fast and idempotent; these verifies pin the
+    # on-disk end state this step promises.
+    /usr/local/sbin/dtn-harden-services.sh
+    verify "journald volatile drop-in installed" \
+        grep -q '^Storage=volatile$' /etc/systemd/journald.conf.d/dtn-volatile.conf
+    /usr/local/sbin/dtn-harden-ssh.sh
+    if [ -x /usr/sbin/sshd ]; then
+        verify "sshd hardening drop-in installed (keys-only, no root login)" \
+            grep -q '^PermitRootLogin no$' /etc/ssh/sshd_config.d/00-dtn-hardening.conf
+    else
+        log "sshd not installed: no SSH surface exists, drop-in step skipped by design"
+    fi
+    /usr/local/sbin/dtn-harden-upgrades.sh
+    verify "security-only upgrade override installed" \
+        grep -q 'Debian-Security' /etc/apt/apt.conf.d/52dtn-security-only.conf
+}
+
+# --- step 9: firewall persistence --------------------------------------------------
 
 persist_firewall() {
-    log "step 8/9: firewall persistence"
+    log "step 9/10: firewall persistence"
     if command -v netfilter-persistent >/dev/null 2>&1; then
         verify "rules saved to /etc/iptables/rules.v4" test -f /etc/iptables/rules.v4
     else
@@ -419,10 +508,10 @@ persist_firewall() {
     fi
 }
 
-# --- step 9: operator handoff ------------------------------------------------------
+# --- step 10: operator handoff ------------------------------------------------------
 
 final_report() {
-    log "step 9/9: done — every step verified"
+    log "step 10/10: done — every step verified"
     cat <<EOF
 
 =====================================================================
@@ -446,7 +535,17 @@ final_report() {
         /usr/local/sbin/dtn-dns-shield.sh --dry-run
         /usr/local/sbin/dtn-station-shield.sh --dry-run
         /usr/local/sbin/dtn-traffic-shaping.sh --dry-run
-   6. Verify a full reboot restores everything by itself.
+   6. Verify the Track-3 hardening (issue #16):
+        /usr/local/sbin/dtn-harden-services.sh --dry-run
+        /usr/local/sbin/dtn-harden-ssh.sh --dry-run
+        /usr/local/sbin/dtn-harden-upgrades.sh --dry-run
+        /usr/local/sbin/dtn-network-watchdog.sh --dry-run
+        /usr/local/sbin/dtn-telemetry.sh --dry-run
+   7. OPTIONAL tamper resistance (DEFAULT OFF — read the script header
+      first: every later config change needs a remount cycle):
+        sudo /usr/local/sbin/dtn-enable-readonly-root.sh --dry-run
+      and see raspberry/hardening/enable-readonly-root.sh.
+   8. Verify a full reboot restores everything by itself.
 
  Deployment parameters used in this run:
    Board : ${BOARD_MODEL} (userland ${BOARD_ARCH})
@@ -469,5 +568,6 @@ static_ip
 install_configs
 install_binary
 enable_units
+field_hardening
 persist_firewall
 final_report

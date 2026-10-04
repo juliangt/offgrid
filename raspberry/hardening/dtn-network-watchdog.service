@@ -1,0 +1,36 @@
+# dtn-network-watchdog.service — AP-stack self-healing probe (Module A, issue
+# #16 Track 3)
+# Install path: /etc/systemd/system/dtn-network-watchdog.service
+# Triggered every two minutes by dtn-network-watchdog.timer (the timer is the
+# activation surface, exactly like the two shield pairs). Runs
+# /usr/local/sbin/dtn-network-watchdog.sh: probes hostapd (association-
+# capable), dnsmasq (answering the wildcard) and the portal daemon (captive
+# probe answers 302), and restarts ONLY the failed component — bounded by a
+# restart-storm guard that stops after 3 restarts/hour per component and
+# leaves a journald marker instead (see the script header).
+
+[Unit]
+Description=DTN network watchdog (probe AP stack, restart only what failed, budget-capped)
+
+# After the three components it supervises and the firewall that fronts them:
+# a probe issued before the stack is up would "fail" components that are
+# merely still booting (and burn restart budget on them).
+After=hostapd.service dnsmasq.service dtn-node.service dtn-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dtn-network-watchdog.sh
+
+# Hardening: root is needed to systemctl-restart the supervised units (and
+# for the hostapd control socket); the only thing ever written is the tmpfs
+# restart-budget state in /dev/shm.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/dev/shm
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

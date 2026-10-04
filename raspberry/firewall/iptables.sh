@@ -349,10 +349,19 @@ build_ruleset() {
     rule filter "$IN_CHAIN" -p icmp -m icmp --icmp-type 8 -m hashlimit --hashlimit-above "${ICMP_HL_RATE_QPS}/second" --hashlimit-burst "$ICMP_HL_BURST" --hashlimit-mode srcip --hashlimit-name dtn_icmp -m comment --comment dtn:icmp-flood-tunnel-shed -j DROP
     rule filter "$IN_CHAIN" -p icmp -m comment --comment dtn:icmp-under-rate -j ACCEPT
 
-    # Opt-in SSH for the operator, restricted to the AP subnet interface. Off
-    # by default: an unattended solar node needs no listener.
+    # SSH from clients (issue #16 Track 3, "minimal attack surface"): the node
+    # is an island and sshd is operator tooling, never a client service. The
+    # explicit default DROP matters BECAUSE of the documented INPUT stance
+    # above: $IN_CHAIN ends in RETURN and the INPUT policy stays at the stock
+    # ACCEPT, so "no accept rule" is NOT "unreachable" — without this rule a
+    # running sshd would answer any AP client that tried. ALLOW_SSH=1 (the
+    # operator's explicit, per-deployment choice) swaps the drop for the
+    # opt-in accept; the paired hardening (raspberry/hardening/harden-ssh.sh:
+    # keys only, no root login) then governs WHO can use the listener.
     if [ "$ALLOW_SSH" = "1" ]; then
         rule filter "$IN_CHAIN" -p tcp -m tcp --dport 22 -m comment --comment dtn:opt-in-operator-ssh -j ACCEPT
+    else
+        rule filter "$IN_CHAIN" -p tcp -m tcp --dport 22 -m comment --comment track3:ssh-never-reachable-from-clients -j DROP
     fi
     # Unmatched AP traffic falls through to the rest of INPUT unchanged.
     rule filter "$IN_CHAIN" -j RETURN
