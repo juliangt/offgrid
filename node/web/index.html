@@ -47,14 +47,237 @@
       line-height: 1.45;
       -webkit-text-size-adjust: 100%;
     }
-    main { max-width: 640px; margin: 0 auto; padding: 12px; }
+    main { max-width: 640px; margin: 0 auto; padding: 12px 12px 28px; }
     h1 { font-size: 1.35rem; margin: 8px 0 12px; }
+    h2 { font-size: 1.05rem; margin: 0 0 8px; }
+    p { margin: 8px 0; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px;
+      margin: 0 0 14px;
+    }
+    label { display: block; font-weight: 600; font-size: 0.9rem; margin: 10px 0 4px; }
+    label.inline { display: flex; align-items: center; gap: 8px; font-weight: 400; margin: 10px 0; }
+    input[type="text"], textarea, select {
+      width: 100%;
+      padding: 10px;
+      font: inherit;
+      color: var(--ink);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    textarea { resize: vertical; font-size: 1rem; word-break: break-word; }
+    textarea[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
+
+    button {
+      font: inherit;
+      padding: 10px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+    button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+    button.linkish { background: transparent; border: none; color: var(--accent); padding: 4px 0; text-decoration: underline; }
+    button.small { padding: 4px 10px; font-size: 0.85rem; }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    .hint { color: var(--muted); font-size: 0.85rem; margin: 4px 0 8px; }
+    .error { color: var(--danger); font-weight: 600; margin: 8px 0 0; }
+    .muted { color: var(--muted); }
+    .warn {
+      background: var(--warn-bg);
+      color: var(--warn-ink);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      margin: 8px 0;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      word-break: break-all;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+    /* Captive mini-browser banner (plan §1.4). */
+    .banner {
+      background: var(--warn-bg);
+      color: var(--warn-ink);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin: 0 auto 12px;
+      max-width: 616px;
+      font-size: 0.92rem;
+    }
+    .banner .banner-row { display: flex; align-items: flex-start; gap: 8px; }
+    .banner .banner-text { flex: 1; }
+    .banner strong { display: block; margin-bottom: 2px; }
+    .banner code { display: block; margin: 6px 0; font-size: 0.95rem; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 6px; margin: 4px 0 14px; }
+    .tab { flex: 1; padding: 10px 6px; border-radius: 8px; }
+    .tab.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+    /* Mule telemetry panel (§11) — always visible on the app screen. */
+    .telemetry {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 14px;
+      align-items: center;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .telemetry strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+    .telemetry button { padding: 6px 10px; font-size: 0.85rem; margin-left: auto; }
+
+    /* Inbox */
+    .inbox { list-style: none; margin: 0; padding: 0; }
+    .inbox li {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 10px;
+    }
+    .msg-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 0.85rem; }
+    .msg-head .time { color: var(--muted); }
+    .msg-body { white-space: pre-wrap; word-break: break-word; }
+
+    .counter-row { display: flex; justify-content: flex-end; margin: 4px 0 10px; }
+    #byte-counter { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    #byte-counter.over { color: var(--danger); font-weight: 700; }
+
+    .status-ok { color: var(--accent); }
+    .status-error { color: var(--danger); }
+
+    dl { margin: 0; }
+    dt { font-weight: 600; font-size: 0.85rem; color: var(--muted); margin-top: 10px; }
+    dd { margin: 2px 0 0; }
   </style>
 </head>
 <body>
   <main id="dtn-app">
-    <h1>Mensajes</h1>
-    <p id="dtn-status">Cargando…</p>
+    <!-- Registration screen (plan 2.4): alias → keys → directory upsert → seed backup. -->
+    <section id="screen-register" hidden>
+      <h1>Únete a la red</h1>
+      <p>Crea tu identidad para enviar y recibir mensajes sin internet. Tus claves se generan aquí y nunca salen de este dispositivo.</p>
+      <div class="card" id="reg-card">
+        <label for="reg-alias">Tu alias</label>
+        <input id="reg-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="p. ej. ana_maria">
+        <p class="hint">De 1 a 24 caracteres: letras, números, punto, guion y guion bajo.</p>
+        <div class="actions">
+          <button id="btn-register" type="button" class="primary">Crear identidad</button>
+        </div>
+        <p id="reg-error" class="error" hidden></p>
+      </div>
+      <div class="card" id="reg-backup" hidden>
+        <h2>Guarda tu semilla de respaldo</h2>
+        <p class="warn">Sin esta semilla no podrás recuperar tu identidad si se borran los datos del navegador. Cópiala y guárdala en un lugar seguro.</p>
+        <textarea id="reg-seed" readonly rows="2"></textarea>
+        <div class="actions">
+          <button id="btn-copy-seed" type="button" data-copy-target="reg-seed">Copiar semilla</button>
+        </div>
+        <label class="inline"><input type="checkbox" id="reg-confirm"> Ya guardé mi semilla</label>
+        <div class="actions">
+          <button id="btn-finish-register" type="button" class="primary" disabled>Continuar a los mensajes</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Recuperar una identidad</h2>
+        <p>Si perdiste los datos del navegador, restaura tu identidad con la semilla de respaldo que guardaste.</p>
+        <label for="import-seed">Semilla de respaldo (Base64)</label>
+        <textarea id="import-seed" rows="2" placeholder="Pega aquí la semilla"></textarea>
+        <label for="import-alias">Tu alias</label>
+        <input id="import-alias" type="text" maxlength="24" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Tu alias en la red">
+        <div class="actions">
+          <button id="btn-import" type="button">Importar identidad</button>
+        </div>
+        <p id="import-error" class="error" hidden></p>
+      </div>
+    </section>
+
+    <!-- Main app screen -->
+    <section id="screen-app" hidden>
+      <h1>Mensajes</h1>
+      <!-- Telemetry panel (§11): always visible, above the tabs. -->
+      <div id="telemetry" class="telemetry">
+        <span>Sobres ajenos en tránsito: <strong id="tel-transit">0</strong> / Capacidad: <strong>100</strong></span>
+        <span>Mensajes enviados: <strong id="tel-sent">0</strong></span>
+        <span id="tel-evicted-wrap" hidden>Expulsados: <strong id="tel-evicted">0</strong></span>
+        <span>Última sincronización: <span id="tel-lastsync">nunca</span></span>
+        <button id="btn-sync" type="button">Sincronizar ahora</button>
+      </div>
+      <nav class="tabs">
+        <button id="tab-btn-compose" class="tab active" type="button">Nuevo mensaje</button>
+        <button id="tab-btn-inbox" class="tab" type="button">Bandeja de entrada</button>
+        <button id="tab-btn-identity" class="tab" type="button">Identidad</button>
+      </nav>
+
+      <section id="tab-compose">
+        <div class="card">
+          <label for="compose-to">Para</label>
+          <select id="compose-to">
+            <option value="">Cargando directorio…</option>
+          </select>
+          <button id="btn-refresh-dir" type="button" class="linkish">Actualizar directorio</button>
+          <label for="compose-text">Mensaje</label>
+          <textarea id="compose-text" rows="4" placeholder="Escribe tu mensaje…"></textarea>
+          <div class="counter-row"><span id="byte-counter">0/128</span></div>
+          <div class="actions">
+            <button id="btn-send" type="button" class="primary" disabled>Firmar y enviar</button>
+          </div>
+          <p id="compose-status" hidden></p>
+        </div>
+      </section>
+
+      <section id="tab-inbox" hidden>
+        <ul id="inbox-list" class="inbox"></ul>
+        <p id="inbox-empty" class="muted">Sin mensajes todavía. Cuando alguien te escriba, aparecerá aquí.</p>
+      </section>
+
+      <section id="tab-identity" hidden>
+        <div class="card">
+          <h2>Tu identidad</h2>
+          <dl>
+            <dt>Alias</dt>
+            <dd id="id-alias"></dd>
+            <dt>Clave pública Ed25519 (firma)</dt>
+            <dd><code id="id-pubkey"></code></dd>
+            <dt>Clave pública X25519 (cifrado)</dt>
+            <dd><code id="id-x25519"></code></dd>
+            <dt>Tu dest_hint</dt>
+            <dd><code id="id-hint"></code></dd>
+          </dl>
+          <div class="actions">
+            <button type="button" class="small" data-copy-target="id-pubkey">Copiar Ed25519</button>
+            <button type="button" class="small" data-copy-target="id-x25519">Copiar X25519</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Semilla de respaldo</h2>
+          <p class="hint">Única forma de recuperar tu identidad si se borran los datos del navegador. Guárdala fuera de este dispositivo.</p>
+          <div class="actions">
+            <button id="btn-show-seed" type="button">Mostrar semilla</button>
+            <button type="button" data-copy-target="id-seed">Copiar semilla</button>
+          </div>
+          <textarea id="id-seed" readonly rows="2" hidden></textarea>
+        </div>
+      </section>
+    </section>
   </main>
   <noscript><p>Esta aplicación necesita JavaScript.</p></noscript>
   <script>
@@ -1032,11 +1255,585 @@
   DTN.setMeta = setMeta;
   DTN.toEnvelopeWire = toEnvelopeWire;
 
-  /* DOM wiring (store, sync engine and UI) is appended below this point.
-   * The engine itself never touches the document: the guard keeps the file
-   * loadable headless from Node, where document does not exist. */
-  if (typeof document !== "undefined" && document.getElementById("dtn-status")) {
-    document.getElementById("dtn-status").textContent = "Motor criptográfico listo.";
+  /* ---------------------------------------------------------------------
+   * 9. UI wiring (plan 2.7). Everything below only runs from initUi(),
+   *    which is invoked at the very bottom only when the document and the
+   *    #dtn-app container exist — the engine and store above stay usable
+   *    headless.
+   * ------------------------------------------------------------------- */
+
+  function $(id) {
+    return document.getElementById(id);
+  }
+
+  function showEl(el) { if (el) el.hidden = false; }
+  function hideEl(el) { if (el) el.hidden = true; }
+
+  function setText(id, text) {
+    var el = $(id);
+    if (el) el.textContent = text;
+  }
+
+  /* In-memory view state (never a substitute for the IndexedDB truth). */
+  var uiState = {
+    identity: null,   /* identity record incl. alias, loaded from the store */
+    directory: [],    /* last GET /api/v1/directory result */
+    sending: false,
+    syncing: false
+  };
+
+  /* ----- tiny network helpers (XHR works on every WebView; fetch may not) -- */
+
+  function xhrJSON(method, path, body) {
+    return new Promise(function (resolve, reject) {
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open(method, path, true);
+        xhr.timeout = 20000;
+        if (body !== undefined) xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onload = function () {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch (e) {
+              reject(new Error("respuesta no válida del nodo"));
+            }
+          } else {
+            reject(new Error("HTTP " + xhr.status));
+          }
+        };
+        xhr.onerror = function () { reject(new Error("sin contacto con el nodo")); };
+        xhr.ontimeout = function () { reject(new Error("tiempo agotado")); };
+        xhr.send(body === undefined ? null : JSON.stringify(body));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  function postJson(path, body) {
+    return xhrJSON("POST", path, body);
+  }
+
+  function getJson(path) {
+    return xhrJSON("GET", path);
+  }
+
+  /* ----- clipboard with execCommand fallback for captive WebViews ----- */
+
+  function copyText(text, done) {
+    var fallback = function () {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-1000px";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      done(ok);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function wireCopyButtons() {
+    var buttons = document.querySelectorAll("[data-copy-target]");
+    for (var i = 0; i < buttons.length; i++) {
+      (function (btn) {
+        btn.addEventListener("click", function () {
+          var target = $(btn.getAttribute("data-copy-target"));
+          if (!target) return;
+          var text = (target.tagName === "TEXTAREA" || target.tagName === "INPUT") ? target.value : target.textContent;
+          copyText(text, function (ok) {
+            var old = btn.textContent;
+            btn.textContent = ok ? "¡Copiado!" : "No se pudo copiar";
+            setTimeout(function () { btn.textContent = old; }, 1500);
+          });
+        });
+      })(buttons[i]);
+    }
+  }
+
+  /* ----- time formatting (Spanish labels, task 2.1) ----- */
+
+  function nowSec() {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  function relativeTime(unixSec) {
+    var d = nowSec() - unixSec;
+    if (!(d >= 0)) return "en el futuro";
+    if (d < 45) return "ahora";
+    if (d < 3600) return "hace " + Math.max(1, Math.round(d / 60)) + " min";
+    if (d < 86400) return "hace " + Math.round(d / 3600) + " h";
+    if (d < 7 * 86400) return "hace " + Math.round(d / 86400) + " d";
+    return new Date(unixSec * 1000).toLocaleDateString();
+  }
+
+  function absoluteTime(unixSec) {
+    return new Date(unixSec * 1000).toLocaleString();
+  }
+
+  /* ----- screens and tabs ----- */
+
+  function showScreen(name) {
+    hideEl($("screen-register"));
+    hideEl($("screen-app"));
+    showEl($(name === "register" ? "screen-register" : "screen-app"));
+  }
+
+  var TABS = ["compose", "inbox", "identity"];
+
+  function selectTab(name) {
+    for (var i = 0; i < TABS.length; i++) {
+      var t = TABS[i];
+      var panel = $("tab-" + t);
+      var btn = $("tab-btn-" + t);
+      if (panel) panel.hidden = t !== name;
+      if (btn) btn.className = "tab" + (t === name ? " active" : "");
+    }
+    if (name === "inbox") renderInbox();
+    if (name === "identity") renderIdentityTab();
+    if (name === "compose") refreshDirectory();
+  }
+
+  /* ----- directory (§10.3 GET) ----- */
+
+  function refreshDirectory() {
+    var select = $("compose-to");
+    if (!select) return Promise.resolve([]);
+    return getJson("/api/v1/directory").then(function (entries) {
+      uiState.directory = Array.isArray(entries) ? entries : [];
+      renderDirectory();
+      return uiState.directory;
+    }, function () {
+      uiState.directory = [];
+      select.textContent = "";
+      var opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No se pudo cargar el directorio. Reintenta con «Actualizar directorio».";
+      select.appendChild(opt);
+      updateSendEnabled();
+      return [];
+    });
+  }
+
+  function renderDirectory() {
+    var select = $("compose-to");
+    if (!select) return;
+    select.textContent = "";
+    var own = uiState.identity ? uiState.identity.signPublicB64 : null;
+    var count = 0;
+    for (var i = 0; i < uiState.directory.length; i++) {
+      var entry = uiState.directory[i];
+      if (!entry || !entry.alias || !entry.x25519) continue;
+      if (own && entry.pubkey === own) continue; /* no enviar mensajes a uno mismo */
+      var opt = document.createElement("option");
+      opt.value = entry.x25519;
+      opt.textContent = entry.alias + " · " + relativeTime(entry.last_seen || 0);
+      opt.title = "Visto por última vez: " + absoluteTime(entry.last_seen || 0);
+      select.appendChild(opt);
+      count += 1;
+    }
+    if (count === 0) {
+      var empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = "No hay otros usuarios registrados en este nodo todavía.";
+      select.appendChild(empty);
+    }
+    updateSendEnabled();
+  }
+
+  function currentRecipient() {
+    var select = $("compose-to");
+    if (!select || !select.value) return null;
+    for (var i = 0; i < uiState.directory.length; i++) {
+      if (uiState.directory[i] && uiState.directory[i].x25519 === select.value) return uiState.directory[i];
+    }
+    return null;
+  }
+
+  /* ----- composer with the §8.1 UTF-8 byte counter ----- */
+
+  function updateCounter() {
+    var text = $("compose-text").value;
+    var len = DTN.messageByteLength(text);
+    var counter = $("byte-counter");
+    counter.textContent = len + "/" + DTN.MESSAGE_MAX_BYTES;
+    if (len > DTN.MESSAGE_MAX_BYTES) counter.className = "over";
+    else counter.className = "";
+    updateSendEnabled();
+  }
+
+  function updateSendEnabled() {
+    var btn = $("btn-send");
+    if (!btn) return;
+    var len = DTN.messageByteLength($("compose-text").value);
+    btn.disabled = uiState.sending || !currentRecipient() || len < 1 || len > DTN.MESSAGE_MAX_BYTES;
+  }
+
+  function showStatus(el, kind, text) {
+    el.hidden = false;
+    el.className = kind === "ok" ? "status-ok" : (kind === "error" ? "status-error" : "");
+    el.textContent = text;
+  }
+
+  /* Send flow (plan 2.5): build the envelope per §4.2/§5/§6, remember its id
+   * so it is never re-pulled (§10.4), count it, and hand it to the node
+   * immediately. The mule sync engine (section 10) takes over from the next
+   * sync onwards. */
+  function onSend() {
+    if (uiState.sending) return;
+    var statusEl = $("compose-status");
+    var identity = uiState.identity;
+    if (!identity) return;
+
+    var entry = currentRecipient();
+    if (!entry) {
+      showStatus(statusEl, "error", "Elige un destinatario del directorio.");
+      return;
+    }
+    var text = $("compose-text").value;
+    var len = DTN.messageByteLength(text);
+    if (len < 1) {
+      showStatus(statusEl, "error", "Escribe un mensaje.");
+      return;
+    }
+    if (len > DTN.MESSAGE_MAX_BYTES) {
+      showStatus(statusEl, "error", "El mensaje supera el límite de 128 bytes.");
+      return;
+    }
+    var recipientRaw = DTN.b64decode(entry.x25519);
+    if (!recipientRaw || recipientRaw.length !== 32) {
+      showStatus(statusEl, "error", "La clave del destinatario no es válida.");
+      return;
+    }
+
+    uiState.sending = true;
+    updateSendEnabled();
+    showStatus(statusEl, "", "Firmando y cifrando…");
+
+    var env;
+    try {
+      env = DTN.buildEnvelope({
+        recipientBoxPublic: recipientRaw,
+        message: text,
+        alias: identity.alias,
+        signSecret: identity.signSecret,
+        signPublic: identity.signPublic,
+        createdAt: nowSec()
+      });
+    } catch (e) {
+      uiState.sending = false;
+      updateSendEnabled();
+      showStatus(statusEl, "error", "No se pudo construir el sobre: " + e.message);
+      return;
+    }
+
+    DTN.markSeenIds([env.id]).then(function () {
+      return DTN.getMeta("sent_count").then(function (n) {
+        return DTN.setMeta("sent_count", (typeof n === "number" ? n : 0) + 1);
+      });
+    }).then(function () {
+      return pushOutgoingEnvelope(env);
+    }).then(function () {
+      uiState.sending = false;
+      $("compose-text").value = "";
+      updateCounter();
+      updateSendEnabled();
+      showStatus(statusEl, "ok", "Mensaje cifrado y dejado en el nodo. Llegará cuando una mula lo lleve hasta su destinatario.");
+      renderTelemetry();
+    }, function (err) {
+      uiState.sending = false;
+      updateSendEnabled();
+      showStatus(statusEl, "error", "No se pudo contactar al nodo (" + err.message + "). El mensaje no se envió; reintenta.");
+      renderTelemetry();
+    });
+  }
+
+  /* Direct push of a just-written envelope (§10.4: the pushed id travels in
+   * known_ids so the node never hands it back to us). */
+  function pushOutgoingEnvelope(env) {
+    return postJson("/api/v1/sync", {
+      known_ids: [env.id],
+      push_envelopes: [env],
+      limit: 50
+    });
+  }
+
+  /* ----- inbox (§11 display: sender alias + time + text) ----- */
+
+  function renderInbox() {
+    return DTN.listInbox().then(function (rows) {
+      var list = $("inbox-list");
+      var emptyMsg = $("inbox-empty");
+      if (!list) return;
+      list.textContent = "";
+      if (!rows.length) {
+        showEl(emptyMsg);
+        return;
+      }
+      hideEl(emptyMsg);
+      for (var i = 0; i < rows.length; i++) {
+        var row = rows[i];
+        var li = document.createElement("li");
+        var head = document.createElement("div");
+        head.className = "msg-head";
+        var sender = document.createElement("strong");
+        sender.textContent = row.a;
+        var time = document.createElement("span");
+        time.className = "time";
+        time.textContent = relativeTime(row.t);
+        time.title = absoluteTime(row.t);
+        head.appendChild(sender);
+        head.appendChild(time);
+        var body = document.createElement("div");
+        body.className = "msg-body";
+        body.textContent = row.m;
+        li.appendChild(head);
+        li.appendChild(body);
+        list.appendChild(li);
+      }
+    });
+  }
+
+  /* ----- identity tab ----- */
+
+  function renderIdentityTab() {
+    var identity = uiState.identity;
+    if (!identity) return;
+    setText("id-alias", identity.alias);
+    setText("id-pubkey", identity.signPublicB64);
+    setText("id-x25519", identity.boxPublicB64);
+    setText("id-hint", identity.hint);
+    var seedEl = $("id-seed");
+    if (seedEl) seedEl.value = identity.seedB64;
+  }
+
+  function toggleSeed() {
+    var seedEl = $("id-seed");
+    var btn = $("btn-show-seed");
+    if (!seedEl || !btn) return;
+    seedEl.hidden = !seedEl.hidden;
+    btn.textContent = seedEl.hidden ? "Mostrar semilla" : "Ocultar semilla";
+  }
+
+  /* ----- telemetry panel (§11) ----- */
+
+  function transitCount() {
+    return storeCount(STORE_TRANSIT);
+  }
+
+  function renderLastSyncValue(v) {
+    var el = $("tel-lastsync");
+    if (!el) return;
+    if (!v || typeof v !== "object" || !v.at) {
+      el.textContent = "nunca";
+      return;
+    }
+    var when = relativeTime(v.at);
+    if (v.status === "ok") el.textContent = "correcta (" + when + ")";
+    else if (v.status === "error") el.textContent = "con error (" + when + ")";
+    else el.textContent = when;
+  }
+
+  function renderTelemetry() {
+    return Promise.all([
+      transitCount(),
+      DTN.getMeta("sent_count"),
+      DTN.getMeta("evicted_total"),
+      DTN.getMeta("last_sync")
+    ]).then(function (results) {
+      setText("tel-transit", String(results[0]));
+      setText("tel-sent", String(typeof results[1] === "number" ? results[1] : 0));
+      var evicted = typeof results[2] === "number" ? results[2] : 0;
+      setText("tel-evicted", String(evicted));
+      if (evicted > 0) showEl($("tel-evicted-wrap"));
+      else hideEl($("tel-evicted-wrap"));
+      renderLastSyncValue(results[3]);
+    });
+  }
+
+  /* ----- registration (plan 2.4) ----- */
+
+  function setRegError(msg) {
+    var el = $("reg-error");
+    if (!msg) {
+      hideEl(el);
+      return;
+    }
+    showEl(el);
+    el.textContent = msg;
+  }
+
+  function setImportError(msg) {
+    var el = $("import-error");
+    if (!msg) {
+      hideEl(el);
+      return;
+    }
+    showEl(el);
+    el.textContent = msg;
+  }
+
+  /* Publish {alias, pubkey, x25519} to the node's directory (§10.3). */
+  function publishIdentity(identity) {
+    return postJson("/api/v1/directory", {
+      alias: identity.alias,
+      pubkey: identity.signPublicB64,
+      x25519: identity.boxPublicB64
+    });
+  }
+
+  function onRegister() {
+    var alias = $("reg-alias").value.replace(/^\s+|\s+$/g, "");
+    if (!DTN.validateAlias(alias)) {
+      setRegError("Alias inválido: usa de 1 a 24 letras, números, punto, guion o guion bajo.");
+      return;
+    }
+    var btn = $("btn-register");
+    var btnLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Generando claves…";
+    setRegError("");
+
+    var identity = DTN.createIdentity();
+    identity.alias = alias;
+    identity.registered_at = nowSec();
+
+    publishIdentity(identity).then(function () {
+      return DTN.saveIdentity(identity);
+    }).then(function () {
+      btn.textContent = btnLabel;
+      uiState.identity = identity;
+      /* Show the seed backup before letting the user into the app. */
+      hideEl($("reg-card"));
+      $("reg-seed").value = identity.seedB64;
+      showEl($("reg-backup"));
+      $("btn-finish-register").disabled = !$("reg-confirm").checked;
+    }, function (err) {
+      btn.disabled = false;
+      btn.textContent = btnLabel;
+      setRegError("No se pudo registrar en el nodo (" + err.message + "). Reintenta.");
+    });
+  }
+
+  function onFinishRegister() {
+    enterApp();
+  }
+
+  /* Import: the seed reconstructs both key pairs deterministically (§11
+   * backup); the alias is not derivable, so it is re-entered and the
+   * directory upsert re-publishes the same public keys. */
+  function onImport() {
+    var seedText = $("import-seed").value.replace(/^\s+|\s+$/g, "");
+    var alias = $("import-alias").value.replace(/^\s+|\s+$/g, "");
+    if (!DTN.validateAlias(alias)) {
+      setImportError("Alias inválido: usa de 1 a 24 letras, números, punto, guion o guion bajo.");
+      return;
+    }
+    var seed = DTN.b64decode(seedText);
+    if (!seed || seed.length !== 32) {
+      setImportError("Semilla inválida: debe ser Base64 de 32 bytes (44 caracteres con relleno).");
+      return;
+    }
+    var btn = $("btn-import");
+    btn.disabled = true;
+    setImportError("");
+
+    var identity;
+    try {
+      identity = DTN.identityFromSeed(seed);
+    } catch (e) {
+      btn.disabled = false;
+      setImportError("Semilla inválida: " + e.message);
+      return;
+    }
+    identity.alias = alias;
+    identity.registered_at = nowSec();
+
+    publishIdentity(identity).then(function () {
+      return DTN.saveIdentity(identity);
+    }).then(function () {
+      uiState.identity = identity;
+      enterApp();
+    }, function (err) {
+      btn.disabled = false;
+      setImportError("No se pudo restaurar la identidad (" + err.message + "). Reintenta.");
+    });
+  }
+
+  /* ----- boot ----- */
+
+  function enterApp() {
+    showScreen("app");
+    renderIdentityTab();
+    renderTelemetry();
+    renderInbox();
+    refreshDirectory();
+    /* The mule sync engine hooks its load-time sync here (section 10). */
+  }
+
+  function showRegister() {
+    showScreen("register");
+  }
+
+  function wireStaticHandlers() {
+    wireCopyButtons();
+    $("tab-btn-compose").addEventListener("click", function () { selectTab("compose"); });
+    $("tab-btn-inbox").addEventListener("click", function () { selectTab("inbox"); });
+    $("tab-btn-identity").addEventListener("click", function () { selectTab("identity"); });
+
+    $("btn-register").addEventListener("click", onRegister);
+    $("reg-confirm").addEventListener("change", function () {
+      $("btn-finish-register").disabled = !$("reg-confirm").checked;
+    });
+    $("btn-finish-register").addEventListener("click", onFinishRegister);
+    $("btn-import").addEventListener("click", onImport);
+
+    $("btn-refresh-dir").addEventListener("click", refreshDirectory);
+    $("compose-text").addEventListener("input", updateCounter);
+    $("compose-to").addEventListener("change", updateSendEnabled);
+    $("btn-send").addEventListener("click", onSend);
+    $("btn-show-seed").addEventListener("click", toggleSeed);
+    $("btn-sync").addEventListener("click", onManualSync);
+  }
+
+  /* Manual refresh button: reloads every local view from the store and the
+   * directory. The full push/pull sync against the node arrives with the
+   * mule engine (section 10), which takes over this handler. */
+  function onManualSync() {
+    renderTelemetry();
+    renderInbox();
+    refreshDirectory();
+  }
+
+  function initUi() {
+    wireStaticHandlers();
+    DTN.loadIdentity().then(function (identity) {
+      if (identity && DTN.validateAlias(identity.alias) && identity.signPublicB64 && identity.boxPublicB64) {
+        uiState.identity = identity;
+        enterApp();
+      } else {
+        showRegister();
+      }
+    }, function () {
+      showRegister();
+    });
+  }
+
+  /* DOM wiring is complete above; the mule sync engine (section 10) hooks
+   * into onManualSync/enterApp and is appended before this guard. The guard
+   * keeps the whole file loadable headless from Node, where document does
+   * not exist. */
+  if (typeof document !== "undefined" && document.getElementById("dtn-app")) {
+    initUi();
   }
   /* === DTN_APP_SCRIPT_END === */
   </script>
