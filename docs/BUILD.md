@@ -7,9 +7,10 @@ Step-by-step instructions to build, test, run and deploy the off-grid DTN node (
 | Tool | Version | Used for |
 |---|---|---|
 | Go | ≥ 1.22 (verified with go1.27.1) | node daemon build and unit tests |
-| Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs` and `tests/spa_structure.mjs` only; nothing in the product needs Node |
+| Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs`, `tests/spa_structure.mjs` and `tests/version_migration.mjs` only; nothing in the product needs Node |
 | bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `raspberry/provision.sh`, `raspberry/install.sh` |
 | curl | any | `tests/sync_e2e.sh`, deployment verification |
+| sqlite3 | any (CLI) | `tests/sync_e2e.sh` §15 coverage only: schema-1 fixture crafting, migration and downgrade-refusal assertions (with `shasum`/`sha256sum` for the §15.7 b byte fingerprint) |
 | git | any | checking out this repository |
 
 No C toolchain is needed: the daemon uses the pure-Go SQLite driver (`modernc.org/sqlite`), so `CGO_ENABLED=0` builds are fully static.
@@ -75,7 +76,11 @@ node tests/crypto_roundtrip.mjs
 # 3. SPA layout contract: referenced assets, CSP, load order, DTN API surface
 node tests/spa_structure.mjs
 
-# 4. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
+# 4. SPA §15 versioning policy: negotiation guard, blind v1→v2 conversion,
+#    pull-path stored versions, store migration chain
+node tests/version_migration.mjs
+
+# 5. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
 bash tests/sync_e2e.sh
 ```
 
@@ -99,17 +104,23 @@ Expected outputs:
 3. The structural test ends with:
 
    ```
-   PASS: 91 structural assertions on the SPA layout
+   PASS: 97 structural assertions on the SPA layout
    ```
 
-4. The E2E script ends with 31 assertions and:
+4. The versioning test ends with:
 
    ```
-   e2e: summary: 31 passed, 0 failed
+   PASS: 71 assertions on the SPA §15 versioning policy (index.html script order)
+   ```
+
+5. The E2E script ends with 84 assertions and:
+
+   ```
+   e2e: summary: 84 passed, 0 failed
    e2e: RESULT: PASS
    ```
 
-   It builds the dev binary itself, starts two daemons on `127.0.0.1:18091` and `127.0.0.1:18092` (override with `PORT_A` / `PORT_B`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair.
+   It builds the dev binary itself, starts two daemons on `127.0.0.1:18091` and `127.0.0.1:18092` (override with `PORT_A` / `PORT_B`; the extra §15 nodes use `PORT_C` / `PORT_E`, defaults `18093` / `18094`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`).
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors.
 
