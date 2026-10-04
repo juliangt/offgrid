@@ -74,13 +74,20 @@ jobs:
             node/dtn-node-linux-armv6 "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md > SHA256SUMS
           cat SHA256SUMS
 
+      # `gh release create` errors when a release with the tag already exists
+      # (created from the UI, or by a re-run of this workflow), so in that case
+      # replace the assets and notes on the existing release instead.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "DTN node ${GITHUB_REF_NAME}" \
-            --notes-file DEPLOY.md \
-            node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 node/dtn-node-linux-armv6 \
-            "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md SHA256SUMS
+          assets=(node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 node/dtn-node-linux-armv6 \
+            "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md SHA256SUMS)
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber "${assets[@]}"
+            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "DTN node ${GITHUB_REF_NAME}" --notes-file DEPLOY.md
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "DTN node ${GITHUB_REF_NAME}" --notes-file DEPLOY.md "${assets[@]}"
+          fi
