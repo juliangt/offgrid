@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# provision.sh — idempotent provisioning of a Raspberry Pi Zero 2 W as an
+# provision.sh — idempotent provisioning of a Raspberry Pi as an
 # off-grid DTN dead-drop node (Module A, Sprint 3).
+# Supports every Pi with on-board Wi-Fi (Zero W, Zero 2 W, 3A+/3B+, 4, 400,
+# 5); boards without on-board Wi-Fi (Pi 1/2, most CM variants) work the same
+# through an AP-capable USB Wi-Fi adapter on wlan0 (docs/pi-models.md).
 # Install path: run ON THE PI as root (or via sudo). Also committed here for
 # review. Config files are read from this script's directory tree:
 #
@@ -12,7 +15,8 @@
 #                                  or /boot/config.txt (legacy), once only
 #   power/dtn-power.service     -> /etc/systemd/system/dtn-power.service
 #   systemd/dtn-node.service    -> /etc/systemd/system/dtn-node.service
-#   ../node/dtn-node-linux-arm64|arm -> /opt/dtn-node/dtn-node
+#   ../node/dtn-node-linux-arm64|armv7|armv6 -> /opt/dtn-node/dtn-node
+#                                 (picked by uname -m: aarch64/armv7l/armv6l)
 #
 # DESIGN RULES
 #   * Strictly idempotent: every step first checks whether its result already
@@ -42,6 +46,10 @@ NODE_USER="dtn"
 NODE_GROUP="dtn"
 DATA_DIR="/var/lib/dtn-node"
 INSTALL_DIR="/opt/dtn-node"
+# Detected in preflight; consulted by the unit-file generator (watchdog
+# ceiling) and by install_binary (binary selection).
+BOARD_MODEL="unknown"
+BOARD_ARCH="$(uname -m)"
 
 log() { echo "provision: $*"; }
 die() { echo "provision: ERROR: $*" >&2; exit 1; }
@@ -93,6 +101,16 @@ preflight() {
     verify "running as root" test "$(id -u)" -eq 0
     verify "Raspberry Pi hardware" grep -q "Raspberry Pi" /proc/device-tree/model
     verify "OS release file present" test -f /etc/os-release
+    BOARD_MODEL="$(tr -d '\0' < /proc/device-tree/model)"
+
+    # The kernel reports the userland ISA, which is what the binary must
+    # match (a 64-bit board flashed with a 32-bit OS reports armv7l here, a
+    # Zero W / Pi 1 always armv6l).
+    case "$BOARD_ARCH" in
+        aarch64 | armv7l | armv6l) ;;
+        *) die "unsupported architecture '$BOARD_ARCH' (need aarch64, armv7l or armv6l)" ;;
+    esac
+    log "board: $BOARD_MODEL (userland: $BOARD_ARCH)"
 
     # shellcheck disable=SC1091  # /etc/os-release is a standard conformance file
     . /etc/os-release
@@ -261,7 +279,24 @@ install_configs() {
         verify "power snippet appended" grep -q "dtn-node power snippet" "$boot_cfg"
     fi
 
-    install_file "$SCRIPT_DIR/systemd/dtn-node.service" /etc/systemd/system/dtn-node.service 0644
+    # The daemon unit is generated from its template so the watchdog ceiling
+    # can be tuned per board class. On a single-core ARMv6 board (Pi Zero W,
+    # Pi 1) the 15 s ping cadence (WatchdogSec/2) can be starved during a GC
+    # + SQLite checkpoint burst, so the ceiling is doubled there; the
+    # template value (30 s) stays for every multi-core board.
+    local node_unit_tmp
+    if [ "$BOARD_ARCH" = "armv6l" ]; then
+        node_unit_tmp="$(mktemp)"
+        sed 's/^WatchdogSec=30$/# Doubled for this single-core ARMv6 board (provision.sh): the\n# WatchdogSec\/2 ping cadence needs headroom against GC + checkpoint bursts.\nWatchdogSec=60/' \
+            "$SCRIPT_DIR/systemd/dtn-node.service" > "$node_unit_tmp"
+        log "single-core board: WatchdogSec relaxed to 60 in the installed unit"
+    else
+        node_unit_tmp="$SCRIPT_DIR/systemd/dtn-node.service"
+    fi
+    install_file "$node_unit_tmp" /etc/systemd/system/dtn-node.service 0644
+    if [ "$node_unit_tmp" != "$SCRIPT_DIR/systemd/dtn-node.service" ]; then
+        rm -f "$node_unit_tmp"
+    fi
     install_file "$SCRIPT_DIR/firewall/dtn-firewall.service" /etc/systemd/system/dtn-firewall.service 0644
     install_file "$SCRIPT_DIR/power/dtn-power.service" /etc/systemd/system/dtn-power.service 0644
     verify "dtn-node.service installed" test -f /etc/systemd/system/dtn-node.service
@@ -293,13 +328,16 @@ install_binary() {
     verify "data dir 0750 $NODE_USER:$NODE_GROUP" \
         test "$(stat -c '%a %U %G' "$DATA_DIR")" = "750 $NODE_USER $NODE_GROUP"
 
-    # Pick the cross-compiled binary matching this Pi's architecture.
+    # Pick the cross-compiled binary matching this Pi's userland ISA
+    # (validated in preflight; matches node/build.sh output names).
     local bin_src
-    case "$(uname -m)" in
+    case "$BOARD_ARCH" in
         aarch64) bin_src="$SCRIPT_DIR/../node/dtn-node-linux-arm64" ;;
-        armv7l | armv6l) bin_src="$SCRIPT_DIR/../node/dtn-node-linux-arm" ;;
-        *) die "unsupported architecture $(uname -m): build on the Pi or copy binaries from node/build.sh output" ;;
+        armv7l) bin_src="$SCRIPT_DIR/../node/dtn-node-linux-armv7" ;;
+        armv6l) bin_src="$SCRIPT_DIR/../node/dtn-node-linux-armv6" ;;
+        *) die "unsupported architecture $BOARD_ARCH: build on the Pi or copy binaries from node/build.sh output" ;;
     esac
+    log "installing $bin_src for $BOARD_MODEL ($BOARD_ARCH)"
     verify "binary exists at $bin_src" test -f "$bin_src"
     install -m 0755 -o root -g root "$bin_src" "$INSTALL_DIR/dtn-node"
     verify "binary installed 0755 root" test "$(stat -c '%a %U' "$INSTALL_DIR/dtn-node")" = "755 root"
@@ -358,6 +396,7 @@ final_report() {
    5. Verify a full reboot restores everything by itself.
 
  Deployment parameters used in this run:
+   Board : ${BOARD_MODEL} (userland ${BOARD_ARCH})
    COUNTRY=${COUNTRY}   (override: COUNTRY=XX ./provision.sh)
    ALLOW_SSH=${ALLOW_SSH}   (override: ALLOW_SSH=1 ./provision.sh)
 

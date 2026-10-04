@@ -2,7 +2,7 @@
 
 Asynchronous, end-to-end encrypted (E2EE) messaging that works with **no Internet, no cellular network and no satellites**. It is a delay-tolerant network (DTN) built from two moving parts:
 
-- **Fixed dead-drop nodes** — Raspberry Pi Zero 2 W boards running an open Wi-Fi access point with a captive portal and a self-contained HTTP daemon (Go + SQLite). Nodes are *blind mailboxes*: they store and serve opaque encrypted envelopes without ever seeing plaintext, keys or sender identities.
+- **Fixed dead-drop nodes** — Raspberry Pi boards (baseline: the **Pi Zero W**; every model with on-board Wi-Fi works, and the rest through an AP-capable USB Wi-Fi adapter — see `docs/pi-models.md`) running an open Wi-Fi access point with a captive portal and a self-contained HTTP daemon (Go + SQLite). Nodes are *blind mailboxes*: they store and serve opaque encrypted envelopes without ever seeing plaintext, keys or sender identities.
 - **Mobile data mules** — ordinary users' phone browsers. While moving between nodes, a mule's browser carries other people's encrypted envelopes in its `IndexedDB` (capacity 100 envelopes) and drops them off at the next portal it reaches.
 
 All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confidentiality, Ed25519 for identity/signatures, via an embedded `tweetnacl.js`). The envelope format is designed from day one to migrate, without rewriting the data structure, to BLE L2CAP (Phase 2) and LoRa P2P (Phase 3).
@@ -16,11 +16,31 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
 6. Bob syncs, recognizes his own `dest_hint`, decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox.
 
+## Quick install on a Raspberry Pi
+
+One command on a fresh Raspberry Pi OS **Lite** install (Zero W or newer —
+the per-model matrix, including which OS image and binary each board needs,
+is `docs/pi-models.md`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juliangt/offgrid/main/raspberry/install.sh \
+  | sudo bash -s -- --country AR
+```
+
+The installer detects the board, fetches the matching release binary
+(checksum-verified) plus the provisioning tree, runs the verified
+`provision.sh`, and asks to reboot — the reboot is the activation step; the
+node then announces the open `Red-Comunitaria` AP with the captive portal on
+its own. No Internet at the deployment site? Copy a release's assets onto a
+USB stick or the SD card's FAT partition and run
+`sudo ./install.sh --offline /media/usb --country AR` — the full manual path
+is in `docs/BUILD.md` §5.
+
 ## Phase 1 components
 
 | Module | Scope | Location |
 |---|---|---|
-| **A — Node network configuration** | `hostapd` (open AP), `dnsmasq` (DHCP + wildcard DNS), `iptables` (captive-portal redirects, client isolation), power optimizations for solar + LiFePO4 | `raspberry/` |
+| **A — Node network configuration** | `hostapd` (open AP), `dnsmasq` (DHCP + wildcard DNS), `iptables` (captive-portal redirects, client isolation), power optimizations for solar + LiFePO4, board-aware provisioning (`provision.sh`) and the one-step installer (`install.sh`, online + offline) | `raspberry/` |
 | **B — Node daemon** | Single static Go binary: HTTP API, SQLite storage (`WAL`), canonical-host middleware, 15-minute cleanup worker, `index.html` embedded via `embed.FS` | `node/` |
 | **C — SPA + crypto engine** | Modular same-origin SPA (`index.html` + `css/app.css` + ES5 scripts under `js/`) with `tweetnacl.js` vendored, IndexedDB store (`identity`, `inbox`, `transit_queue`), mule sync engine | `node/web/` |
 | **D — Protocol evolution mapping** | How the universal Envelope maps to BLE L2CAP CoC with `hop_count <= 7` (Phase 2) and to LoRa SX1262 at 915 MHz in CBOR within a 222-byte MTU (Phase 3) | `docs/protocol.md` |
@@ -29,6 +49,7 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 
 - **`docs/protocol.md`** — the *normative* protocol specification: envelope format, canonical serialization, key derivations (`id`, `dest_hint`), crypto primitives, binding limits, node SQLite schema and API behavior, threat model and the Phase 2/3 evolution mapping (§14, with §14.4 listing where each mapping lives in the code). If you implement Modules B or C, start there.
 - **`docs/BUILD.md`** — step-by-step build, run, test and Raspberry Pi deployment guide, with troubleshooting.
+- **`docs/pi-models.md`** — per-model support matrix: OS image, binary and Wi-Fi caveats for every Raspberry Pi variant (Zero W is the baseline), plus per-class power and performance notes.
 - **`docs/hardware.md`** — solar + LiFePO4 sizing math, wiring, SD/enclosure guidance and the node assembly checklist.
 - **`docs/DEVELOPMENT_PLAN.md`** — binding development plan: design decisions, architecture, sprint breakdown and acceptance criteria.
 - **`docs/MASTER_DEVELOPMENT_PROMPT.md`** — original master specification (source of truth for requirements).
@@ -37,9 +58,10 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 
 ```
 offgrid/
-├── docs/            # normative protocol spec, build and hardware docs
+├── .github/         # release workflow: binaries + per-model DEPLOY.md per tag
+├── docs/            # normative protocol spec, build and hardware docs, per-model matrix
 ├── node/            # Module B: Go daemon (internal: storage, api, cleanup, envelope; web/: SPA)
-├── raspberry/       # Module A: hostapd, dnsmasq, firewall, power, systemd configs
+├── raspberry/       # Module A: install.sh, provision.sh, hostapd, dnsmasq, firewall, power, systemd
 └── tests/           # crypto round-trip (Node) and E2E sync (curl) tests
 ```
 
@@ -125,3 +147,15 @@ hardening pass added the cold-start `-db` directory bootstrap plus the
 manual items require physical hardware (two-node walk test and captive
 mini-browser on real Android/iOS) — see `docs/BUILD.md` §5 and §7 for
 the on-site checklists.
+
+After Sprint 4, the deployment story was widened from the Zero 2 W to
+**every Raspberry Pi with the Pi Zero W as the baseline target**
+(issue #15): `node/build.sh` now emits an ARMv6 binary alongside the
+arm64/armv7 ones, `provision.sh` detects the board model and userland ISA
+(strict `uname -m` → binary mapping, 60 s watchdog ceiling on single-core
+boards), `raspberry/install.sh` turns installation into one online line or
+an offline USB/SD bundle, the release workflow attaches binaries +
+`SHA256SUMS` + a per-model `DEPLOY.md` to every tag, and
+`docs/pi-models.md` documents the OS/binary/caveats matrix for each board.
+On-hardware acceptance on a physical Zero W (issue #15, W7) is the
+remaining manual item.

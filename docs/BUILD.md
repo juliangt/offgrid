@@ -7,8 +7,8 @@ Step-by-step instructions to build, test, run and deploy the off-grid DTN node (
 | Tool | Version | Used for |
 |---|---|---|
 | Go | ≥ 1.22 (verified with go1.27.1) | node daemon build and unit tests |
-| Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs` only; nothing in the product needs Node |
-| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `raspberry/provision.sh` |
+| Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs` and `tests/spa_structure.mjs` only; nothing in the product needs Node |
+| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `raspberry/provision.sh`, `raspberry/install.sh` |
 | curl | any | `tests/sync_e2e.sh`, deployment verification |
 | git | any | checking out this repository |
 
@@ -21,13 +21,19 @@ cd node
 ./build.sh
 ```
 
-The script cross-compiles fully static binaries (`-trimpath -ldflags "-s -w"`, CGO disabled). Outputs, all gitignored (measured with go1.27.1, darwin/arm64 host, after the Sprint 4 hardening pass):
+The script cross-compiles fully static binaries (`-trimpath -ldflags "-s -w"`, CGO disabled). Outputs, all gitignored (measured with go1.27.1, darwin/arm64 host):
 
-| Output | Target | Size |
+| Output | Target (see `docs/pi-models.md`) | Size |
 |---|---|---|
-| `node/dtn-node-linux-arm64` | Raspberry Pi Zero 2 W (primary) | 10,682,528 bytes (~10.2 MiB) |
-| `node/dtn-node-linux-arm` | 32-bit ARMv7 (fallback) | 11,141,280 bytes (~10.6 MiB) |
+| `node/dtn-node-linux-arm64` | Pi Zero 2 W, 3, 4, 400, 5, CM4/CM5 (64-bit OS) | 10,682,528 bytes (~10.2 MiB) |
+| `node/dtn-node-linux-armv7` | Pi 2, or a 64-bit board running a 32-bit OS | 11,141,280 bytes (~10.6 MiB) |
+| `node/dtn-node-linux-armv6` | **Pi Zero W** (baseline), Pi 1, CM1 (32-bit OS only) | 11,141,280 bytes (~10.6 MiB) |
 | `node/dtn-node-dev` | host OS/arch (development) | 10,751,314 bytes (~10.3 MiB) |
+
+The ARMv6 build matters: the Zero W's ARM1176 core cannot execute a GOARM=7
+binary (it aborts with `Illegal instruction`), so the baseline board needs
+its own target. `raspberry/provision.sh` maps `uname -m` to the right file
+(`aarch64`→arm64, `armv7l`→armv7, `armv6l`→armv6).
 
 The web SPA travels inside the binary via `go:embed`: `node/web/` holds the `index.html` skeleton, the `css/app.css` stylesheet and the plain ES5 scripts under `js/` (vendored tweetnacl, protocol engine, IndexedDB store, UI wiring), all served same-origin by the node. A deployed node is still exactly one file plus its SQLite database.
 
@@ -107,20 +113,53 @@ Expected outputs:
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors.
 
-## 5. Deploy to a Raspberry Pi Zero 2 W
+## 5. Deploy to a Raspberry Pi (Zero W or newer)
 
-The provisioning is idempotent and never starts services mid-run: **the reboot is the activation step**. Run it from a LOCAL console (keyboard + monitor or serial), not over an SSH session on NetworkManager-managed Wi-Fi — the script disables and masks NetworkManager (binding decision, `docs/DEVELOPMENT_PLAN.md` §1.6).
+The supported range and the per-model matrix (OS image, binary, Wi-Fi
+caveats, power notes) live in `docs/pi-models.md`; the provisioning is
+identical on every board and idempotent, and it never starts services
+mid-run: **the reboot is the activation step**. Run any of the paths below
+from a LOCAL console (keyboard + monitor or serial), not over an
+SSH session on NetworkManager-managed Wi-Fi — the script disables and masks
+NetworkManager (binding decision, `docs/DEVELOPMENT_PLAN.md` §1.6).
 
-1. **Build the deployment binary** (on any machine, from step 2):
+### Path 1 — one-line online install (recommended)
+
+On the Pi (fresh Raspberry Pi OS **Lite**, with Internet once):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/juliangt/offgrid/main/raspberry/install.sh \
+  | sudo bash -s -- --country AR
+```
+
+`raspberry/install.sh` detects the board and userland ISA, downloads the
+matching release binary plus the provisioning tree of the same release tag
+(checksum-verified against the release `SHA256SUMS`), and hands over to
+`provision.sh`. Add `--reboot` to activate unattended; otherwise press ENTER
+at the final prompt. Pin a version with `--ref vX.Y.Z`.
+
+### Path 2 — offline install from a USB stick or the SD card (no Internet)
+
+Copy a release's assets (`dtn-node-linux-*`, `SHA256SUMS`,
+`raspberry-<tag>.tar.gz`) onto a USB stick or the SD card's FAT partition,
+mount it on the Pi, then:
+
+```bash
+sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
+```
+
+### Path 3 — manual build + copy
+
+1. **Build the deployment binaries** (on any machine, from step 2):
 
    ```bash
-   cd node && ./build.sh   # produces dtn-node-linux-arm64 (Zero 2 W target)
+   cd node && ./build.sh   # emits arm64, armv7 and armv6 — provision.sh picks
    ```
 
 2. **Copy the binary and the infrastructure tree to the Pi** (from your workstation; replace the hostname/IP and identity):
 
    ```bash
-   scp node/dtn-node-linux-arm64 pi@<pi-address>:/tmp/
+   scp node/dtn-node-linux-arm64 pi@<pi-address>:/tmp/   # armv6/armv7 for those boards
    scp -r raspberry pi@<pi-address>:/tmp/
    ```
 
@@ -134,9 +173,9 @@ The provisioning is idempotent and never starts services mid-run: **the reboot i
    reboot
    ```
 
-   `provision.sh` (9 verified steps): masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables`, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files, creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the binary at `/opt/dtn-node/dtn-node`, and enables every unit — verifying each step with `[OK]`/`[FAIL]` and failing fast.
+   `provision.sh` (9 verified steps) detects the board model and userland ISA, masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables`, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files (on single-core ARMv6 boards the daemon's watchdog ceiling is relaxed to 60 s), creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the matching binary at `/opt/dtn-node/dtn-node`, and enables every unit — verifying each step with `[OK]`/`[FAIL]` and failing fast.
 
-4. **Verify after reboot.** From a laptop/phone joined to the `Red-Comunitaria` open AP:
+**Verify after reboot — all paths.** From a laptop/phone joined to the `Red-Comunitaria` open AP:
 
    ```bash
    # Portal answers on the canonical origin (host header override):
@@ -161,7 +200,8 @@ The provisioning is idempotent and never starts services mid-run: **the reboot i
 
 | Symptom | Checks and fixes |
 |---|---|
-| `hostapd` fails to start (`systemctl status hostapd`) | `journalctl -u hostapd -b`. In order: (1) `rfkill list wifi` — unblock with `rfkill unblock wifi`; (2) `country_code` in `/etc/hostapd/hostapd.conf` must be a valid two-letter code matching the site's regulations, or the driver refuses the interface; (3) the Wi-Fi driver must support AP mode on `wlan0` (the on-board Pi radio does; USB dongles often do not); (4) confirm `DAEMON_CONF="/etc/hostapd/hostapd.conf"` in `/etc/default/hostapd` and that the unit is not `masked`. |
+| `dtn-node` dies instantly with `Illegal instruction` in `journalctl -u dtn-node` | The binary does not match the board's ISA: a GOARM=7 (`armv7`) binary on an ARMv6 board (Zero W, Pi 1) or an arm64 binary on a 32-bit OS. Reinstall with the correct `dtn-node-linux-*` artifact (`uname -m` → armv6l/armv7l/aarch64; `docs/pi-models.md` §1) — `install.sh` picks it automatically. |
+| `hostapd` fails to start (`systemctl status hostapd`) | `journalctl -u hostapd -b`. In order: (1) `rfkill list wifi` — unblock with `rfkill unblock wifi`; (2) `country_code` in `/etc/hostapd/hostapd.conf` must be a valid two-letter code matching the site's regulations, or the driver refuses the interface; (3) the Wi-Fi driver must support AP mode on `wlan0` (the on-board Pi radio does; USB dongles often do not — `docs/pi-models.md` §3); (4) confirm `DAEMON_CONF="/etc/hostapd/hostapd.conf"` in `/etc/default/hostapd` and that the unit is not `masked`. |
 | `dnsmasq` fails: port 53/67 already in use | `journalctl -u dnsmasq -b` shows `address already in use`. Another resolver (e.g. `systemd-resolved` on non-Pi OS images) owns the port: disable it (`systemctl disable --now systemd-resolved`) or remove its stub config; on the Pi this is rare because provision.sh already masks NetworkManager. Our `dnsmasq.conf` uses `bind-interfaces`, so a clash is always a real port conflict, not a wildcard bind. |
 | `dtn-node` unit keeps restarting | `journalctl -u dtn-node -b`. Under systemd the unit runs `Type=notify` with `WatchdogSec=`; the daemon pings `WATCHDOG=1` at half the interval (see `internal/sdnotify`). Restarts with `missed watchdog ping` entries mean the process was starved: check for CPU throttling, an overloaded SD card (see `docs/hardware.md` §5), or a dying battery browning out the SoC (check `vcgencmd get_throttled` and the power budget). |
 | Browser opens the portal but the app loses data between nodes | You are inside the OS captive-portal mini-browser, whose storage profile is isolated and often ephemeral (spec §13.4). Copy the URL shown in the banner — `http://portal.red.local:8080` — and open it in Chrome/Safari; only the full browser gives persistent `IndexedDB` under the shared origin. |
