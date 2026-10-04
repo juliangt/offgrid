@@ -8,7 +8,7 @@ Step-by-step instructions to build, test, run and deploy the off-grid DTN node (
 |---|---|---|
 | Go | ≥ 1.22 (verified with go1.27.1) | node daemon build and unit tests |
 | Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs`, `tests/spa_structure.mjs` and `tests/version_migration.mjs` only; nothing in the product needs Node |
-| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `raspberry/provision.sh`, `raspberry/install.sh` |
+| bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `tests/hardening_structure.sh`, `raspberry/provision.sh`, `raspberry/install.sh` |
 | curl | any | `tests/sync_e2e.sh`, deployment verification |
 | sqlite3 | any (CLI) | `tests/sync_e2e.sh` §15 coverage only: schema-1 fixture crafting, migration and downgrade-refusal assertions (with `shasum`/`sha256sum` for the §15.7 b byte fingerprint) |
 | git | any | checking out this repository |
@@ -82,6 +82,11 @@ node tests/version_migration.mjs
 
 # 5. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
 bash tests/sync_e2e.sh
+
+# 6. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
+#    assertions on the generated firewall ruleset, tc shaping stream and
+#    shield scripts (no hardware, no root)
+bash tests/hardening_structure.sh
 ```
 
 Expected outputs:
@@ -121,6 +126,15 @@ Expected outputs:
    ```
 
    It builds the dev binary itself, starts two daemons on `127.0.0.1:18091` and `127.0.0.1:18092` (override with `PORT_A` / `PORT_B`; the extra §15 nodes use `PORT_C` / `PORT_E`, defaults `18093` / `18094`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`).
+
+6. The Pi hardening test ends with 110 assertions and:
+
+   ```
+   hardening: summary: 110 passed, 0 failed
+   hardening: RESULT: PASS
+   ```
+
+   It needs no root, no hardware and no network: it asserts the anti-circumvention hardening of issue #16 Track 1 ("the AP is not free Internet") on the GENERATED artifacts — `bash -n` over every provisioning script; hostapd `ap_isolate=1` plus the control socket; dnsmasq's authoritative wildcard for the portal with the query log confined to tmpfs; the complete firewall ruleset via `raspberry/firewall/iptables.sh --print` (rootless rule-generation separation): FORWARD policy DROP with every rule scoped to the client subnet, the explicit VPN/DoT/proxy/DNS-egress escape-route kills, per-source DNS/ICMP rate limits, portal connlimit + SYN hashlimit on 8080, the captive-portal REDIRECT and the runtime shield chains; the tc cake shaping stream (`traffic-shaping.sh --dry-run`: dual-dsthost egress, IFB-mirrored dual-srchost ingress); and both shields' dry-run behavior against synthetic fixtures (shed the flooder/quota hog/connection hoarder, keep honest clients, never emit or persist DNS names or MACs).
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors.
 

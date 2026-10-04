@@ -10,7 +10,15 @@
 #   hostapd/hostapd.conf        -> /etc/hostapd/hostapd.conf
 #   dnsmasq/dnsmasq.conf        -> /etc/dnsmasq.conf
 #   firewall/iptables.sh        -> /usr/local/sbin/dtn-firewall.sh
+#   firewall/dns-shield.sh      -> /usr/local/sbin/dtn-dns-shield.sh
+#   firewall/station-shield.sh  -> /usr/local/sbin/dtn-station-shield.sh
+#   firewall/traffic-shaping.sh -> /usr/local/sbin/dtn-traffic-shaping.sh
 #   firewall/dtn-firewall.service -> /etc/systemd/system/dtn-firewall.service
+#   firewall/dtn-traffic-shaping.service -> /etc/systemd/system/dtn-traffic-shaping.service
+#   firewall/dtn-dns-shield.service -> /etc/systemd/system/dtn-dns-shield.service
+#   firewall/dtn-dns-shield.timer   -> /etc/systemd/system/dtn-dns-shield.timer
+#   firewall/dtn-station-shield.service -> /etc/systemd/system/dtn-station-shield.service
+#   firewall/dtn-station-shield.timer   -> /etc/systemd/system/dtn-station-shield.timer
 #   power/config.txt.snippet    -> appended to /boot/firmware/config.txt (Bookworm)
 #                                  or /boot/config.txt (legacy), once only
 #   power/dtn-power.service     -> /etc/systemd/system/dtn-power.service
@@ -249,6 +257,16 @@ install_configs() {
     install_file "$SCRIPT_DIR/firewall/iptables.sh" /usr/local/sbin/dtn-firewall.sh 0755
     verify "dtn-firewall.sh installed" test -x /usr/local/sbin/dtn-firewall.sh
 
+    # Issue #16 Track 1 shields and shaping: installed next to dtn-firewall.sh
+    # in /usr/local/sbin, wired to systemd below. All three are --dry-run /
+    # --print capable and never mutate anything outside the kernel + tmpfs.
+    install_file "$SCRIPT_DIR/firewall/dns-shield.sh" /usr/local/sbin/dtn-dns-shield.sh 0755
+    verify "dtn-dns-shield.sh installed" test -x /usr/local/sbin/dtn-dns-shield.sh
+    install_file "$SCRIPT_DIR/firewall/station-shield.sh" /usr/local/sbin/dtn-station-shield.sh 0755
+    verify "dtn-station-shield.sh installed" test -x /usr/local/sbin/dtn-station-shield.sh
+    install_file "$SCRIPT_DIR/firewall/traffic-shaping.sh" /usr/local/sbin/dtn-traffic-shaping.sh 0755
+    verify "dtn-traffic-shaping.sh installed" test -x /usr/local/sbin/dtn-traffic-shaping.sh
+
     # Fire the firewall once now: it is session-safe (it only adds accepts and
     # a REDIRECT — nothing is dropped, the INPUT policy is left untouched), it
     # validates the ruleset on real hardware and, when netfilter-persistent is
@@ -258,6 +276,17 @@ install_configs() {
     verify "REDIRECT hook active" iptables -t nat -C PREROUTING -i wlan0 -j DTN_PORTAL
     verify "REDIRECT 80->8080 active" iptables -t nat -C DTN_PORTAL -p tcp --dport 80 -j REDIRECT --to-ports 8080
     verify "FORWARD policy DROP" test "$(iptables -S FORWARD | head -n 1)" = "-P FORWARD DROP"
+    verify "shield chains created" iptables -nL DTN_DNSBL
+
+    # Traffic shaping: applied now only if the AP interface already exists
+    # (session-safe — qdiscs on wlan0 do not touch an operator's console);
+    # otherwise dtn-traffic-shaping.service puts it in place at boot.
+    if command -v tc >/dev/null 2>&1 && ip link show wlan0 >/dev/null 2>&1; then
+        /usr/local/sbin/dtn-traffic-shaping.sh
+        verify "cake qdisc active on wlan0" bash -c 'tc qdisc show dev wlan0 | grep -q cake'
+    else
+        log "wlan0/tc not available during provisioning: shaping applies at boot (dtn-traffic-shaping.service)"
+    fi
 
     # Boot config snippet: Bookworm mounts the firmware partition at
     # /boot/firmware, legacy images at /boot. Append once, marker-guarded.
@@ -298,9 +327,19 @@ install_configs() {
         rm -f "$node_unit_tmp"
     fi
     install_file "$SCRIPT_DIR/firewall/dtn-firewall.service" /etc/systemd/system/dtn-firewall.service 0644
+    install_file "$SCRIPT_DIR/firewall/dtn-traffic-shaping.service" /etc/systemd/system/dtn-traffic-shaping.service 0644
+    install_file "$SCRIPT_DIR/firewall/dtn-dns-shield.service" /etc/systemd/system/dtn-dns-shield.service 0644
+    install_file "$SCRIPT_DIR/firewall/dtn-dns-shield.timer" /etc/systemd/system/dtn-dns-shield.timer 0644
+    install_file "$SCRIPT_DIR/firewall/dtn-station-shield.service" /etc/systemd/system/dtn-station-shield.service 0644
+    install_file "$SCRIPT_DIR/firewall/dtn-station-shield.timer" /etc/systemd/system/dtn-station-shield.timer 0644
     install_file "$SCRIPT_DIR/power/dtn-power.service" /etc/systemd/system/dtn-power.service 0644
     verify "dtn-node.service installed" test -f /etc/systemd/system/dtn-node.service
     verify "dtn-firewall.service installed" test -f /etc/systemd/system/dtn-firewall.service
+    verify "dtn-traffic-shaping.service installed" test -f /etc/systemd/system/dtn-traffic-shaping.service
+    verify "dtn-dns-shield.service installed" test -f /etc/systemd/system/dtn-dns-shield.service
+    verify "dtn-dns-shield.timer installed" test -f /etc/systemd/system/dtn-dns-shield.timer
+    verify "dtn-station-shield.service installed" test -f /etc/systemd/system/dtn-station-shield.service
+    verify "dtn-station-shield.timer installed" test -f /etc/systemd/system/dtn-station-shield.timer
     verify "dtn-power.service installed" test -f /etc/systemd/system/dtn-power.service
 
     # Older Debian hostapd.service units have no default DAEMON_CONF; newer
@@ -349,13 +388,21 @@ enable_units() {
     log "step 7/9: enable units (no service is started; reboot activates)"
     systemctl daemon-reload
     # networking: brings up wlan0 (10.42.0.1) via ifupdown at boot.
-    # hostapd + dnsmasq: the classic AP stack. The three dtn-* units: firewall,
-    # portal daemon, power trim. Boot order is encoded in the unit files.
-    systemctl enable networking hostapd dnsmasq dtn-firewall dtn-node dtn-power
+    # hostapd + dnsmasq: the classic AP stack. The dtn-* units: firewall,
+    # bandwidth shaping, portal daemon, power trim, plus the two shield
+    # TIMERS (the services they trigger are enabled through the timers —
+    # a timer starts its unit regardless of the unit's own enablement).
+    # Boot order is encoded in the unit files. Nothing is started: the
+    # reboot is the activation step.
+    systemctl enable networking hostapd dnsmasq dtn-firewall dtn-traffic-shaping \
+        dtn-dns-shield.timer dtn-station-shield.timer dtn-node dtn-power
     verify "networking enabled" systemctl is-enabled networking
     verify "hostapd enabled" systemctl is-enabled hostapd
     verify "dnsmasq enabled" systemctl is-enabled dnsmasq
     verify "dtn-firewall enabled" systemctl is-enabled dtn-firewall
+    verify "dtn-traffic-shaping enabled" systemctl is-enabled dtn-traffic-shaping
+    verify "dtn-dns-shield.timer enabled" systemctl is-enabled dtn-dns-shield.timer
+    verify "dtn-station-shield.timer enabled" systemctl is-enabled dtn-station-shield.timer
     verify "dtn-node enabled" systemctl is-enabled dtn-node
     verify "dtn-power enabled" systemctl is-enabled dtn-power
 }
@@ -393,7 +440,13 @@ final_report() {
         curl -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/
    4. Verify two clients cannot reach each other (isolation):
         ping from client A to client B must fail.
-   5. Verify a full reboot restores everything by itself.
+   5. Verify the Track-1 shields are armed (issue #16):
+        systemctl list-timers 'dtn-*'
+        /usr/local/sbin/dtn-firewall.sh --print | less   # inspect the ruleset
+        /usr/local/sbin/dtn-dns-shield.sh --dry-run
+        /usr/local/sbin/dtn-station-shield.sh --dry-run
+        /usr/local/sbin/dtn-traffic-shaping.sh --dry-run
+   6. Verify a full reboot restores everything by itself.
 
  Deployment parameters used in this run:
    Board : ${BOARD_MODEL} (userland ${BOARD_ARCH})
