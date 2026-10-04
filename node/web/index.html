@@ -749,6 +749,62 @@
    *   6. payload = b64(eph_pub ‖ nonce ‖ box); dest_hint §6.1; id §6.2
    * `t` (inner timestamp) equals created_at (§4.1: clients SHOULD).
    */
+  /*
+   * Module D — Phase 2/3 evolution mapping (normative source: spec §14).
+   *
+   * The envelope built below is the Phase 1 (JSON over Wi-Fi) encoding of
+   * semantic fields that are FROZEN across all transports (§14.1): v, id,
+   * dest_hint, created_at, ttl, payload (+ reserved hop_count) and inner
+   * m, a, k, s, t. No field is ever repurposed. Sign-then-encrypt is
+   * invariant: the sender's Ed25519 signature and alias always travel
+   * inside the ciphertext on every transport.
+   *
+   * Phase 1 (this code path — JSON over HTTP/Wi-Fi): hex ids and padded
+   * Base64 payload travel as text; hop_count is always ABSENT (absent ==
+   * 0) and never appears in Phase 1 code paths.
+   *
+   * Phase 2 — BLE L2CAP CoC, bitchat alignment (§14.2): one
+   * Connection-Oriented Channel per peer over a fixed dynamic PSM.
+   * Frame layout: length(2 bytes, big-endian) || CBOR envelope; the L2CAP
+   * layer segments/reassembles (one envelope = one SDU) and the negotiated
+   * MTU (>= 512 B) carries the maximum binary envelope (399 B, §14.3)
+   * plus the 2-byte length prefix in a single SDU. JSON -> CBOR field
+   * mapping (canonical CBOR per RFC 8949 preferred serialization,
+   * integer map keys ascending):
+   *
+   *     CBOR key   JSON field    CBOR type       Notes
+   *     0          v             uint            constant 1
+   *     1          id            bstr (32 B)     SHA-256 bytes (hex decoded)
+   *     2          dest_hint     bstr (8 B)      raw 8 bytes (hex decoded)
+   *     3          created_at    uint            unix seconds
+   *     4          ttl           uint            seconds
+   *     5          payload       bstr            eph_pub || nonce || box
+   *     6          hop_count     uint (0-7)      optional; absent == 0
+   *
+   *   hop_count counts peer-to-peer relays (incremented by each relaying
+   *   peer, envelope dropped at 7); it is reserved and stays 0/absent in
+   *   Phase 1 (§14.1). The inner payload switches to canonical CBOR with
+   *   integer keys (0=m, 1=a, 2=k, 3=s, 4=t) in Phases 2/3 — the signature
+   *   then covers that CBOR map without key 3, the exact analogue of the
+   *   §5.1 signed string used here.
+   *
+   * Phase 3 — LoRa P2P SX1262 at 915 MHz (§14.3): radio frames carry at
+   * most 222 bytes and the Phase 2 CBOR envelope never fits one frame
+   * (floor 244 B; the exact size math is normative in spec §14.3 — not
+   * duplicated here). Two modes:
+   *   (a) two-frame fragmentation: each frame prefixes a 1-byte fragment
+   *       header followed by up to 221 envelope bytes (2 x 221 = 442 >=
+   *       399, so every Phase 1-legal message fits 2 frames):
+   *
+   *         bit 7..4   bit 3..2   bit 1..0
+   *         win_id(4)  idx(2)     total(2)
+   *
+   *       win_id is a random per-message window tag; reassembly
+   *       concatenates by idx within (win_id, total);
+   *   (b) short-message single-frame mode (M <= 48, no id/dest_hint/
+   *       alias; id recomputed from frame bytes) fits the 222-byte MTU
+   *       exactly — see spec §14.3(b).
+   */
   function buildEnvelope(opts) {
     var nacl = requireNacl();
     if (!opts || typeof opts !== "object") throw new Error("buildEnvelope: options required");

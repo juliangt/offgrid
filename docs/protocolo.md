@@ -510,6 +510,16 @@ So a short message fits one frame **iff `M ≤ 48`**; larger messages use genera
 - `alias` is omitted; receivers resolve the sender's alias from the directory via `k`. The signature covers `ts ‖ k ‖ m` (the exact analogue of §5.1 in binary form).
 - Sign-then-encrypt is preserved: `k` and `s` remain inside the ciphertext.
 
+### 14.4 Implementation anchors (where each mapping lives in the code)
+
+Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at every place a developer will touch the envelope. This §14 remains the **normative source**; the code comments below are summaries and MUST NOT diverge from it — when they do, this section wins.
+
+| Location (file + symbol) | What is anchored there |
+|---|---|
+| `node/internal/envelope/envelope.go` — doc comment on type `Envelope` | Complete mapping for the node implementation: frozen semantic field list, the JSON → CBOR field/type table, the L2CAP CoC frame layout (length prefix, one envelope = one SDU, MTU ≥ 512 B), `hop_count ≤ 7` reserved semantics (always 0/absent in Phase 1), the LoRa 222-byte budget with the 1-byte fragment header `win_id(4) \| idx(2) \| total(2)` and the short-message single-frame mode; references §14 as normative source. |
+| `node/web/index.html` — comment block immediately above `buildEnvelope` (pure-engine section 5) | Same mapping mirrored on the client implementation that produces Phase 1 envelopes, so SPA-side changes stay aware of the frozen fields and the Phase 2/3 encodings. |
+| `docs/protocolo.md` §14.2 / §14.3 (this document) | Normative math the anchors summarize: CBOR size derivation, fragment capacity (`2 × 221 = 442 ≥ 399`), short-mode 222-byte table. |
+
 ## 15. Conformance checklist
 
 **Module B (node daemon) MUST:** implement the schema and pragmas of §9; the six endpoints with the exact status codes, limits and redirect/exemption behavior of §10; envelope validation of §10.5; `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; no decryption, no signature verification, no `id` recomputation requirement.
