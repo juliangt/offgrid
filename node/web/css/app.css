@@ -147,9 +147,10 @@
   .msg-head .time { color: var(--muted); }
   .msg-body { white-space: pre-wrap; word-break: break-word; }
 
-  .counter-row { display: flex; justify-content: flex-end; margin: 4px 0 10px; }
+  .counter-row { display: flex; justify-content: flex-end; gap: 8px; margin: 4px 0 10px; }
   #byte-counter { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
   #byte-counter.over { color: var(--danger); font-weight: 700; }
+  #chunk-note { font-size: 0.85rem; color: var(--muted); }   /* §4.4 envelope preview */
 
   .status-ok { color: var(--accent); }
   .status-error { color: var(--danger); }

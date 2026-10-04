@@ -211,23 +211,48 @@ function currentRecipient() {
   return null;
 }
 
-/* ----- composer with the §8.1 UTF-8 byte counter ----- */
+/* ----- composer with the §8.1 UTF-8 byte counter + §4.4 envelope preview -- */
 
 function updateCounter() {
   var text = $("compose-text").value;
   var len = DTN.messageByteLength(text);
   var counter = $("byte-counter");
-  counter.textContent = len + "/" + DTN.MESSAGE_MAX_BYTES;
-  if (len > DTN.MESSAGE_MAX_BYTES) counter.className = "over";
-  else counter.className = "";
+  var note = $("chunk-note");
+  var alias = uiState.identity ? uiState.identity.alias : null;
+  /* §4.4 preview: how many envelopes this text will cost. 0 = unsendable. */
+  var parts = len > 0 ? DTN.chunkPlannedCount(text, alias) : 0;
+  if (len > DTN.MESSAGE_MAX_BYTES) {
+    var limit = DTN.chunkComposerLimit(alias);
+    counter.textContent = len + "/" + limit;
+    counter.className = (len > limit || parts === 0) ? "over" : "";
+    if (note) {
+      if (parts === 0) {
+        note.textContent = "too long to send (max " + DTN.CHUNK_MAX_PARTS + " envelopes)";
+      } else {
+        note.textContent = "will send " + parts + " envelopes";
+        /* Honest cost (§4.4): a mule carries at most 100 envelopes, so a
+         * big message eats a visible share of that queue. */
+        if (parts >= DTN.CHUNK_WARN_PARTS) {
+          note.textContent += " — heavy: " + parts + " of a mule's " + DTN.TRANSIT_CAPACITY + " slots";
+        }
+      }
+    }
+  } else {
+    counter.textContent = len + "/" + DTN.MESSAGE_MAX_BYTES;
+    counter.className = "";
+    if (note) note.textContent = "";
+  }
   updateSendEnabled();
 }
 
 function updateSendEnabled() {
   var btn = $("btn-send");
   if (!btn) return;
-  var len = DTN.messageByteLength($("compose-text").value);
-  btn.disabled = uiState.sending || !currentRecipient() || len < 1 || len > DTN.MESSAGE_MAX_BYTES;
+  var text = $("compose-text").value;
+  var len = DTN.messageByteLength(text);
+  var alias = uiState.identity ? uiState.identity.alias : null;
+  btn.disabled = uiState.sending || !currentRecipient() ||
+    len < 1 || DTN.chunkPlannedCount(text, alias) === 0;
 }
 
 function showStatus(el, kind, text) {
@@ -236,10 +261,10 @@ function showStatus(el, kind, text) {
   el.textContent = text;
 }
 
-/* Send flow (plan 2.5): build the envelope per §4.2/§5/§6, remember its id
- * so it is never re-pulled (§10.4), count it, and hand it to the node
- * immediately. The mule sync engine (section 10) takes over from the next
- * sync onwards. */
+/* Send flow (plan 2.5): build the envelope(s) per §4.2/§4.4/§5/§6, remember
+ * EVERY chunk envelope's id so none is ever re-pulled (§10.4, §4.4), count
+ * the message, and hand the envelopes to the node immediately. The mule
+ * sync engine (section 10) takes over from the next sync onwards. */
 function onSend() {
   if (uiState.sending) return;
   var statusEl = $("compose-status");
@@ -257,8 +282,9 @@ function onSend() {
     showStatus(statusEl, "error", "Write a message.");
     return;
   }
-  if (len > DTN.MESSAGE_MAX_BYTES) {
-    showStatus(statusEl, "error", "The message exceeds the 128-byte limit.");
+  if (DTN.chunkPlannedCount(text, identity.alias) === 0) {
+    showStatus(statusEl, "error", "The message is too long: it would need more than " +
+      DTN.CHUNK_MAX_PARTS + " envelopes (§4.4).");
     return;
   }
   var recipientRaw = DTN.b64decode(entry.x25519);
@@ -271,9 +297,9 @@ function onSend() {
   updateSendEnabled();
   showStatus(statusEl, "", "Signing and encrypting…");
 
-  var env;
+  var envs;
   try {
-    env = DTN.buildEnvelope({
+    envs = DTN.buildMessageEnvelopes({
       recipientBoxPublic: recipientRaw,
       message: text,
       alias: identity.alias,
@@ -287,24 +313,26 @@ function onSend() {
     showStatus(statusEl, "error", "Could not build the envelope: " + e.message);
     return;
   }
+  var envIds = [];
+  for (var i = 0; i < envs.length; i++) envIds.push(envs[i].id);
 
-  DTN.markSeenIds([env.id]).then(function () {
+  DTN.markSeenIds(envIds).then(function () {
     return DTN.getMeta("sent_count").then(function (n) {
       return DTN.setMeta("sent_count", (typeof n === "number" ? n : 0) + 1);
     });
   }).then(function () {
-    /* §11: hand the envelope to the node immediately (it rides the same
+    /* §11: hand the envelopes to the node immediately (they ride the same
      * mule cycle as every other sync). */
-    return performSync([env]);
+    return performSync(envs);
   }).then(function (summary) {
     uiState.sending = false;
     if (!summary || summary.status !== "ok") {
-      /* The node was unreachable: the envelope joins the transit queue in
-       * its ORIGINAL v1 form (§15.6 — the stored record keeps the version
-       * it was minted under; any §15.1 conversion happens only on the
-       * wire copy during a sync) and retries automatically on the next
+      /* The node was unreachable: the envelopes join the transit queue in
+       * their ORIGINAL minted form (§15.6 — the stored record keeps the
+       * version it was minted under; any §15.1 conversion happens only on
+       * the wire copy during a sync) and retry automatically on the next
        * sync. */
-      return DTN.addTransitEnvelopes([env]).then(function () {
+      return DTN.addTransitEnvelopes(envs).then(function () {
         $("compose-text").value = "";
         updateCounter();
         updateSendEnabled();
@@ -315,7 +343,9 @@ function onSend() {
     $("compose-text").value = "";
     updateCounter();
     updateSendEnabled();
-    showStatus(statusEl, "ok", "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.");
+    showStatus(statusEl, "ok", envs.length > 1
+      ? "Message split into " + envs.length + " envelopes and dropped at the node. They will arrive when a mule carries them to their recipient."
+      : "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.");
     renderTelemetry();
   }, function (err) {
     uiState.sending = false;
@@ -325,39 +355,62 @@ function onSend() {
   });
 }
 
-/* ----- inbox (§11 display: sender alias + time + text) ----- */
+/* ----- inbox (§11 display: sender alias + time + text; §4.4 partials) ----- */
 
 function renderInbox() {
-  return DTN.listInbox().then(function (rows) {
-    var list = $("inbox-list");
-    var emptyMsg = $("inbox-empty");
-    if (!list) return;
-    list.textContent = "";
-    if (!rows.length) {
-      showEl(emptyMsg);
-      return;
-    }
-    hideEl(emptyMsg);
-    for (var i = 0; i < rows.length; i++) {
-      var row = rows[i];
-      var li = document.createElement("li");
-      var head = document.createElement("div");
-      head.className = "msg-head";
-      var sender = document.createElement("strong");
-      sender.textContent = row.a;
-      var time = document.createElement("span");
-      time.className = "time";
-      time.textContent = relativeTime(row.t);
-      time.title = absoluteTime(row.t);
-      head.appendChild(sender);
-      head.appendChild(time);
-      var body = document.createElement("div");
-      body.className = "msg-body";
-      body.textContent = row.m;
-      li.appendChild(head);
-      li.appendChild(body);
-      list.appendChild(li);
-    }
+  /* §4.4: sweep expired partials first (passive purge on render — never a
+   * timer), then render complete messages and still-traveling partials as
+   * one time-ordered stream. */
+  return DTN.purgeExpiredChunkPartials(nowSec()).then(function () {
+    return DTN.listChunkPartials();
+  }).then(function (partials) {
+    return DTN.listInbox().then(function (rows) {
+      var list = $("inbox-list");
+      var emptyMsg = $("inbox-empty");
+      if (!list) return;
+      list.textContent = "";
+      var items = [];
+      var i;
+      for (i = 0; i < rows.length; i++) items.push({ row: rows[i], partial: false });
+      for (i = 0; i < partials.length; i++) items.push({ row: partials[i], partial: true });
+      items.sort(function (x, y) {
+        return (y.row.t - x.row.t) || (y.row.received_at - x.row.received_at);
+      });
+      if (!items.length) {
+        showEl(emptyMsg);
+        return;
+      }
+      hideEl(emptyMsg);
+      for (i = 0; i < items.length; i++) {
+        var row = items[i].row;
+        var li = document.createElement("li");
+        var head = document.createElement("div");
+        head.className = "msg-head";
+        var sender = document.createElement("strong");
+        sender.textContent = row.a;
+        var time = document.createElement("span");
+        time.className = "time";
+        time.textContent = relativeTime(row.t);
+        time.title = absoluteTime(row.t);
+        head.appendChild(sender);
+        head.appendChild(time);
+        var body = document.createElement("div");
+        if (items[i].partial) {
+          /* §4.4 partial arrival: "message X/N — still traveling". It
+           * completes when the rest of its chunks arrive, or disappears
+           * after the message's own TTL (purged above). */
+          body.className = "msg-body muted";
+          body.textContent = "Partial message — " + DTN.chunkStateHave(row) + " of " +
+            row.n + " chunks arrived, still traveling.";
+        } else {
+          body.className = "msg-body";
+          body.textContent = row.m;
+        }
+        li.appendChild(head);
+        li.appendChild(body);
+        list.appendChild(li);
+      }
+    });
   });
 }
 
@@ -781,7 +834,10 @@ function runSync(outgoing) {
   });
 }
 
-/* §11 classification of the pulled envelopes + persistence. */
+/* §11 classification of the pulled envelopes + persistence, extended with
+ * the §4.4 chunk flow: chunk arrivals merge into inbox_parts (keyed by the
+ * group id `g`), a completing chunk publishes ONE inbox row and clears the
+ * partial; flat messages land in the inbox exactly as before. */
 function processPulled(pulled, known, identity) {
   var fresh = [];
   var pulledIds = [];
@@ -796,29 +852,56 @@ function processPulled(pulled, known, identity) {
   }
   var cls = DTN.classifyPullEnvelopes(fresh, identity.hint);
   var inboxRecords = [];
+  var chunkArrivals = [];
   var rejected = 0;
+  var now = nowSec();
   for (var j = 0; j < cls.mine.length; j++) {
-    var res = DTN.decryptEnvelope(cls.mine[j], identity, nowSec());
+    var res = DTN.decryptEnvelope(cls.mine[j], identity, now);
     if (res.ok) {
-      inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: nowSec() });
+      if (res.chunk) {
+        chunkArrivals.push({ env: cls.mine[j], dec: res });
+      } else {
+        inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: now });
+      }
     } else {
       rejected += 1; /* silent reject (§4.3): counted, never surfaced */
     }
   }
-  return DTN.addInboxMessages(inboxRecords).then(function () {
-    return DTN.addTransitEnvelopes(cls.foreign);
-  }).then(function (transitOutcome) {
-    return DTN.markSeenIds(pulledIds).then(function () {
-      return {
-        status: "ok",
-        pulled: pulled.length,
-        fresh: fresh.length,
-        mine: cls.mine.length,
-        inboxAdded: inboxRecords.length,
-        rejected: rejected,
-        transitAdded: transitOutcome.added,
-        evicted: transitOutcome.evicted.length
-      };
+  /* §4.4: sweep expired partials (passive, sync-time), then merge each
+   * arrival; every completion counts as one inbox message delivered. */
+  return DTN.purgeExpiredChunkPartials(now).then(function () {
+    var seq = Promise.resolve();
+    var completed = 0;
+    var arrived = 0;
+    for (var c = 0; c < chunkArrivals.length; c++) {
+      (function (arrival) {
+        seq = seq.then(function () {
+          return DTN.addInboxChunkPart(arrival.env, arrival.dec, now).then(function (outcome) {
+            arrived += 1;
+            if (outcome.complete) completed += 1;
+          });
+        });
+      })(chunkArrivals[c]);
+    }
+    return seq.then(function () {
+      return DTN.addInboxMessages(inboxRecords).then(function () {
+        return DTN.addTransitEnvelopes(cls.foreign);
+      }).then(function (transitOutcome) {
+        return DTN.markSeenIds(pulledIds).then(function () {
+          return {
+            status: "ok",
+            pulled: pulled.length,
+            fresh: fresh.length,
+            mine: cls.mine.length,
+            inboxAdded: inboxRecords.length + completed,
+            chunksArrived: arrived,
+            chunksCompleted: completed,
+            rejected: rejected,
+            transitAdded: transitOutcome.added,
+            evicted: transitOutcome.evicted.length
+          };
+        });
+      });
     });
   });
 }
