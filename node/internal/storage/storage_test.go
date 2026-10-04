@@ -1,14 +1,41 @@
 package storage
 
 import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"offgrid/dtn-node/internal/envelope"
 )
+
+// legacySchema1 is the exact §9 schema as originally deployed — storage
+// schema version 1 (§15.3): no envelopes.v column and no user_version marker.
+// Only the migration test's fixture uses it.
+const legacySchema1 = `
+CREATE TABLE envelopes (
+  id         TEXT PRIMARY KEY,
+  dest_hint  TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  ttl        INTEGER NOT NULL,
+  payload    TEXT NOT NULL
+);
+CREATE INDEX idx_envelopes_dest_hint ON envelopes(dest_hint);
+CREATE INDEX idx_envelopes_expiry    ON envelopes(created_at, ttl);
+
+CREATE TABLE directory (
+  pubkey    TEXT PRIMARY KEY,
+  x25519    TEXT NOT NULL,
+  alias     TEXT NOT NULL,
+  last_seen INTEGER NOT NULL
+);
+`
 
 // newTestStore opens a fresh Store in the test's temp directory.
 func newTestStore(t *testing.T) *Store {
@@ -19,6 +46,56 @@ func newTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+// userVersion reads PRAGMA user_version from db.
+func userVersion(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var v int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	return v
+}
+
+// tableColumns returns the column names of the named table (PRAGMA
+// table_info; the table name is always a test-controlled literal).
+func tableColumns(t *testing.T, db *sql.DB, table string) []string {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table_info(%s): %v", table, err)
+	}
+	return cols
+}
+
+// hasColumn reports whether cols contains name.
+func hasColumn(cols []string, name string) bool {
+	for _, c := range cols {
+		if c == name {
+			return true
+		}
+	}
+	return false
 }
 
 // hexID renders n as a deterministic 64-char lowercase hex id.
@@ -311,5 +388,213 @@ func TestPullChunkedKnownIDs(t *testing.T) {
 	}
 	if len(all) != 0 {
 		t.Fatalf("full exclusion across chunks must return nothing, got %+v", all)
+	}
+}
+
+// TestFreshDatabaseAtSchemaVersion2 verifies that a newly created database is
+// born directly at the current schema version (§15.3: no simulated history):
+// user_version == SchemaVersion and the envelopes.v column exists.
+func TestFreshDatabaseAtSchemaVersion2(t *testing.T) {
+	s := newTestStore(t)
+
+	if got := userVersion(t, s.db); got != SchemaVersion {
+		t.Fatalf("fresh database must carry user_version=%d, got %d", SchemaVersion, got)
+	}
+	cols := tableColumns(t, s.db, "envelopes")
+	if !hasColumn(cols, "v") {
+		t.Fatalf("schema version 2 must add envelopes.v, got columns %v", cols)
+	}
+}
+
+// TestLegacySchema1MigratesAndPreservesEnvelopes is matrix item §15.7a: a
+// hand-crafted schema-1 database (the §9 schema, user_version = 0) holding
+// pre-existing envelope rows is migrated on open — user_version becomes
+// SchemaVersion, envelopes.v appears, and every pre-existing row stays intact
+// and servable with v == 1 and byte-identical payloads (the DEFAULT 1
+// backfill is historically correct, §15.3).
+func TestLegacySchema1MigratesAndPreservesEnvelopes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+
+	// Build the legacy fixture: schema version 1 exactly as old builds left
+	// it — populated rows, no marker (user_version = 0, §15.3).
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open legacy fixture: %v", err)
+	}
+	defer legacy.Close()
+	if _, err := legacy.Exec(legacySchema1); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	payloadA := strings.Repeat("A", 332) // 248 bytes; opaque to storage
+	payloadB := strings.Repeat("B", 332)
+	insertEnv := `INSERT INTO envelopes (id, dest_hint, created_at, ttl, payload) VALUES (?, ?, ?, ?, ?)`
+	if _, err := legacy.Exec(insertEnv, hexID(1), "9f3ab02c1d77e4c1", 100, 3600, payloadA); err != nil {
+		t.Fatalf("seed envelope 1: %v", err)
+	}
+	if _, err := legacy.Exec(insertEnv, hexID(2), "9f3ab02c1d77e4c1", 200, 3600, payloadB); err != nil {
+		t.Fatalf("seed envelope 2: %v", err)
+	}
+	if _, err := legacy.Exec(
+		`INSERT INTO directory (pubkey, x25519, alias, last_seen) VALUES (?, ?, ?, ?)`,
+		strings.Repeat("k", 44), strings.Repeat("x", 44), "alice", 50,
+	); err != nil {
+		t.Fatalf("seed directory: %v", err)
+	}
+	if got := userVersion(t, legacy); got != 0 {
+		t.Fatalf("fixture must mimic a pre-marker database (user_version=0), got %d", got)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy fixture: %v", err)
+	}
+
+	// Open with the current build: the chain 1→2 must run.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer s.Close()
+
+	if got := userVersion(t, s.db); got != SchemaVersion {
+		t.Fatalf("after migration user_version must be %d, got %d", SchemaVersion, got)
+	}
+	if !hasColumn(tableColumns(t, s.db, "envelopes"), "v") {
+		t.Fatalf("migration must add envelopes.v, got columns %v", tableColumns(t, s.db, "envelopes"))
+	}
+
+	pulled, err := s.PullEnvelopes(nil, 10, 400)
+	if err != nil {
+		t.Fatalf("pull migrated rows: %v", err)
+	}
+	if len(pulled) != 2 {
+		t.Fatalf("both pre-existing envelopes must survive migration, got %+v", pulled)
+	}
+	byID := make(map[string]envelope.Envelope, len(pulled))
+	for _, e := range pulled {
+		byID[e.ID] = e
+	}
+	for _, want := range []struct {
+		id        string
+		createdAt int64
+		payload   string
+	}{
+		{hexID(1), 100, payloadA},
+		{hexID(2), 200, payloadB},
+	} {
+		e, ok := byID[want.id]
+		if !ok {
+			t.Fatalf("pre-existing envelope %s lost in migration", want.id)
+		}
+		if e.V != 1 {
+			t.Fatalf("pre-existing row must read back as v=1 (DEFAULT backfill, §15.3), got %+v", e)
+		}
+		if e.Payload != want.payload {
+			t.Fatalf("migration must not rewrite payload bytes (§15.3): %s", want.id)
+		}
+		if e.CreatedAt != want.createdAt || e.TTL != 3600 || e.DestHint != "9f3ab02c1d77e4c1" {
+			t.Fatalf("migration must leave core fields untouched, got %+v", e)
+		}
+		if len(e.Meta) != 0 {
+			t.Fatalf("served envelope must never carry meta (§15.3), got %s", e.Meta)
+		}
+	}
+
+	entries, err := s.GetDirectory(10)
+	if err != nil || len(entries) != 1 || entries[0].Alias != "alice" {
+		t.Fatalf("migration must leave the directory table intact, got %+v err=%v", entries, err)
+	}
+}
+
+// TestOpenRefusesNewerSchemaLeavesFileUntouched is matrix item §15.7b: a
+// database whose user_version exceeds the binary's SchemaVersion is refused
+// with an error naming BOTH versions, and the database file stays
+// byte-identical (no write, no schema operation before the refusal, §15.3).
+func TestOpenRefusesNewerSchemaLeavesFileUntouched(t *testing.T) {
+	for _, dbVersion := range []int{SchemaVersion + 1, SchemaVersion + 5} {
+		t.Run("user_version="+strconv.Itoa(dbVersion), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "future.db")
+			s, err := Open(path)
+			if err != nil {
+				t.Fatalf("seed open: %v", err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatalf("close seeded store: %v", err)
+			}
+
+			// Simulate a database written by a newer binary.
+			future, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatalf("open future fixture: %v", err)
+			}
+			if _, err := future.Exec(fmt.Sprintf("PRAGMA user_version = %d", dbVersion)); err != nil {
+				t.Fatalf("stamp future user_version: %v", err)
+			}
+			if err := future.Close(); err != nil {
+				t.Fatalf("close future fixture: %v", err)
+			}
+
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("snapshot database: %v", err)
+			}
+
+			refused, err := Open(path)
+			if err == nil {
+				refused.Close()
+				t.Fatalf("open of a schema-%d database by a schema-%d binary must be refused", dbVersion, SchemaVersion)
+			}
+			if !strings.Contains(err.Error(), strconv.Itoa(dbVersion)) || !strings.Contains(err.Error(), strconv.Itoa(SchemaVersion)) {
+				t.Fatalf("refusal must name both versions (database %d, binary %d), got: %v", dbVersion, SchemaVersion, err)
+			}
+
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("re-read database: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("refused open must leave the database byte-untouched: %d before vs %d after bytes", len(before), len(after))
+			}
+		})
+	}
+}
+
+// TestInsertPullRoundTripPreservesStoredVersion verifies that envelopes.v is
+// the authoritative stored version (§15.3): insert/query round-trips keep the
+// inserted v, and envelopes never come back with meta.
+func TestInsertPullRoundTripPreservesStoredVersion(t *testing.T) {
+	s := newTestStore(t)
+
+	v1 := makeEnv(hexID(1), 100)
+	if _, err := s.InsertEnvelopes([]envelope.Envelope{v1}); err != nil {
+		t.Fatalf("insert v1: %v", err)
+	}
+
+	v2 := makeEnv(hexID(2), 200)
+	v2.V = 2
+	v2.Meta = json.RawMessage(`{"orig_v":1}`)
+	if _, err := s.InsertEnvelopes([]envelope.Envelope{v2}); err != nil {
+		t.Fatalf("insert v2: %v", err)
+	}
+
+	pulled, err := s.PullEnvelopes(nil, 10, 400)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if len(pulled) != 2 {
+		t.Fatalf("expected both envelopes back, got %+v", pulled)
+	}
+	byID := make(map[string]envelope.Envelope, len(pulled))
+	for _, e := range pulled {
+		byID[e.ID] = e
+	}
+	if e := byID[hexID(1)]; e.V != 1 {
+		t.Fatalf("stored v1 must round-trip as v=1, got %+v", e)
+	}
+	if e := byID[hexID(2)]; e.V != 2 {
+		t.Fatalf("stored v2 must round-trip as v=2 (authoritative column, §15.3), got %+v", e)
+	}
+	for _, e := range pulled {
+		if len(e.Meta) != 0 {
+			t.Fatalf("meta is not persisted (§15.3); envelope %s came back with meta %s", e.ID, e.Meta)
+		}
 	}
 }

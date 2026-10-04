@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -63,10 +64,12 @@ func TestValidateBoundary(t *testing.T) {
 		mutate  func(*Envelope)
 		wantErr bool
 	}{
-		// version
+		// version (§15.3: supported set {1, 2})
 		{"v=1 ok", func(e *Envelope) {}, false},
 		{"v=0 rejected", func(e *Envelope) { e.V = 0 }, true},
-		{"v=2 rejected", func(e *Envelope) { e.V = 2 }, true},
+		{"v=2 ok", func(e *Envelope) { e.V = 2 }, false},
+		{"v=3 rejected", func(e *Envelope) { e.V = 3 }, true},
+		{"v=-1 rejected", func(e *Envelope) { e.V = -1 }, true},
 		// id
 		{"id ok", func(e *Envelope) {}, false},
 		{"id uppercase rejected", func(e *Envelope) { e.ID = strings.Repeat("AB", 32) }, true},
@@ -128,6 +131,77 @@ func TestValidateNowBoundary(t *testing.T) {
 	}
 	if err := e.Validate(1699); err == nil { // 2000 > 1699+300
 		t.Fatalf("envelope beyond skew edge must fail")
+	}
+}
+
+// TestValidateMetaPerVersion exercises the per-version structural rules of
+// §15.3: meta MUST be absent on v1; on v2 a present meta MUST be a JSON
+// object whose orig_v, if present, is the integer 1; unknown meta keys are
+// ignored (§15.1).
+func TestValidateMetaPerVersion(t *testing.T) {
+	const now = int64(1000)
+
+	cases := []struct {
+		name    string
+		v       int64
+		meta    string // raw JSON for Meta; "" means absent (nil)
+		wantErr bool
+	}{
+		{"v1 without meta ok", 1, "", false},
+		{"v1 with empty meta object rejected", 1, `{}`, true},
+		{"v1 with orig_v meta rejected", 1, `{"orig_v":1}`, true},
+		{"v1 with meta null rejected", 1, `null`, true},
+		{"v2 without meta ok (natively minted)", 2, "", false},
+		{"v2 with empty meta object ok", 2, `{}`, false},
+		{"v2 with orig_v 1 ok (converted)", 2, `{"orig_v":1}`, false},
+		{"v2 with orig_v 1 plus unknown keys ok", 2, `{"orig_v":1,"future_key":[1,2],"note":"ignored"}`, false},
+		{"v2 with unknown keys only ok", 2, `{"future_key":true}`, false},
+		{"v2 with orig_v 2 rejected", 2, `{"orig_v":2}`, true},
+		{"v2 with orig_v as string rejected", 2, `{"orig_v":"1"}`, true},
+		{"v2 with orig_v null rejected", 2, `{"orig_v":null}`, true},
+		{"v2 with orig_v as float rejected", 2, `{"orig_v":1.0}`, true},
+		{"v2 with orig_v as object rejected", 2, `{"orig_v":{"v":1}}`, true},
+		{"v2 with meta as array rejected", 2, `[]`, true},
+		{"v2 with meta as string rejected", 2, `"orig_v"`, true},
+		{"v2 with meta as number rejected", 2, `7`, true},
+		{"v2 with meta null rejected", 2, `null`, true},
+		{"v2 with malformed meta object rejected", 2, `{"orig_v":`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEnv()
+			e.V = tc.v
+			if tc.meta != "" {
+				e.Meta = json.RawMessage(tc.meta)
+			}
+			err := e.Validate(now)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected success, got error: %v", err)
+			}
+		})
+	}
+}
+
+// TestSupportedVersionsInvariants pins the §15.5 consistency requirements on
+// the supported set: ascending, duplicate-free, and with the advertised
+// ceiling (MaxSupportedVersion) as its last element.
+func TestSupportedVersionsInvariants(t *testing.T) {
+	if len(SupportedVersions) == 0 {
+		t.Fatalf("supported version set must not be empty")
+	}
+	if SupportedVersions[0] != 1 {
+		t.Fatalf("version 1 (the frozen §3 format) must stay in the supported set, got %v", SupportedVersions)
+	}
+	for i := 1; i < len(SupportedVersions); i++ {
+		if SupportedVersions[i] <= SupportedVersions[i-1] {
+			t.Fatalf("supported set must be ascending without duplicates, got %v", SupportedVersions)
+		}
+	}
+	if last := SupportedVersions[len(SupportedVersions)-1]; last != MaxSupportedVersion {
+		t.Fatalf("MaxSupportedVersion (%d) must be the last element of SupportedVersions %v", MaxSupportedVersion, SupportedVersions)
 	}
 }
 
