@@ -49,6 +49,14 @@ Development follows five sprints (see `PLAN_DESARROLLO.md` §5):
 |---|---|---|
 | 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocolo.md`, threat model | **Complete** |
 | 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | **Complete** |
-| 2 | Module C: SPA + crypto engine + mule engine | Pending |
+| 2 | Module C: SPA + crypto engine + mule engine | **Complete** |
 | 3 | Module A: Raspberry Pi infrastructure | Pending |
 | 4 | E2E integration, Module D final docs, build/deploy guide | Pending |
+
+Sprint 2 delivered the single-file SPA (`node/web/index.html`) with the
+tweetnacl crypto engine embedded inline: registration with seed backup/import,
+directory-driven composition with a 128-byte UTF-8 counter, inbox, mule
+telemetry panel, the captive "open in your full browser" banner, the IndexedDB
+store (`dtn_local_store` v1) and the full mule sync engine (push/pull with
+FIFO transit capacity 100). The engine is verified by
+`node tests/crypto_roundtrip.mjs` (spec §6 test vectors included).

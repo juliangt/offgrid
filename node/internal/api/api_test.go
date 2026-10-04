@@ -333,6 +333,13 @@ func TestSyncPushPullDedup(t *testing.T) {
 	if len(resp.PullEnvelopes) != 2 || resp.PullEnvelopes[0].ID != e2.ID || resp.PullEnvelopes[1].ID != e1.ID {
 		t.Fatalf("pull must return both envelopes newest-first, got %+v", resp.PullEnvelopes)
 	}
+	// Every stored envelope is v=1 by push validation (§10.5); the pull
+	// reconstruction must surface that version (§3.1), not a zero value.
+	for _, p := range resp.PullEnvelopes {
+		if p.V != 1 {
+			t.Fatalf("pulled envelope must report v=1, got %+v", p)
+		}
+	}
 	// The pulled payload must round-trip identically.
 	if resp.PullEnvelopes[0].Payload != e2.Payload {
 		t.Fatalf("payload must round-trip byte-for-byte")
