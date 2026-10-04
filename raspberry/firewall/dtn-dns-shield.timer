@@ -1,0 +1,23 @@
+# dtn-dns-shield.timer — one-minute cadence for dtn-dns-shield.service
+# (Module A, issue #16 Track 1)
+# Install path: /etc/systemd/system/dtn-dns-shield.timer
+# Enabled by provision.sh (enable only — like every unit here, the reboot is
+# the activation step).
+
+[Unit]
+Description=Run dtn-dns-shield once a minute
+
+[Timer]
+# First pass shortly after boot (after the boot ordering of the service has
+# settled), then once per minute.
+OnBootSec=90s
+OnUnitActiveSec=60s
+# Power rationale: the node runs on solar (~1 W budget, docs/hardware.md).
+# Accuracy lets systemd coalesce this wakeup with other timers instead of
+# waking the SoC at an exact instant; 15 s of jitter is irrelevant for a
+# 60 s detection window.
+AccuracySec=15s
+Unit=dtn-dns-shield.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,26 @@
+# dtn-traffic-shaping.service — boot-time bandwidth shaping for the DTN node
+# (Module A, issue #16 Track 1)
+# Install path: /etc/systemd/system/dtn-traffic-shaping.service
+# Runs /usr/local/sbin/dtn-traffic-shaping.sh (installed from
+# raspberry/firewall/traffic-shaping.sh) once at boot. The script is
+# idempotent (qdisc replace), so a manual re-run is always safe.
+
+[Unit]
+Description=DTN per-client bandwidth shaping (cake dual-dsthost egress, ifb cake dual-srchost ingress)
+
+# Ordering: after networking (wlan0 with its static 10.42.0.1 exists), after
+# the firewall (convention: every network-protection unit chains off it), and
+# before hostapd — shaping must be in place before the first client can
+# associate, or an early abusive station gets an unshaped window.
+After=networking.service dtn-firewall.service
+Before=hostapd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The qdiscs survive the exit (kernel state); RemainAfterExit just records
+# that shaping is in place for "systemctl status" clarity.
+ExecStart=/usr/local/sbin/dtn-traffic-shaping.sh
+
+[Install]
+WantedBy=multi-user.target

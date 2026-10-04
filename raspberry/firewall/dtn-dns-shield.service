@@ -1,0 +1,36 @@
+# dtn-dns-shield.service — anti-DNS-tunneling shed (Module A, issue #16
+# Track 1)
+# Install path: /etc/systemd/system/dtn-dns-shield.service
+# Triggered once a minute by dtn-dns-shield.timer (NOT enabled as a service:
+# the timer is the activation surface). Runs
+# /usr/local/sbin/dtn-dns-shield.sh, which reads dnsmasq's tmpfs query log,
+# keeps per-source-IP rate counters only (queried names are discarded inside
+# the parser — blind-node privacy, docs/protocol.md §13) and sheds sources
+# with sustained abusive query rates into the firewall's DTN_DNSBL chain.
+
+[Unit]
+Description=DTN anti-DNS-tunneling shield (per-source rate shed into DTN_DNSBL)
+
+# After dnsmasq (the tmpfs query log must exist) and the firewall (the
+# DTN_DNSBL chain must exist). OnUnitActiveSec pacing from the timer makes
+# misses harmless: the next window simply covers more queries.
+After=dnsmasq.service dtn-firewall.service
+
+[Service]
+Type=oneshot
+# No RemainAfterExit: the timer's OnUnitActiveSec measures activation
+# cadence, and the service is meant to be short-lived.
+ExecStart=/usr/local/sbin/dtn-dns-shield.sh
+
+# Hardening. The shield needs root only for CAP_NET_ADMIN (DTN_DNSBL
+# updates); everything else it touches is read-only or tmpfs.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/dev/shm
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

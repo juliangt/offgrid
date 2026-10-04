@@ -1,0 +1,21 @@
+# dtn-telemetry.timer — five-minute cadence for dtn-telemetry (Module A,
+# issue #16 Track 3)
+# Install path: /etc/systemd/system/dtn-telemetry.timer
+# Enabled by provision.sh (enable only — the reboot is the activation step).
+
+[Unit]
+Description=Run DTN telemetry every five minutes
+
+[Timer]
+# Telemetry is a passive counter read: it can afford the slowest cadence of
+# the dtn-* timers. Five minutes gives the chaos matrix and the operator
+# runbook a dense-enough time series (one journald line per sample) at a
+# negligible share of the ~1 W solar budget (AccuracySec lets systemd
+# coalesce the wakeup with the shields' timers).
+OnBootSec=6min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=dtn-telemetry.service
+
+[Install]
+WantedBy=timers.target

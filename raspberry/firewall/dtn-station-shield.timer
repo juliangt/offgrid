@@ -1,0 +1,20 @@
+# dtn-station-shield.timer — two-minute cadence for dtn-station-shield.service
+# (Module A, issue #16 Track 1)
+# Install path: /etc/systemd/system/dtn-station-shield.timer
+# Enabled by provision.sh (enable only — the reboot is the activation step).
+
+[Unit]
+Description=Run dtn-station-shield every two minutes
+
+[Timer]
+# Two minutes rather than the DNS shield's one: quota and connection-count
+# abuse unfolds over seconds-to-minutes, so the slower cadence halves the
+# timer wakeups (solar power budget, docs/hardware.md) without letting an
+# abuser get meaningfully ahead of a 64 MiB per-association quota.
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=dtn-station-shield.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,35 @@
+# dtn-telemetry.service — privacy-preserving counter collection (Module A,
+# issue #16 Track 3)
+# Install path: /etc/systemd/system/dtn-telemetry.service
+# Triggered every five minutes by dtn-telemetry.timer (the timer is the
+# activation surface). Runs /usr/local/sbin/dtn-telemetry.sh, which reduces
+# the node's abuse-defense surfaces to ONE aggregated counter line — station
+# count, shield shed/cooldown counts, iptables DTN_ACC/DTN_DNSBL hit
+# counters — and never any MAC, IP, DNS name or envelope data
+# (docs/protocol.md §13; see the script's privacy contract).
+
+[Unit]
+Description=DTN telemetry (counters-only summary for the operator runbook)
+
+# After the surfaces it reads: the daemon (whose existence the probes assume),
+# hostapd (station counter), dnsmasq (shield state exists), and the firewall
+# (the DTN chains exist). A miss just yields "na" fields; ordering only keeps
+# the first samples honest.
+After=dtn-node.service hostapd.service dnsmasq.service dtn-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dtn-telemetry.sh
+
+# Hardening: root is needed to READ iptables counters and the hostapd control
+# socket; the only write is the tmpfs summary line in /dev/shm.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/dev/shm
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

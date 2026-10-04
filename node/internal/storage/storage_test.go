@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -554,6 +555,236 @@ func TestOpenRefusesNewerSchemaLeavesFileUntouched(t *testing.T) {
 				t.Fatalf("refused open must leave the database byte-untouched: %d before vs %d after bytes", len(before), len(after))
 			}
 		})
+	}
+}
+
+// TestOpenQuarantinesCorruptDatabaseAndRebuilds pins the corrupt-DB
+// self-recovery of issue #16 Phase 2: a database that fails to open with an
+// SQLite corruption error (garbage bytes → SQLITE_NOTADB; truncated file →
+// SQLITE_CORRUPT) is quarantined as <file>.corrupt-<unixts> together with
+// its -wal/-shm sidecars, a FRESH database appears at the original path, and
+// startup succeeds — at the documented cost of every envelope the corrupt
+// file held (accepted data expectation; the .corrupt-* files stay on disk as
+// operator-recoverable evidence).
+func TestOpenQuarantinesCorruptDatabaseAndRebuilds(t *testing.T) {
+	t.Run("garbage bytes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "node.db")
+		if err := os.WriteFile(path, []byte("THIS IS DEFINITELY NOT A SQLITE DATABASE, JUST GARBAGE BYTES ...."), 0o644); err != nil {
+			t.Fatalf("write garbage fixture: %v", err)
+		}
+
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("open over a garbage file must quarantine and rebuild, got: %v", err)
+		}
+		defer s.Close()
+
+		// The fresh store works and starts empty.
+		if pulled, err := s.PullEnvelopes(nil, 10, 100); err != nil || len(pulled) != 0 {
+			t.Fatalf("rebuilt store must start empty, got %+v err=%v", pulled, err)
+		}
+		if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(1), 100)}); err != nil {
+			t.Fatalf("rebuilt store must accept inserts: %v", err)
+		}
+
+		// The corrupt evidence was kept under .corrupt-*. (Sidecar handling
+		// is pinned exactly by TestQuarantineCorruptDatabaseMovesSidecars-
+		// First below; live SQLite recreates fresh sidecars for the rebuilt
+		// store as soon as it is used, so presence of a -wal here is normal.)
+		if matches, err := filepath.Glob(path + ".corrupt-*"); err != nil || len(matches) != 1 {
+			t.Fatalf("expected exactly one .corrupt-* quarantine of %s, got %v (err=%v)", path, matches, err)
+		}
+	})
+
+	t.Run("truncated real database", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "node.db")
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("seed open: %v", err)
+		}
+		for i := 0; i < 3; i++ {
+			if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(i), 100)}); err != nil {
+				t.Fatalf("seed insert: %v", err)
+			}
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("close seeded store: %v", err)
+		}
+
+		// Half a database file: the header survives, the page data does not —
+		// SQLite reports the image as malformed.
+		full, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read database: %v", err)
+		}
+		if err := os.WriteFile(path, full[:len(full)/2], 0o644); err != nil {
+			t.Fatalf("truncate database: %v", err)
+		}
+
+		rebuilt, err := Open(path)
+		if err != nil {
+			t.Fatalf("open over a truncated database must quarantine and rebuild, got: %v", err)
+		}
+		defer rebuilt.Close()
+
+		// Data loss is the documented, accepted outcome.
+		if pulled, err := rebuilt.PullEnvelopes(nil, 10, 400); err != nil || len(pulled) != 0 {
+			t.Fatalf("rebuilt store must start empty (documented loss), got %+v err=%v", pulled, err)
+		}
+		matches, _ := filepath.Glob(path + ".corrupt-*")
+		if len(matches) != 1 {
+			t.Fatalf("expected the truncated predecessor quarantined, got %v", matches)
+		}
+	})
+
+	t.Run("healthy database is never quarantined", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "node.db")
+		s, err := Open(path)
+		if err != nil {
+			t.Fatalf("open healthy store: %v", err)
+		}
+		if _, err := s.InsertEnvelopes([]envelope.Envelope{makeEnv(hexID(1), 100)}); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		// Reopening the healthy database must not quarantine anything.
+		s2, err := Open(path)
+		if err != nil {
+			t.Fatalf("reopen healthy store: %v", err)
+		}
+		defer s2.Close()
+		if matches, _ := filepath.Glob(path + ".corrupt-*"); len(matches) != 0 {
+			t.Fatalf("healthy database must not be quarantined, found %v", matches)
+		}
+		pulled, err := s2.PullEnvelopes(nil, 10, 400)
+		if err != nil || len(pulled) != 1 || pulled[0].ID != hexID(1) {
+			t.Fatalf("healthy reopen must keep the data, got %+v err=%v", pulled, err)
+		}
+	})
+}
+
+// TestQuarantineCorruptDatabaseMovesSidecarsFirst exercises the quarantine
+// helper directly: database and -wal/-shm sidecars are all renamed to
+// <file>.corrupt-<stamp>, and a rename failure aborts with an error (the
+// startup-fails-loudly contract for an unwritable directory).
+func TestQuarantineCorruptDatabaseMovesSidecarsFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "node.db")
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.WriteFile(f, []byte("corrupt evidence"), 0o644); err != nil {
+			t.Fatalf("write fixture %s: %v", f, err)
+		}
+	}
+
+	quarantined, err := quarantineCorruptDatabase(path, 1700000000)
+	if err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	want := []string{
+		path + "-wal.corrupt-1700000000",
+		path + "-shm.corrupt-1700000000",
+		path + ".corrupt-1700000000",
+	}
+	if len(quarantined) != len(want) {
+		t.Fatalf("quarantined %v, want %v", quarantined, want)
+	}
+	for i, w := range want {
+		if quarantined[i] != w {
+			t.Fatalf("position %d: got %s, want %s (sidecars must move before the main file)", i, quarantined[i], w)
+		}
+		if _, err := os.Stat(w); err != nil {
+			t.Fatalf("quarantined file missing: %v", err)
+		}
+		if _, err := os.Stat(strings.TrimSuffix(w, ".corrupt-1700000000")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("original must be gone after quarantine: %v", err)
+		}
+	}
+
+	// An unwritable directory aborts the quarantine with an error instead of
+	// silently continuing (Open then fails startup loudly).
+	hostile := t.TempDir()
+	hostilePath := filepath.Join(hostile, "broken.db")
+	if err := os.WriteFile(hostilePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write hostile fixture: %v", err)
+	}
+	if err := os.Chmod(hostile, 0o500); err != nil {
+		t.Fatalf("chmod hostile dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(hostile, 0o700) })
+
+	if _, err := quarantineCorruptDatabase(hostilePath, 1700000001); err == nil {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: the read-only directory fixture is writable, skipping")
+		}
+		t.Fatalf("quarantine in an unwritable directory must fail loudly")
+	}
+}
+
+// TestOpenWarnsOnOversizedWALSidecar pins the disk-exhaustion early warning:
+// a -wal sidecar above maxWALWarnBytes logs a stderr warning line but open
+// still succeeds, and the wal_autocheckpoint pragma is really engaged at the
+// documented default (1000 pages).
+func TestOpenWarnsOnOversizedWALSidecar(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "node.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("seed open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	// Plant an oversized sidecar and shrink the guard so it trips.
+	if err := os.WriteFile(path+"-wal", make([]byte, 64), 0o644); err != nil {
+		t.Fatalf("write oversized wal fixture: %v", err)
+	}
+	oldGuard := maxWALWarnBytes
+	maxWALWarnBytes = 16
+	t.Cleanup(func() { maxWALWarnBytes = oldGuard })
+
+	var logBuf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldOut)
+
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("open with oversized wal must only warn, got: %v", err)
+	}
+	defer s2.Close()
+
+	logged := logBuf.String()
+	if !strings.Contains(logged, "wal") || !strings.Contains(logged, filepath.Base(path)) {
+		t.Fatalf("oversized wal must log a warning naming the sidecar, got: %q", logged)
+	}
+
+	// The checkpoint pragma is engaged at the documented default.
+	var pages int
+	if err := s2.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&pages); err != nil {
+		t.Fatalf("read wal_autocheckpoint: %v", err)
+	}
+	if pages != 1000 {
+		t.Fatalf("wal_autocheckpoint must stay at the 1000-page default, got %d", pages)
+	}
+
+	// Control: a right-sized sidecar logs nothing.
+	logBuf.Reset()
+	if err := s2.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := os.WriteFile(path+"-wal", make([]byte, 8), 0o644); err != nil {
+		t.Fatalf("write small wal fixture: %v", err)
+	}
+	s3, err := Open(path)
+	if err != nil {
+		t.Fatalf("open with small wal: %v", err)
+	}
+	defer s3.Close()
+	if logBuf.String() != "" {
+		t.Fatalf("small wal must not warn, got: %q", logBuf.String())
 	}
 }
 

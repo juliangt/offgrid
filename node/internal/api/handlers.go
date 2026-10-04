@@ -42,12 +42,17 @@ type Store interface {
 	GetDirectory(limit int) ([]storage.DirectoryEntry, error)
 }
 
-// server carries the handler dependencies.
+// server carries the handler dependencies. postBudget and pushQuota are the
+// per-client admission-control limiters of ratelimit.go (issue #16 Phase 2):
+// a POST request budget shared by the two write endpoints and a per-IP
+// pushed-envelope budget, both RAM-only and keyed by source IP.
 type server struct {
-	store     Store
-	build     string
-	indexHTML []byte
-	assets    map[string]staticAsset
+	store      Store
+	build      string
+	indexHTML  []byte
+	assets     map[string]staticAsset
+	postBudget *rateLimiter
+	pushQuota  *rateLimiter
 }
 
 // staticAsset is one embedded same-origin web file (stylesheet or script)
@@ -86,7 +91,12 @@ var staticContentTypes = map[string]string{
 // index.html and every .css/.js file under css/ and js/ are read once at
 // startup. Unknown paths yield a JSON 404 and wrong methods a JSON 405 with
 // an Allow header (§10.1). The whole mux is wrapped with the canonical-host
-// redirect and the body-size limiter.
+// redirect and the body-size limiter; the two POST endpoints additionally sit
+// behind the per-IP admission-control budgets of ratelimit.go (issue #16
+// Phase 2): exhaustion answers 429 rate_limited with a Retry-After header
+// before the body is read. GET endpoints stay unlimited — they are the read
+// path of every legitimate client; the outer firewall rate limits are the
+// abuse brake there.
 func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 	if build == "" {
 		build = "dev"
@@ -104,7 +114,15 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 		return nil, err
 	}
 
-	s := &server{store: store, build: build, indexHTML: indexHTML, assets: assets}
+	postBudget, pushQuota := newAdmissionControl()
+	s := &server{
+		store:      store,
+		build:      build,
+		indexHTML:  indexHTML,
+		assets:     assets,
+		postBudget: postBudget,
+		pushQuota:  pushQuota,
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -113,8 +131,10 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("GET /generate_204", s.handleProbe)
 	mux.HandleFunc("GET /hotspot-detect.html", s.handleProbe)
 	mux.HandleFunc("GET /api/v1/directory", s.handleGetDirectory)
-	mux.HandleFunc("POST /api/v1/directory", s.handlePostDirectory)
-	mux.HandleFunc("POST /api/v1/sync", s.handleSync)
+	// The two write endpoints sit behind the per-IP request budget (§ above);
+	// the GET read path stays unlimited.
+	mux.HandleFunc("POST /api/v1/directory", s.withRequestBudget(s.handlePostDirectory))
+	mux.HandleFunc("POST /api/v1/sync", s.withRequestBudget(s.handleSync))
 	mux.HandleFunc("GET /api/v1/capabilities", s.handleCapabilities)
 
 	// Method-specific fallbacks: same paths, wrong method → JSON 405 + Allow.
@@ -168,21 +188,23 @@ func loadStaticAssets(webRoot fs.FS) (map[string]staticAsset, error) {
 // error short codes used in the {"status":"error","error":"<code>"} bodies
 // of §10.1.
 const (
-	codeInvalidJSON      = "invalid_json"
-	codeBodyTooLarge     = "body_too_large"
-	codeContentType      = "content_type"
-	codeInvalidEnvelope  = "invalid_envelope"
-	codeTooManyPush      = "too_many_envelopes"
-	codeTooManyKnownIDs  = "too_many_known_ids"
-	codeInvalidKnownID   = "invalid_known_id"
-	codeInvalidLimit     = "invalid_limit"
-	codeInvalidAlias     = "invalid_alias"
-	codeInvalidPubkey    = "invalid_pubkey"
-	codeInvalidX25519    = "invalid_x25519"
-	codeNodeFull         = "node_full"
-	codeNotFound         = "not_found"
-	codeMethodNotAllowed = "method_not_allowed"
-	codeInternal         = "internal"
+	codeInvalidJSON        = "invalid_json"
+	codeBodyTooLarge       = "body_too_large"
+	codeContentType        = "content_type"
+	codeInvalidEnvelope    = "invalid_envelope"
+	codeTooManyPush        = "too_many_envelopes"
+	codeTooManyKnownIDs    = "too_many_known_ids"
+	codeInvalidKnownID     = "invalid_known_id"
+	codeInvalidLimit       = "invalid_limit"
+	codeInvalidAlias       = "invalid_alias"
+	codeInvalidPubkey      = "invalid_pubkey"
+	codeInvalidX25519      = "invalid_x25519"
+	codeNodeFull           = "node_full"
+	codeRateLimited        = "rate_limited"
+	codeStorageUnavailable = "storage_unavailable"
+	codeNotFound           = "not_found"
+	codeMethodNotAllowed   = "method_not_allowed"
+	codeInternal           = "internal"
 )
 
 // writeJSON emits v with the API-wide JSON content type of §10.1.
@@ -364,6 +386,14 @@ type syncResponse struct {
 // single envelope is stored. Admission per envelope uses the §15.3 widened
 // validation: v in the supported set {1, 2} plus the per-version meta rules,
 // every other §10.5 check version-invariant.
+//
+// Issue #16 Phase 2 additions, in path order:
+//   - the outer withRequestBudget wrapper has already spent this client's
+//     per-IP request token before the body was read;
+//   - after the §8.1 shape checks but BEFORE per-envelope validation and any
+//     storage work, the batch cost (its envelope count) is checked against
+//     the client's per-IP envelope budget; an exhausted budget rejects the
+//     whole batch with 429 rate_limited while other IPs keep full service.
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if !decodeJSON(w, r, &req) {
@@ -392,6 +422,21 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeTooManyPush)
 		return
 	}
+	// Per-IP envelope budget (issue #16 Phase 2; complements the global §8.1
+	// cap so ONE station cannot fill the whole store). The full batch cost is
+	// withdrawn atomically before any validation/insert work: a batch that
+	// does not fit the remaining budget is refused whole — nothing is stored
+	// and no token is half-spent (fail closed, same as invalid envelopes).
+	// Pull-only syncs (no push_envelopes) cost nothing and mint no bucket.
+	// Counters are RAM-only and die on restart — that is acceptable graceful
+	// degradation, and the node never persists or attributes this per
+	// envelope (docs/protocol.md §13: no user-identifying data on disk).
+	if len(req.PushEnvelopes) > 0 {
+		if ok, wait := s.pushQuota.allow(clientKey(r), float64(len(req.PushEnvelopes))); !ok {
+			writeRateLimited(w, wait)
+			return
+		}
+	}
 	now := time.Now().Unix()
 	for _, e := range req.PushEnvelopes {
 		if err := e.Validate(now); err != nil {
@@ -403,17 +448,28 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.InsertEnvelopes(req.PushEnvelopes); err != nil {
 		// The per-node envelope cap (§8.1, plan §7 anti-abuse risk): the node
 		// is full, so pushes are shed with 429 instead of 500 — a capacity
-		// condition is expected behavior, not an internal error.
+		// condition is expected behavior, not an internal error. The policy
+		// is deliberately "reject newest, keep oldest": nothing is ever
+		// evicted to admit new mail (eviction belongs exclusively to the
+		// §10.6 TTL janitor), so when the store is full the NEWEST writers —
+		// the flood, almost by definition — are the ones refused, and the
+		// oldest legitimate mail keeps being served until it expires.
 		if errors.Is(err, storage.ErrCapacity) {
 			writeError(w, http.StatusTooManyRequests, codeNodeFull)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, codeInternal)
+		// Full disk / I/O failure under fire (issue #16 Phase 2): translate
+		// unexpected storage errors into a clean 507 with the standard error
+		// shape instead of 500-chaos. A solar-powered node with a saturated
+		// SD card must answer legibly and stay up, not spew internal errors.
+		writeError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
 		return
 	}
 	pulled, err := s.store.PullEnvelopes(req.KnownIDs, limit, now)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal)
+		// Reads fail the same clean way when the storage engine is unhappy
+		// (e.g. WAL writes on a full disk surface even on selects).
+		writeError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
 		return
 	}
 	writeJSON(w, http.StatusOK, syncResponse{Status: "ok", PullEnvelopes: pulled})

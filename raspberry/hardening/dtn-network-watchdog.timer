@@ -1,0 +1,23 @@
+# dtn-network-watchdog.timer — two-minute cadence for dtn-network-watchdog
+# (Module A, issue #16 Track 3)
+# Install path: /etc/systemd/system/dtn-network-watchdog.timer
+# Enabled by provision.sh (enable only — the reboot is the activation step).
+
+[Unit]
+Description=Run the DTN network watchdog every two minutes
+
+[Timer]
+# First pass four minutes after boot: the stack itself needs boot time
+# (hostapd, dnsmasq and dtn-node are ordered among themselves), and the
+# watchdog must not burn restart budget on components that are still
+# starting. Then every two minutes — the same cadence reasoning as
+# dtn-station-shield.timer: fast enough to keep a dead AP's outage under a
+# couple of minutes, slow enough not to matter for the ~1 W solar budget
+# (AccuracySec lets systemd coalesce the wakeup with other timers).
+OnBootSec=4min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=dtn-network-watchdog.service
+
+[Install]
+WantedBy=timers.target

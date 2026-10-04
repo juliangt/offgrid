@@ -1,0 +1,34 @@
+# dtn-station-shield.service — Wi-Fi station abuse shed (Module A, issue #16
+# Track 1)
+# Install path: /etc/systemd/system/dtn-station-shield.service
+# Triggered every couple of minutes by dtn-station-shield.timer. Runs
+# /usr/local/sbin/dtn-station-shield.sh, which reads hostapd per-station byte
+# counters, the DTN_ACC per-source iptables counters and conntrack, and
+# DEAUTHENTICATES individual abusive stations (quota or connection hoarding)
+# with a cooldown. It never takes the AP down; with hostapd_cli absent it
+# degrades to detection-only logging (required by issue #16).
+
+[Unit]
+Description=DTN station abuse shield (quota + connection shed via hostapd_cli)
+
+# After hostapd (station counters and the control socket exist) and the
+# firewall (DTN_ACC chain exists). Cooldowns live in tmpfs, so a restart of
+# the timer never traps a station in a shed state.
+After=hostapd.service dtn-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/dtn-station-shield.sh
+
+# Hardening: root is needed for CAP_NET_ADMIN (DTN_ACC updates) and the
+# hostapd control socket; the script writes nowhere but tmpfs.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/dev/shm
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -15,12 +15,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"offgrid/dtn-node/internal/envelope"
 
-	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGO), registered as "sqlite"
+	"modernc.org/sqlite" // pure-Go SQLite driver (no CGO), registered as "sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // SchemaVersion is the storage schema version this build creates and
@@ -79,6 +83,14 @@ const knownIDChunkSize = 900
 // the whole batch with ErrCapacity (fail closed, §10.4) and the API maps that
 // to 429 node_full.
 //
+// The eviction POLICY is "reject newest, keep oldest", on purpose (issue #16
+// Phase 2): nothing that has been accepted is ever deleted outside the TTL
+// janitor (DeleteExpired, §10.6) — there is no LRU, no overwriting, no
+// shedding of stored mail. When the store is full, the NEWEST writers get
+// 429 node_full; the oldest legitimate mail stays servable until it expires
+// naturally. Under a flood this means the flood's fresh junk is refused
+// while the pre-existing mailbox keeps working.
+//
 // It is a var instead of a const purely as a test hook: tests lower it to
 // exercise the guard without inserting 5000 rows. Production code must never
 // reassign it.
@@ -107,15 +119,70 @@ type Store struct {
 
 // Open creates or opens the database at path with the binding pragmas of §9
 // (journal_mode=WAL, busy_timeout=5000) applied on the DSN so every
-// connection gets them, and enforces the single-connection policy.
+// connection gets them, plus an explicit wal_autocheckpoint (see the DSN
+// comment below), and enforces the single-connection policy.
 //
 // Schema versioning per §15.3: user_version is read before ANY other
 // statement — no write, no schema operation — so a database written by a
 // newer binary is refused while leaving the file byte-untouched (the defined
 // rollback behavior; read-only mode is explicitly not implemented). A database
 // older than SchemaVersion is migrated forward through the migration chain.
+//
+// # Corrupt-database self-recovery (issue #16 Phase 2, Track 2)
+//
+// A solar-powered node on an SD card WILL eventually suffer a corrupt
+// database (power loss mid-write, flash wear) and MUST come back on its own
+// — no manual SSH is available. If open or schema application fails with an
+// SQLite corruption error, the daemon QUARANTINES the database: the file and
+// its -wal/-shm sidecars are renamed to <file>.corrupt-<unixts>, a fresh
+// database is created at the original path, and startup CONTINUES.
+//
+// This LOSES every envelope stored in the quarantined file — that loss is
+// the accepted data expectation for this failure mode (blind relay of
+// best-effort mail; the failure-mode matrix pins it in a later phase). The
+// .corrupt-* files are operator-recoverable evidence, kept on disk for
+// post-mortem inspection (the runbook delivered in a later phase covers
+// examining and discarding them). If even the quarantine rename fails —
+// e.g. an unwritable directory — startup fails loudly instead of looping.
 func Open(path string) (*Store, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", path)
+	s, err := open(path)
+	if err == nil {
+		return s, nil
+	}
+	if !isSQLiteCorruption(err) {
+		return nil, err
+	}
+
+	stamp := time.Now().Unix()
+	quarantined, qerr := quarantineCorruptDatabase(path, stamp)
+	if qerr != nil {
+		return nil, fmt.Errorf("storage: %s: database is corrupt (%v) and quarantining it failed: %w; refusing to start over an unremovable corrupt database", path, err, qerr)
+	}
+	log.Printf("[storage] database at %s is corrupt (%v); quarantined as %s — every envelope stored in it is LOST (accepted by design); the .corrupt-* files are kept as operator-recoverable evidence (runbook, later phase)",
+		path, err, strings.Join(quarantined, ", "))
+
+	s, err = open(path)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[storage] created a fresh database at %s and continuing startup (corrupt predecessor quarantined)", path)
+	return s, nil
+}
+
+// open is the plain open path: create/connect, apply the §15.3 versioning
+// rules, verify WAL engagement. It is what Open wraps with the corruption
+// quarantine.
+func open(path string) (*Store, error) {
+	// wal_autocheckpoint keeps the SQLite default (1000 pages ≈ 4 MiB at the
+	// 4 KiB page size): on a Pi Zero 2 W-class workload this checkpoints the
+	// WAL long before it can grow meaningfully, bounding the sidecar under
+	// sustained write floods without tuning a storage engine we do not need
+	// to tune. Under a push flood the checkpoint cadence means writers stall
+	// briefly every ~4 MiB of WAL — acceptable, and the WAL never becomes an
+	// unbounded disk-exhaustion vector by itself.
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=wal_autocheckpoint(1000)",
+		path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -151,7 +218,69 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("storage: journal_mode is %q, want wal", mode)
 	}
+
+	// Disk-exhaustion early warning (issue #16 Phase 2): a -wal sidecar that
+	// outgrew maxWALWarnBytes means the checkpoint is not keeping up or the
+	// volume is nearly full. Enforcement stays with wal_autocheckpoint — this
+	// is a visible stderr line for the operator/runbook, not a gate.
+	if info, err := os.Stat(path + "-wal"); err == nil && info.Size() > maxWALWarnBytes {
+		log.Printf("[storage] warning: WAL sidecar %s-wal holds %d bytes, over the %d-byte disk-exhaustion guard; wal_autocheckpoint normally keeps it at a few MiB — check disk pressure on the node",
+			path, info.Size(), maxWALWarnBytes)
+	}
 	return &Store{db: db}, nil
+}
+
+// maxWALWarnBytes is the WAL sidecar size over which open() logs a warning
+// (64 MiB — far above what wal_autocheckpoint allows in normal operation,
+// far below the free space a corrupted run would need to eat on a small SD
+// partition before anything else notices). Var purely as a test hook;
+// production code must never reassign it.
+var maxWALWarnBytes int64 = 64 << 20
+
+// isSQLiteCorruption reports whether err is an SQLite corruption failure:
+// SQLITE_CORRUPT ("database disk image is malformed", e.g. a truncated or
+// bit-rotted file), SQLITE_NOTADB ("file is not a database", e.g. garbage
+// bytes where the header should be), or any wrapped error whose text names
+// corruption. The typed check inspects modernc.org/sqlite's *sqlite.Error
+// code; the string match is the documented fallback for driver layers that
+// re-wrap the failure.
+func isSQLiteCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqlErr *sqlite.Error
+	if errors.As(err, &sqlErr) {
+		switch sqlErr.Code() {
+		case sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB:
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "malformed") ||
+		strings.Contains(msg, "corrupt") ||
+		strings.Contains(msg, "not a database")
+}
+
+// quarantineCorruptDatabase renames the corrupt database and its -wal/-shm
+// sidecars to <file>.corrupt-<stamp>, returning the new paths. The sidecars
+// are moved FIRST: a stale -wal beside a freshly created database would let
+// SQLite replay the old (corrupt) frames into the new file, so an aborted
+// quarantine must leave the main file in place. A failed rename (unwritable
+// directory, cross-device mishap) aborts the recovery: Open fails startup
+// loudly rather than silently looping on a database it cannot replace.
+func quarantineCorruptDatabase(path string, stamp int64) ([]string, error) {
+	var quarantined []string
+	for _, f := range []string{path + "-wal", path + "-shm", path} {
+		if _, err := os.Stat(f); err != nil {
+			continue // sidecar not present: nothing to quarantine
+		}
+		dst := fmt.Sprintf("%s.corrupt-%d", f, stamp)
+		if err := os.Rename(f, dst); err != nil {
+			return quarantined, fmt.Errorf("rename %s to %s: %w", f, dst, err)
+		}
+		quarantined = append(quarantined, dst)
+	}
+	return quarantined, nil
 }
 
 // readSchemaVersion reads PRAGMA user_version — a pure read with no write and

@@ -18,6 +18,19 @@ After=network-online.target dtn-firewall.service
 # WatchdogSec below only counts because the daemon keeps pinging WATCHDOG=1.
 # A wedged daemon stops pinging and systemd kills and restarts it after
 # WatchdogSec; healthy pings arrive every WatchdogSec/2.
+#
+# Boot/power-cut resilience (issue #16 Track 3): Restart=always + RestartSec=5
+# means every failure path (watchdog miss, panic, OOM kill, brownout of the
+# SoC) converges back to a serving daemon without an operator. A dirty
+# power cut mid-write is equally survivable by construction: the database
+# runs in WAL mode (node/internal/storage/storage.go, protocol spec §9), so
+# after a cut the ext4 journal on the root filesystem replays at mount
+# (fast, no full fsck) and the first storage.Open replays any committed
+# -wal content into the main database — the node comes back consistent
+# without manual intervention. /var/lib/dtn-node MUST stay on the real
+# (durable) filesystem: see raspberry/hardening/enable-readonly-root.sh,
+# which keeps exactly this directory bind-mounted off the overlay when the
+# operator opts into a read-only root.
 Type=notify
 WatchdogSec=30
 Restart=always
@@ -48,6 +61,16 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 # and the kernel; a runaway daemon must not OOM the AP stack. Normal RSS is
 # well under 32 MB, so 192M is a generous ceiling, not a budget.
 MemoryMax=192M
+# Issue #16 Track 3 hardening additions (setuid/sgid execution and W^X):
+# the daemon never needs to exec setuid binaries or elevate, and the W^X
+# seccomp filter (blocks any mapping that is writable AND executable) costs
+# nothing here — the claim is re-checkable in node/build.sh, which builds
+# with CGO_ENABLED=0 against the pure-Go SQLite driver (modernc.org/sqlite):
+# a cgo-free Go binary has no JIT, no dlopen'd plugins and no runtime code
+# emission, so nothing ever mmaps PROT_WRITE|PROT_EXEC. (With a cgo toolchain
+# or a JIT dependency this directive would need re-evaluation before use.)
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=multi-user.target
