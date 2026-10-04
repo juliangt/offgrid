@@ -42,6 +42,19 @@
 #       exit non-zero before ever becoming ready, naming both versions on
 #       stderr, and leaving the database bytes (plus any -wal/-shm sidecars)
 #       untouched (sha256 fingerprint before/after).
+#   13. §10.7 diagnostics surface (issue #31) on node A, whose aggregate
+#       state is fully known at that point: GET /api/v1/health answers 200
+#       application/json with exactly the documented members and TRUTHFUL
+#       aggregates (1 stored envelope, capacity 5000, 2 directory entries,
+#       3 accepted / 1 rejected push [the §6d 413 → too_large], 2 dedup hits,
+#       the startup TTL sweep) in well under the 50 ms budget; POST → 405
+#       with Allow: GET; GET /status serves the operator page (no JavaScript,
+#       same build) and is linked from nowhere in the portal (index.html and
+#       every script it loads); the canonical-host 301 covers both paths;
+#       the captive probes are unaffected; and neither body carries any
+#       envelope id, hint, payload, alias or key (privacy, §13).
+#       (The per-IP 429 shed of the diagnostics budget is unit-covered:
+#       driving 61 requests through curl here would be slow and flaky.)
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -643,6 +656,123 @@ fi
 check "refusal message names both schema versions (99 and 2)" "both" "$NAMED"
 check "refused start left the database byte-untouched, sidecars included (§15.3)" \
     "$FINGERPRINT_BEFORE" "$(db_fingerprint "$LEGACY_DB")"
+
+# ---------------------------------------------------------------------------
+# 12. §10.7 diagnostics surface (issue #31): health snapshot + operator
+#     status view, asserted against node A — still running, with a fully
+#     known aggregate history:
+#       envelopes            1    (the §3 fixture; both §8d re-pushes absorbed)
+#       directory_entries    2    (alice, bob — §2)
+#       pushes_accepted      3    (§3 push + the two §8d re-pushes)
+#       pushes_rejected      1    (the §6d oversize 413 → class too_large)
+#       dedup_hits           2    (both §8d re-pushes were absorbed)
+#       ttl_sweeps           1    (the startup sweep; 0 envelopes swept)
+#     The first health GET is also the FIRST one node A ever serves, so the
+#     1-second snapshot cache refreshes now and sees every prior counter.
+# ---------------------------------------------------------------------------
+code="$(http GET "http://127.0.0.1:$PORT_A/api/v1/health")"
+check "GET /api/v1/health -> 200 (§10.7)" "200" "$code"
+cp "$WORK/last_body" "$WORK/health_body"
+curl -sS -o /dev/null -D "$WORK/hdr_health" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/api/v1/health"
+if tr -d '\r' < "$WORK/hdr_health" | grep -qi '^Content-Type: application/json; charset=utf-8'; then CT=ok; else CT=bad; fi
+check "health Content-Type is application/json; charset=utf-8" "ok" "$CT"
+check "health status is \"ok\" (liveness, no invented judgment)" "ok" "$(caps_str status)"
+check "health api is \"v1\" (same source as capabilities)" "v1" "$(caps_str api)"
+check "health schema_version is 2 (same source as capabilities)" "2" "$(caps_num schema_version)"
+ENVELOPE_VERSIONS_HEALTH="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body" | sed -E 's/^"envelope_versions"://')"
+check "health envelope_versions is [1,2] (same source as capabilities)" "[1,2]" "$ENVELOPE_VERSIONS_HEALTH"
+if grep -q '"build":"' "$WORK/last_body"; then BUILD_HEALTH="$(caps_str build)"; else BUILD_HEALTH=""; fi
+check "health build is non-empty (same source as capabilities)" "non-empty" "$([ -n "$BUILD_HEALTH" ] && echo non-empty || echo empty)"
+UPTIME="$(caps_num uptime_seconds)"
+check "health uptime_seconds is a non-negative integer" "ok" "$([ "$UPTIME" -ge 0 ] 2>/dev/null && echo ok || echo bad)"
+check "health envelope_capacity is 5000 (§8.1)" "5000" "$(caps_num envelope_capacity)"
+check "health envelopes matches the known store count (1)" "1" "$(caps_num envelopes)"
+check "health directory_entries matches the known directory (2)" "2" "$(caps_num directory_entries)"
+DB_SIZE="$(caps_num db_size_bytes)"
+check "health db_size_bytes is positive (schema on disk)" "ok" "$([ "$DB_SIZE" -gt 0 ] 2>/dev/null && echo ok || echo bad)"
+LAST_CLEANUP="$(caps_num last_cleanup_unix)"
+check "health last_cleanup_unix is set (startup sweep recorded)" "ok" "$([ "$LAST_CLEANUP" -gt 0 ] 2>/dev/null && echo ok || echo bad)"
+check "health last_cleanup_envelopes_deleted is 0 (nothing expired yet)" "0" "$(caps_num last_cleanup_envelopes_deleted)"
+check "health counters.pushes_accepted matches the known count (3)" "3" "$(caps_num pushes_accepted)"
+check "health counters.pushes_rejected matches the known count (1)" "1" "$(caps_num pushes_rejected)"
+check "health rejected_by_class.too_large is 1 (the §6d 413)" "1" "$(caps_num too_large)"
+check "health rejected_by_class.invalid is 0" "0" "$(caps_num invalid)"
+check "health rejected_by_class.node_full is 0" "0" "$(caps_num node_full)"
+check "health counters.dedup_hits matches the known count (2)" "2" "$(caps_num dedup_hits)"
+check "health counters.ttl_sweeps is 1 (the startup sweep)" "1" "$(caps_num ttl_sweeps)"
+check "health counters.ttl_swept_envelopes is 0" "0" "$(caps_num ttl_swept_envelopes)"
+
+# Latency: the cached snapshot must answer far under the 50 ms budget. The
+# 0.2 s bound leaves CI headroom while still catching any regression that
+# makes the endpoint touch SQLite (or worse) per request.
+HEALTH_MS="$(curl -sS -o /dev/null -w '%{time_total}' -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/api/v1/health")"
+check "health answers in well under the 50 ms budget (< 0.2 s here)" "ok" "$(awk -v t="$HEALTH_MS" 'BEGIN {print (t < 0.2) ? "ok" : "slow (" t "s)"}')"
+
+# Wrong methods → 405 with Allow: GET, both diagnostics paths.
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_h405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/api/v1/health")"
+check "POST /api/v1/health rejected with 405 (§10.1 wrong method)" "405" "$code"
+if tr -d '\r' < "$WORK/hdr_h405" | grep -qi '^Allow: GET'; then ALLOW=get; else ALLOW=missing; fi
+check "health 405 advertises Allow: GET" "get" "$ALLOW"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_s405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/status")"
+check "POST /status rejected with 405" "405" "$code"
+
+# The operator status view: HTML, no JavaScript, rendered from the same
+# snapshot (the build identifier is "dev" — the E2E builds without ldflags).
+code="$(http GET "http://127.0.0.1:$PORT_A/status")"
+check "GET /status -> 200 (§10.7 operator view)" "200" "$code"
+curl -sS -o /dev/null -D "$WORK/hdr_status" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/status"
+if tr -d '\r' < "$WORK/hdr_status" | grep -qi '^Content-Type: text/html; charset=utf-8'; then CT=ok; else CT=bad; fi
+check "status Content-Type is text/html; charset=utf-8" "ok" "$CT"
+cp "$WORK/last_body" "$WORK/status_body"
+if grep -q 'Node status' "$WORK/status_body"; then H1=present; else H1=missing; fi
+check "status page carries its heading" "present" "$H1"
+if grep -qF '<code>dev</code>' "$WORK/status_body"; then B=shown; else B=missing; fi
+check "status page shows the build identifier (same snapshot as /api/v1/health)" "shown" "$B"
+if grep -qi '<script' "$WORK/status_body"; then JS=present; else JS=absent; fi
+check "status page requires no JavaScript" "absent" "$JS"
+if grep -qF '5000' "$WORK/status_body"; then CAP=shown; else CAP=missing; fi
+check "status page shows the envelope capacity" "shown" "$CAP"
+
+# The operator page must not be reachable from the portal: no link (or any
+# reference) to /status in index.html nor in any script the portal loads.
+code="$(http GET "http://127.0.0.1:$PORT_A/")"
+check "GET / -> 200 (portal, for the not-linked check)" "200" "$code"
+cp "$WORK/last_body" "$WORK/index_body"
+if grep -qF '/status' "$WORK/index_body"; then LINK=yes; else LINK=no; fi
+check "portal index.html does not reference /status" "no" "$LINK"
+JS_REFS="$(grep -oE 'src="/js/[^"]+"' "$WORK/index_body" | sed -E 's/src="([^"]+)"/\1/' || true)"
+NOT_LINKED=yes
+for js in $JS_REFS; do
+    curl -sS -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A$js" > "$WORK/portal_js"
+    if grep -qF '/status' "$WORK/portal_js"; then NOT_LINKED=no; fi
+done
+check "no portal script references /status" "yes" "$([ "$NOT_LINKED" = yes ] && echo yes || echo no)"
+
+# Canonical-host middleware covers the diagnostics paths (§10.2); probes are
+# unaffected by any of this (§10.2).
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_h301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/api/v1/health")"
+check "raw-IP GET /api/v1/health redirects with 301" "301" "$code"
+if tr -d '\r' < "$WORK/hdr_h301" | grep -qi '^Location: http://offgrid\.local:8080/api/v1/health$'; then LOC=canonical; else LOC=missing; fi
+check "health 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_s301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/status")"
+check "raw-IP GET /status redirects with 301" "301" "$code"
+if tr -d '\r' < "$WORK/hdr_s301" | grep -qi '^Location: http://offgrid\.local:8080/status$'; then LOC=canonical; else LOC=missing; fi
+check "status 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/generate_204")"
+check "captive probe still answers 302 with the default Host (§10.2)" "302" "$code"
+
+# Privacy (§13 review of the diagnostics surface): neither body may carry any
+# envelope id, dest_hint, payload fragment, alias or public key. The bodies
+# are the saved health and status snapshots ($WORK/health_body and
+# $WORK/status_body), NOT the live last_body (by now the portal index, whose
+# alias placeholder says "alice_77" — allowed there, it is UI copy).
+PRIVACY=clean
+for secret in "$ENV_ID" "$ENV_HINT" "$ENV_PAYLOAD" "alice" "bob" \
+    "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=" "hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo="; do
+    if grep -qF "$secret" "$WORK/health_body" 2>/dev/null; then PRIVACY=leak; fi
+    if grep -qF "$secret" "$WORK/status_body" 2>/dev/null; then PRIVACY=leak; fi
+done
+check "no envelope id, hint, payload, alias or key appears in health or status (§13)" "clean" "$PRIVACY"
 
 # ---------------------------------------------------------------------------
 # Summary.
