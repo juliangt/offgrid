@@ -299,8 +299,11 @@ function onSend() {
   }).then(function (summary) {
     uiState.sending = false;
     if (!summary || summary.status !== "ok") {
-      /* The node was unreachable: the envelope joins the transit queue and
-       * retries automatically on the next sync. */
+      /* The node was unreachable: the envelope joins the transit queue in
+       * its ORIGINAL v1 form (§15.6 — the stored record keeps the version
+       * it was minted under; any §15.1 conversion happens only on the
+       * wire copy during a sync) and retries automatically on the next
+       * sync. */
       return DTN.addTransitEnvelopes([env]).then(function () {
         $("compose-text").value = "";
         updateCounter();
@@ -604,6 +607,7 @@ var SYNC_KNOWN_CHUNK = 500;   /* §8.1 known_ids cap per request */
 var SYNC_PUSH_CHUNK = 100;    /* §8.1 push cap per request */
 var SYNC_LIMIT_FIRST = 50;    /* §11: pull with limit 50 */
 var SYNC_LIMIT_MORE = 200;    /* §8.1 max: drain remaining known_ids chunks */
+var CAPABILITIES_PATH = "/api/v1/capabilities"; /* §15.5 version advertisement */
 
 /* Syncs serialize through this tail so a send during a running sync is
  * never lost (it runs right after). */
@@ -615,18 +619,44 @@ function chunkArray(arr, size) {
   return out;
 }
 
+/* §15.5: fetch the node's version advertisement and reduce it to the
+ * negotiation ceiling (max_envelope_version). ANY failure — a 404 on an
+ * older node, a transport error, a malformed body — resolves null, the
+ * documented fallback: the batch then goes out in its original,
+ * unconverted form (§15.5, §15.6). Syncing is NEVER blocked by a
+ * capabilities failure. */
+function fetchMaxEnvelopeVersion() {
+  return getJson(CAPABILITIES_PATH).then(function (caps) {
+    return DTN.maxAdvertisedEnvelopeVersion(caps);
+  }, function () {
+    return null;
+  });
+}
+
 /* One full mule cycle:
  *   - known_ids = inbox ids ∪ transit ids ∪ seen ids ∪ ids being pushed
  *     (§11). Beyond 500, known_ids are split across several POSTs; the
  *     first request always lists the ids it pushes (§10.4) and uses
  *     limit 50, the drain requests use the maximum 200.
+ *   - capabilities: GET /api/v1/capabilities (§15.5) rides along with the
+ *     storage reads; on any failure the ceiling is null and the batch
+ *     goes out unconverted (§15.5 fallback, never a blocked sync).
  *   - push = outgoing envelopes (own sends) + the whole transit queue,
- *     chunked at 100 per request. Carried envelopes whose push succeeded
- *     leave the queue (the node holds a copy now); failed chunks stay and
+ *     gated through DTN.prepareOutgoingBatch (§15.6): at a node that
+ *     advertises max_envelope_version >= 2 the carried v1 envelopes go
+ *     out as blind v2 conversions (§15.1), envelopes above the node's
+ *     ceiling are withheld (they simply stay in transit_queue — never
+ *     dropped, never converted downward), and stored records keep their
+ *     original version (conversion touches the wire copy only; ids are
+ *     stable, so delivered-withheld bookkeeping and dedup are unchanged).
+ *     Chunked at 100 per request; envelopes whose push succeeded leave
+ *     the queue (the node holds a copy now); failed chunks stay and
  *     retry on the next sync.
  *   - pull classification (§11): dest_hint == own hint → decrypt+verify,
  *     success → inbox, ANY failure → silent reject counted in telemetry;
  *     everything else → transit_queue with FIFO eviction at capacity 100.
+ *     Pulled envelopes are stored and served at their stored version
+ *     (v1 or v2, §15.3) — never rejected or rewritten for being v2.
  *   - every pulled id lands in seen_ids either way.
  * Resolves a summary; never rejects (per-request errors are counted). */
 function performSync(outgoing) {
@@ -662,11 +692,17 @@ function runSync(outgoing) {
     /* §10.4: pushed ids must be in known_ids; marking them seen up front
      * also survives a lost response (the node may hold them anyway). */
     return DTN.markSeenIds(outgoingIds).then(function () {
-      return Promise.all([DTN.listInbox(), DTN.listTransit(), DTN.listSeenIds()]);
+      /* §15.5: the capabilities GET rides along with the storage reads —
+       * it costs one request and never blocks the sync. */
+      return Promise.all([
+        DTN.listInbox(), DTN.listTransit(), DTN.listSeenIds(),
+        fetchMaxEnvelopeVersion()
+      ]);
     }).then(function (lists) {
       var inboxRows = lists[0];
       var transitRows = lists[1];
       var seenIds = lists[2];
+      var maxV = lists[3]; /* null → §15.5 fallback: original, unconverted form */
       var known = {};
       var i;
       for (i = 0; i < inboxRows.length; i++) known[inboxRows[i].id] = true;
@@ -674,8 +710,16 @@ function runSync(outgoing) {
       for (i = 0; i < seenIds.length; i++) known[seenIds[i]] = true;
       for (i = 0; i < outgoingIds.length; i++) known[outgoingIds[i]] = true;
 
-      var pushList = outgoing.slice();
-      for (i = 0; i < transitRows.length; i++) pushList.push(DTN.toEnvelopeWire(transitRows[i]));
+      /* §15.6: the outgoing batch (own sends + the whole transit queue)
+       * goes through the negotiation/conversion gate. Conversion touches
+       * only the wire copies — stored transit records keep their original
+       * version (§15.1: ids are stable) — and withheld envelopes simply
+       * stay in transit_queue for the next sync, still counted as
+       * carried by the telemetry (§11). */
+      var carriedWire = [];
+      for (i = 0; i < transitRows.length; i++) carriedWire.push(DTN.toEnvelopeWire(transitRows[i]));
+      var gate = DTN.prepareOutgoingBatch(outgoing.concat(carriedWire), maxV);
+      var pushList = gate.batch;
 
       /* outgoing ids first so the first request's known_ids always cover
        * its own push_envelopes (§10.4). */
@@ -730,6 +774,7 @@ function runSync(outgoing) {
       }).then(function (summary) {
         summary.errors = errors.length;
         summary.pushed = pushList.length;
+        summary.withheld = gate.withheld.length;
         return summary;
       });
     });
@@ -791,7 +836,8 @@ function recordSyncMeta(summary) {
     transit_added: summary.transitAdded || 0,
     evicted: summary.evicted || 0,
     rejected: summary.rejected || 0,
-    pushed: summary.pushed || 0
+    pushed: summary.pushed || 0,
+    withheld: summary.withheld || 0 /* §15.6: above the node's ceiling, still carried */
   };
   return DTN.setMeta("last_sync", meta).then(function () {
     if (meta.evicted > 0) {

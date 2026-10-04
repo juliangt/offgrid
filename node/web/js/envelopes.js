@@ -185,11 +185,23 @@ function buildEnvelope(opts) {
   };
 }
 
-/* Structural envelope validation shared by the decrypt path (§3.1). */
+/* Structural envelope validation shared by the decrypt path (§3.1) and
+ * the pull storage path (transit records, §11), widened to the §15.3
+ * supported version set {1, 2}: v == 1 MUST NOT carry `meta`; v == 2 MAY
+ * carry it as a JSON object whose `orig_v`, when present, is the integer
+ * 1 — unknown meta keys are ignored, never validated (§15.1/§15.3). All
+ * other checks are version-invariant: every field outside `meta` keeps
+ * its §3.1 type and bounds, and a v2 envelope's crypto scope (the
+ * payload) is byte-identical to its v1 original (§15.1). */
 function validEnvelopeShape(env) {
-  return !!env && typeof env === "object" &&
-    env.v === 1 &&
-    typeof env.id === "string" && HEX64_REGEX.test(env.id) &&
+  if (!env || typeof env !== "object") return false;
+  if (env.v !== 1 && env.v !== 2) return false;
+  if (env.meta !== undefined) {
+    if (env.v === 1) return false;               /* meta MUST be absent on v1 (§15.3) */
+    if (typeof env.meta !== "object" || Array.isArray(env.meta) || env.meta === null) return false;
+    if (env.meta.orig_v !== undefined && env.meta.orig_v !== 1) return false;
+  }
+  return typeof env.id === "string" && HEX64_REGEX.test(env.id) &&
     typeof env.dest_hint === "string" && HEX16_REGEX.test(env.dest_hint) &&
     typeof env.created_at === "number" && isFinite(env.created_at) &&
     Math.floor(env.created_at) === env.created_at && env.created_at > 0 &&

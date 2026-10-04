@@ -2,13 +2,16 @@
 // its server-side validation rules.
 //
 // The format is normatively specified in docs/protocol.md §3 (fields),
-// §8.2 (payload size bounds) and §10.5 (push-path validation). The node is a
+// §8.2 (payload size bounds), §10.5 (push-path validation) and §15 (versioning
+// policy: supported version set, the optional v2 meta member). The node is a
 // blind intermediary: it validates structure only — it MUST NOT decrypt
 // payloads, verify signatures, or require id recomputation (§6.2).
 package envelope
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -16,11 +19,12 @@ import (
 
 // Envelope is the atomic transport unit of the off-grid DTN: one encrypted
 // message plus routing metadata. It is immutable once created. The JSON tags
-// are exactly the six field names of the Phase 1 wire format (§3.1) and their
-// declaration order here matches the fixed canonical member order used for
-// hashing the envelope id (§5.2) — never serialize this struct's fields
-// through a map (map keys are sorted alphabetically and would produce the
-// wrong hashed byte string).
+// are the six core field names of the wire format (§3.1) plus the optional
+// v2 meta member (§15.1); the six core fields keep the fixed canonical member
+// order used for hashing the envelope id (§5.2) — never serialize this
+// struct's fields through a map (map keys are sorted alphabetically and would
+// produce the wrong hashed byte string). Meta is EXCLUDED from the §5.2 byte
+// string, so appending it last leaves the canonical order undisturbed.
 //
 // # Phase 2/3 evolution mapping (Module D, part 1 — spec §14)
 //
@@ -84,12 +88,20 @@ import (
 //	  stable through Phase 3 (rotating-hint HKDF is a Phase 2 privacy upgrade
 //	  that swaps only the derivation, §13.3).
 type Envelope struct {
-	V         int64  `json:"v"`          // format version, MUST be 1
+	V         int64  `json:"v"`          // format version; MUST be in the supported version set {1, 2} (§15.3)
 	ID        string `json:"id"`         // 64 lowercase hex; client-computed SHA-256 of the §5.2 canonical subset (opaque dedup key to the node)
 	DestHint  string `json:"dest_hint"`  // 16 lowercase hex; first 8 bytes of SHA-256(recipient X25519 public key) (§6.1)
 	CreatedAt int64  `json:"created_at"` // unix seconds (UTC); > 0 and <= now + 300 at ingestion (§10.5)
 	TTL       int64  `json:"ttl"`        // seconds; within [3600, 2592000] (§8.1)
 	Payload   string `json:"payload"`    // Base64 (RFC 4648 standard alphabet, with padding) of eph_pub(32) || nonce(24) || box(...); decoded length within [248, 400] (§8.2)
+	// Meta is the OPTIONAL format-level container metadata of envelope version
+	// 2 (§15.1): the only member v2 adds to the frozen §3.1 core. It is
+	// outside all cryptographic scope — excluded from the §5.2 canonical byte
+	// string (so the v1→v2 conversion never changes id) and unsigned. It is
+	// admission-time only and is NOT persisted (§15.3): served envelopes never
+	// carry it and clients MUST NOT rely on it surviving a node round-trip.
+	// RawMessage keeps "absent" (nil) distinct from an explicit JSON null.
+	Meta json.RawMessage `json:"meta,omitempty"`
 }
 
 const (
@@ -108,7 +120,22 @@ const (
 	// inner_json <= 128 (m) + 24 (a) fixed-part bytes -> max 400 B.
 	MinPayloadLen = 248
 	MaxPayloadLen = 400
+
+	// MaxSupportedVersion is the highest envelope format version this build
+	// admits (§15.3): the negotiation ceiling advertised through
+	// GET /api/v1/capabilities (§15.5). It MUST equal the last element of
+	// SupportedVersions.
+	MaxSupportedVersion = 2
 )
+
+// SupportedVersions is the complete supported envelope-version set of §15.3 —
+// ascending, no duplicates. A pushed envelope is admitted iff its v is in
+// this set; anything else is rejected exactly like any other §10.5 validation
+// failure (the sync batch fails closed, §10.4). Version 1 is the frozen §3
+// format; version 2 is its strict superset with the optional meta member
+// (§15.1). min/max_envelope_version in the capabilities document (§15.5) are
+// its first/last elements.
+var SupportedVersions = []int64{1, MaxSupportedVersion}
 
 var (
 	idRe       = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -148,16 +175,24 @@ func validPayload(p string) error {
 	return nil
 }
 
-// Validate checks the envelope against every server-side rule of §10.5:
-// v == 1; id matches ^[0-9a-f]{64}$; dest_hint matches ^[0-9a-f]{16}$;
-// created_at is > 0 and <= now+300; ttl is within [3600, 2592000]; payload is
-// valid padded standard Base64 whose decoded length is within [248, 400].
+// Validate checks the envelope against every server-side rule of §10.5 as
+// generalized by §15.3: v is in the supported version set ({1, 2});
+// id matches ^[0-9a-f]{64}$; dest_hint matches ^[0-9a-f]{16}$; created_at is
+// > 0 and <= now+300; ttl is within [3600, 2592000]; payload is valid padded
+// standard Base64 whose decoded length is within [248, 400]. On top of the
+// version-invariant checks, the per-version structural rules of §15.3 apply:
+// a v1 envelope MUST NOT carry meta, and on v2 a present meta MUST be a JSON
+// object whose orig_v, if present, is the integer 1 (unknown meta keys are
+// ignored, §15.1). Every other check is version-invariant.
 //
 // now is the server's current unix time in seconds. The node never inspects
 // the encrypted inner payload and never recomputes id (§6.2).
 func (e Envelope) Validate(now int64) error {
-	if e.V != 1 {
-		return fmt.Errorf("unsupported version %d (must be 1)", e.V)
+	if !supportedVersion(e.V) {
+		return fmt.Errorf("unsupported version %d (must be 1 or 2)", e.V)
+	}
+	if err := validateMeta(e.V, e.Meta); err != nil {
+		return err
 	}
 	if !idRe.MatchString(e.ID) {
 		return fmt.Errorf("id must be 64 lowercase hex characters")
@@ -176,6 +211,48 @@ func (e Envelope) Validate(now int64) error {
 	}
 	if err := validPayload(e.Payload); err != nil {
 		return err
+	}
+	return nil
+}
+
+// supportedVersion reports whether v is in the build's supported
+// envelope-version set (§15.3).
+func supportedVersion(v int64) bool {
+	for _, sv := range SupportedVersions {
+		if sv == v {
+			return true
+		}
+	}
+	return false
+}
+
+// validateMeta enforces the per-version meta rules of §15.3: meta MUST be
+// absent on v == 1; on v == 2 a present meta MUST be a JSON object whose
+// meta.orig_v, if present, is the integer 1 (the marker of a v1→v2
+// conversion, §15.1). Unknown meta keys are ignored — never validated — so
+// future compatible additions pass through untouched (§15.2).
+func validateMeta(v int64, meta json.RawMessage) error {
+	if len(meta) == 0 {
+		return nil
+	}
+	if v == 1 {
+		return fmt.Errorf("meta must not be present on a v1 envelope")
+	}
+	trimmed := bytes.TrimSpace(meta)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("meta must be a JSON object")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return fmt.Errorf("meta must be a JSON object: %w", err)
+	}
+	if raw, ok := fields["orig_v"]; ok {
+		// Decoding into int64 rejects non-integer literals (1.0, "1") and a
+		// JSON null decodes as 0, so all of them fail the == 1 check below.
+		var orig int64
+		if err := json.Unmarshal(raw, &orig); err != nil || orig != 1 {
+			return fmt.Errorf("meta.orig_v must be the integer 1")
+		}
 	}
 	return nil
 }

@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.1.1 |
-| **Date** | 2026-10-03 |
+| **Version** | 1.2.0 |
+| **Date** | 2026-10-04 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
 | **Scope** | Envelope format, inner payload, canonical serialization, key derivations, cryptographic primitives, binding limits, node SQLite schema, node HTTP API, client (mule) behavior, same-origin policy, threat model, and the Phase 2/3 (BLE / LoRa) evolution mapping. |
@@ -45,7 +45,7 @@ The envelope travels as a single JSON object with **exactly** these fields:
 
 | Field | Type | Binding constraint |
 |---|---|---|
-| `v` | integer | MUST be `1` (format version). |
+| `v` | integer | MUST be `1` (format version; §15.1 defines version 2 and generalizes admission to a supported version set). |
 | `id` | string | 64 lowercase hex characters, `^[0-9a-f]{64}$`. SHA-256 of the canonical envelope subset (§6.2). Computed by the client. |
 | `dest_hint` | string | 16 lowercase hex characters, `^[0-9a-f]{16}$`. First 8 bytes of `SHA-256(recipient X25519 public key)` (§6.1). |
 | `created_at` | integer | Unix seconds (UTC). MUST be `> 0` and MUST NOT be more than 300 s in the future at ingestion time. |
@@ -151,7 +151,7 @@ The `id` covers the canonical JSON of the envelope subset, keys in fixed order `
 {"v":1,"dest_hint":"<dest_hint>","created_at":<created_at>,"ttl":<ttl>,"payload":"<payload>"}
 ```
 
-Note the order is *not* alphabetical (`created_at` < `dest_hint` lexicographically); serializers that sort keys are non-conforming.
+Note the order is *not* alphabetical (`created_at` < `dest_hint` lexicographically); serializers that sort keys are non-conforming. When `meta` is present (envelope version 2, §15.1) it is **excluded** from this byte string; format conversions MUST NOT change the resulting `id` (§15.1).
 
 ## 6. Key derivations
 
@@ -280,6 +280,8 @@ Pragmas and connection policy (binding):
 
 `directory` rows are never auto-deleted in Phase 1; the 500-entry cap is applied at query time (§10.3).
 
+**Storage versioning (§15).** The schema above is storage schema **version 1** (no marker: `PRAGMA user_version` = 0; every row is v1 by definition, because those builds admitted `v == 1` exclusively). §15.3 defines the explicit `user_version` marker, the forward-only migration chain (schema version 2 adds `envelopes.v`) and the downgrade-refusal rollback contract.
+
 ## 10. Node HTTP API
 
 ### 10.1 Conventions
@@ -313,6 +315,7 @@ This covers direct IP access (`10.42.0.1:8080`), any spoofed domain resolved by 
 | `GET /api/v1/directory` | `200` with a JSON array of at most 500 objects `{"alias","pubkey","x25519","last_seen"}`, ordered by `last_seen DESC` (deterministic tie-break: `pubkey ASC`). |
 | `POST /api/v1/directory` | Body `{"alias","pubkey","x25519"}`. Validate alias regex and that both keys are Base64 decoding to exactly 32 bytes. Upsert keyed by `pubkey`; set `last_seen = now`. → `200 {"status":"ok"}`. Invalid → `400`. |
 | `POST /api/v1/sync` | See §10.4. |
+| `GET /api/v1/capabilities` | `200` with the version-advertisement document (§15.5): API generation, supported envelope-version set, storage schema version, build identifier. |
 
 ### 10.4 `POST /api/v1/sync` (exact behavior)
 
@@ -354,6 +357,8 @@ Clients MUST include the ids of envelopes they push in their `known_ids` so they
 
 The server MUST check, per envelope: `v == 1`; `id` matches `^[0-9a-f]{64}$`; `dest_hint` matches `^[0-9a-f]{16}$`; `created_at` is an integer `> 0` and `<= now + 300`; `ttl` is an integer within `[3600, 2592000]`; `payload` is valid padded Base64 with decoded length in `[248, 400]`. The server MUST NOT attempt decryption, MUST NOT verify signatures, and MUST NOT require `id` correctness (§6.2).
 
+**Version note (§15).** The `v == 1` check above is the Phase 1 baseline admission rule. Builds implementing the versioning policy of §15 admit instead `v` ∈ the supported version set (`{1, 2}`, §15.3), accept the optional unsigned `meta` member on v2 envelopes (§15.1), and serve envelopes of their stored version (§15.3). Every other check in this section is version-invariant.
+
 ### 10.6 Cleanup worker
 
 A goroutine with `time.Ticker` runs **every 15 minutes**, plus **once at daemon startup**:
@@ -370,7 +375,7 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
   - `dest_hint == own hint` → attempt decrypt + verify (§4.3); success → `inbox`; failure → discard silently.
   - otherwise → `transit_queue`; if it would exceed **100** envelopes, evict oldest by `created_at` (FIFO).
 - **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL) — see §13.4.
-- **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number.
+- **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number. Store upgrades MUST be implemented as the explicit, ordered, additive-only, idempotent migrations chain formalized in §15.6 (the `onupgradeneeded` scaffold of `node/web/js/store.js`).
 
 ## 12. Same-origin policy and the deliberate absence of TLS
 
@@ -392,7 +397,7 @@ Zero-trust intermediaries: **nodes and mules are blind, untrusted channels.** Th
 
 | Party | Can see | Cannot see |
 |---|---|---|
-| **Node** | `v`, `id`, `dest_hint`, `created_at`, `ttl`, opaque `payload`, source IP, timing/volume metadata, full directory (aliases + public keys) | Message content; sender alias and Ed25519 key (inside ciphertext); recipient identity beyond the 8-byte hint; cannot alter envelopes (Poly1305 MAC); cannot forge signatures |
+| **Node** | `v`, `meta` (§15.2, when present), `id`, `dest_hint`, `created_at`, `ttl`, opaque `payload`, source IP, timing/volume metadata, full directory (aliases + public keys) | Message content; sender alias and Ed25519 key (inside ciphertext); recipient identity beyond the 8-byte hint; cannot alter envelopes (Poly1305 MAC); cannot forge signatures |
 | **Mule** | Same envelope metadata as the node; can identify **its own** envelopes by comparing `dest_hint` with its own hint | Content of foreign envelopes; who else is a mule for the same envelope |
 | **Network observer (open Wi-Fi)** | Same metadata as the node (plaintext HTTP) | Anything inside `payload` |
 | **Recipient** | Everything, after decryption + signature verification | — |
@@ -521,13 +526,125 @@ Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at ever
 | `node/web/index.html` — comment block immediately above `buildEnvelope` (pure-engine section 5) | Same mapping mirrored on the client implementation that produces Phase 1 envelopes, so SPA-side changes stay aware of the frozen fields and the Phase 2/3 encodings. |
 | `docs/protocol.md` §14.2 / §14.3 (this document) | Normative math the anchors summarize: CBOR size derivation, fragment capacity (`2 × 221 = 442 ≥ 399`), short-mode 222-byte table. |
 
-## 15. Conformance checklist
+## 15. Versioning and migration policy
 
-**Module B (node daemon) MUST:** implement the schema and pragmas of §9; the six endpoints with the exact status codes, limits and redirect/exemption behavior of §10; envelope validation of §10.5; `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; no decryption, no signature verification, no `id` recomputation requirement.
+This section defines how the envelope format (§3), the node storage schema (§9) and the node HTTP API (§10) evolve without breaking the running network. It generalizes the frozen-fields rule of §14.1 — stated until now only for the Phase 2/3 transport mapping — into the general rule for **every transport and every future envelope version**. Everything here is normative for node and SPA builds that implement it; builds that do not implement it remain conforming to the Phase 1 baseline (`v == 1` only) exactly as specified in §3–§11.
 
-**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the sync algorithm and silent-corruption handling of §11; display the canonical URL and the full-browser banner (§12, §13.4).
+### 15.1 Envelope format version `v`
+
+- `v` is the **envelope format version**. Version 1 is the format of §3 and is **frozen** as of this document.
+- **Generalized freeze (binding).** In every envelope version, the fields of §3.1 (`v`, `id`, `dest_hint`, `created_at`, `ttl`, `payload`) and the inner-payload fields of §4.1 (`m`, `a`, `k`, `s`, `t`) keep their names, semantics, encodings and cryptographic scope; no field is ever repurposed, and the sign-then-encrypt order of §4.2 is invariant on every transport. This is the frozen-fields rule of §14.1 made general.
+
+**Version 2 (defined here).** Envelope version 2 is a **strict superset** of version 1: every v1 field with unchanged name, semantics and crypto, plus exactly one new OPTIONAL top-level member:
+
+| Field | Type | Binding constraint |
+|---|---|---|
+| `meta` | object | OPTIONAL; format-level metadata of the envelope **container**. MUST NOT be present on a `v == 1` envelope. First defined key: `orig_v`. Implementations MUST ignore `meta` keys they do not know (future compatible additions, §15.2). |
+
+- **`orig_v`** (integer): the envelope version the envelope was **originally created under**. A v1→v2 conversion MUST set it to `1`. A **natively-minted** v2 envelope (created as v2 by its sender) MUST leave it **absent** — `orig_v` is meaningful only on converted envelopes.
+- **`meta` is outside all cryptographic scope.** It is excluded from the §5.2 hashed byte string (hence from `id`) and it is **not signed**: the signed-then-encrypted inner `payload` bytes (§4.2) are untouched by any conversion, so adding `meta` cannot affect signature verification or decryption in any way.
+
+**`id` stability (binding).** `id` is computed **once, at creation time**, over the canonical serialization of the core fields (§5.2) under the version rules in force at creation. Format conversion MUST NOT change `id`; the §5.2 byte string is version-invariant because it never includes `meta`. Node deduplication is therefore by `id` alone and version-agnostic: re-pushing a converted envelope is absorbed by `INSERT OR IGNORE` (§10.4) — a converted envelope cannot ride twice.
+
+**Conversion invariants (blind, format-level only).** Any format conversion old→new MUST preserve bit-for-bit: the `payload` string and its decoded bytes, `id`, `dest_hint` (whose §6.1 derivation stays stable, §14.1), `ttl`, `created_at`, and the sender/recipient identity fields (which travel only inside the encrypted `payload`). Conversion MUST NOT refresh `ttl` or `created_at` — visiting upgraded nodes MUST NOT extend an envelope's lifetime. A conversion MAY only: change `v`; add or set `meta`; re-encode the container (e.g., a future JSON↔CBOR re-encoding per §14.2). Concretely, **v1→v2 conversion is exactly**: set `v = 2`, set `meta.orig_v = 1`, leave every other member byte-identical.
+
+### 15.2 Compatible vs. breaking version bumps
+
+| Bump class | Definition | Consequences |
+|---|---|---|
+| **Compatible** | The new format is a **strict superset** of the old, and the old→new conversion is lossless and performable **blindly** (without decrypting), by mules or nodes alike. | Nodes MUST keep admitting the previous version during an explicitly defined **support window**. v2 (§15.1) is compatible with v1. |
+| **Breaking** | The change touches a frozen field (§15.1), the canonical serialization of the core fields (§5.2), or a cryptographic primitive (§7). | Requires a **coordinated protocol-phase bump** (like the Phase 1 → Phase 2 transport generations of §14) and an explicit support window after which old-format envelopes are **dropped**. A breaking bump is FORBIDDEN without a new spec phase. |
+
+A release that introduces envelope version N MUST state explicitly (a) whether the bump is compatible or breaking and (b) which predecessor versions it retires, with their support window. During a version's support window nodes MUST admit it; after it elapses, nodes MUST reject retired versions (and drop stored ones on breaking transitions). Until such a retirement is specified, every version introduced so far stays in the supported set: builds implementing this section admit `{1, 2}` (§15.3).
+
+### 15.3 Node admission and storage versioning
+
+**Admission (generalizes §10.5).** A node MUST admit a pushed envelope iff `v` is in the build's **supported version set**; for builds implementing this section the set is **`{1, 2}`** (maximum advertised version: 2, §15.5). An envelope with `v` outside the set is rejected exactly like any other §10.5 validation failure (the batch fails closed, §10.4). All other §10.5 checks are version-invariant. Additional blind structural checks per admitted version:
+
+- `v == 1`: `meta` MUST be absent.
+- `v == 2`: `meta`, if present, MUST be a JSON object; `meta.orig_v`, if present, MUST be the integer `1`; unknown `meta` keys are ignored (never validated).
+
+**Serving (pull path).** Served envelopes are complete JSON objects of their **stored version**. Schema-version-2 builds MUST include `envelopes.v` in the §10.4 selection and serve each envelope with its stored `v`; schema-version-1 builds serve the Phase 1 envelope of §3 unchanged. `meta` is admission-time container metadata and is **not persisted** (schema version 2 defines no column for it, table below): served envelopes never carry `meta`, and clients MUST NOT rely on `meta` surviving a node round-trip.
+
+**Storage schema versioning.** The SQLite database gains explicit versioning via `PRAGMA user_version`:
+
+| Schema version | Definition |
+|---|---|
+| 1 | The §9 schema as originally deployed. No marker (`user_version` = 0); all rows are v1 by definition, because those builds admitted `v == 1` exclusively. |
+| 2 | The §9 schema plus column `envelopes.v INTEGER NOT NULL DEFAULT 1`, backfilled to `1` at migration (historically correct: every pre-existing row predates v2). The column is the **authoritative stored version** of each envelope from then on. |
+
+**Migration rules (binding).** On open, if `user_version` is lower than the build's supported schema version, the daemon MUST apply the migration chain **sequentially**, each step inside a **single transaction**, and then set `user_version` to the build's schema version. Migrations MUST be transactional (idempotent-safe under crash: a crash mid-chain leaves the database at a consistent prefix of the chain, and a re-run resumes from `user_version`) and MUST NOT rewrite or re-encode stored envelope `payload` bytes. The chain is **forward-only**: schema version N+1 is defined as a delta from N only. (This mirrors the SPA's IndexedDB `onupgradeneeded` chain, §15.6.)
+
+**Downgrade / rollback contract (binding).** A binary whose supported schema version is **lower** than the database's `user_version` MUST **refuse to start** with a clear, operator-actionable error naming both versions, and MUST leave the database file byte-untouched (no writes, no schema operations, no partial migrations). Read-only mode is explicitly NOT implemented: **refusal is the defined rollback behavior.**
+
+### 15.4 HTTP API versioning
+
+- `/api/v1` evolves **additively**: new endpoints, and new OPTIONAL members in responses, are non-breaking. Clients MUST ignore unknown JSON members in every API response.
+- A future `/api/v2` is **reserved for breaking changes only** (new paths; `/api/v1` semantics are never mutated).
+- **Deprecation:** an endpoint scheduled for removal MUST be advertised through the capabilities document (§15.5, as an additive member) for **at least one release cycle** before the release that removes it.
+
+### 15.5 Version advertisement and negotiation: `GET /api/v1/capabilities`
+
+New read-only endpoint (§10.3): `GET /api/v1/capabilities` → `200` with the version-advertisement document, `application/json; charset=utf-8`, subject to the same middleware as the rest of the API (§10.2):
+
+```json
+{
+  "api": "v1",
+  "envelope_versions": [1, 2],
+  "min_envelope_version": 1,
+  "max_envelope_version": 2,
+  "schema_version": 2,
+  "build": "<node build identifier>"
+}
+```
+
+| Member | Type | Semantics |
+|---|---|---|
+| `api` | string | The API generation: `"v1"`. |
+| `envelope_versions` | array of integers | The complete supported version set (§15.3), ascending, no duplicates. |
+| `min_envelope_version` | integer | First element of `envelope_versions`. |
+| `max_envelope_version` | integer | Last element of `envelope_versions`; the **negotiation ceiling** clients act on (§15.6). |
+| `schema_version` | integer | The node storage schema version (§15.3). |
+| `build` | string | Node build identifier; non-empty, free-form (version or VCS string). |
+
+The exact member set on builds implementing this section is the six above; new members MAY be added additively (§15.4) and MUST be ignored by clients. The three derived members MUST stay consistent with `envelope_versions` (min = first, max = last).
+
+**Negotiation policy (binding).** A client MUST NOT push an envelope whose `v` is greater than the node's advertised `max_envelope_version`. If capabilities cannot be obtained (endpoint absent on an older node → `404`, or any transport failure), the client MUST fall back to pushing the original, unconverted form (§15.6).
+
+### 15.6 Mule batch conversion at upgraded nodes
+
+**SPA storage chain (normative; formalizes §11).** The mule's `IndexedDB` database `dtn_local_store` (§11) carries its own integer version — the `DB_VERSION` / `onupgradeneeded` scaffold of `node/web/js/store.js`. That scaffold is normative: store upgrades MUST be expressed as an explicit, **ordered migrations table**; each migration MUST be **additive-only** (create stores/indexes; never mutate or delete existing records) and **idempotent**. This is the client-side analogue of the node's forward-only chain (§15.3).
+
+**Conversion vehicle.** Every node serves the SPA same-origin at the portal origin (§12), so a mule visiting an upgraded node automatically receives upgraded client code. The updated SPA MAY convert its carried `transit_queue` envelopes from v1 to v2 before pushing — the blind transform of §15.1 (`v = 2`, `meta.orig_v = 1`, everything else preserved) — but ONLY after confirming via `GET /api/v1/capabilities` that the node advertises `max_envelope_version` ≥ 2 (§15.5). The SPA uses `max_envelope_version` to decide whether to convert.
+
+**Where conversion happens (binding decision).** Conversion is **client-side, in the updated SPA**. The node never rewrites envelopes server-side — it is blind and stays blind (§1, §13.1). Server-side blind re-wrap remains *permitted by this policy* for future format-level transforms (the same blind operation class) but is **not part of this framework's version 1**.
+
+**v2 envelopes at v1-only nodes (documented compatibility policy).** A v1-only node rejects a converted v2 envelope because `v = 2` is outside its supported set — this rejection is the explicit, documented policy of §15.2/§15.3, not an accident. Data does not get stuck because of the mule rules above: the mule converts only when the node advertises v2, keeps each converted envelope's original v1 form recoverable (the conversion is invertible: set `v = 1`, drop `meta`), falls back to that original form when capabilities are unobtainable (§15.5), and withholds envelopes whose `v` exceeds the node's ceiling at that node (kept in `transit_queue`; never dropped, never converted downward).
+
+**Old mules at v2 nodes.** A mule running old client code pushes v1 envelopes to a v2 node and they are **accepted as-is**: admission is by supported set (§15.3) and there is no convert-on-write server-side (binding decision above).
+
+### 15.7 Conformance test matrix (normative)
+
+A build claiming conformance to this section MUST be covered by tests for each of the following; each row names the policy clause it verifies:
+
+| # | Required coverage |
+|---|---|
+| a | **Schema migration preserves data:** upgrading a schema-1 database holding pre-existing envelopes keeps them intact and servable via §10.4 with unchanged contents (§15.3). |
+| b | **Downgrade refusal:** starting a binary with a lower supported schema version against a newer `user_version` refuses to start, reports both versions, and leaves the database file byte-untouched (§15.3). |
+| c | **v2 admission + dedup by unchanged `id`:** a v2 envelope is admitted by a §15 build; re-pushing its v1 original (same `id`) is absorbed by `INSERT OR IGNORE` — dedup is version-agnostic (§15.1, §15.3). |
+| d | **Conversion fidelity:** v1→v2 conversion preserves `id`, `ttl`, `created_at`, `dest_hint` and `payload` bit-for-bit and sets `meta.orig_v = 1` (§15.1). |
+| e | **TTL is not refreshed by conversion:** an envelope keeps its original `created_at`/`ttl` deadline after conversion (§15.1). |
+| f | **Negotiation guard:** when the node advertises `max_envelope_version < 2` (or capabilities are unobtainable), the mule MUST NOT convert and pushes the original, unconverted form (§15.5, §15.6). |
+
+## 16. Conformance checklist
+
+**Module B (node daemon) MUST:** implement the schema and pragmas of §9; the seven endpoints with the exact status codes, limits and redirect/exemption behavior of §10; envelope validation of §10.5; the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; no decryption, no signature verification, no `id` recomputation requirement.
+
+**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
 
 ## Changelog
+
+- **1.2.0 (2026-10-04, issue #18 — versioned evolution, Phase 1):** added §15 "Versioning and migration policy": envelope format `v` semantics with the §14.1 frozen-fields rule made general for all transports; version 2 defined as the strict v1 superset plus the optional, unsigned, `id`-excluded `meta` container object (`orig_v = 1` on converted envelopes, absent on natively-minted v2); `id` computed once at creation and immutable under conversion (dedup stays version-agnostic); compatible-vs-breaking bump rules with explicit support windows; node admission by supported version set `{1, 2}`; SQLite storage versioning via `PRAGMA user_version` with a forward-only, transactional migration chain (schema version 2 adds `envelopes.v`) and downgrade refusal as the normative rollback contract; additive `/api/v1` policy with `/api/v2` reserved for breaking changes and capabilities-advertised deprecation; the `GET /api/v1/capabilities` version-advertisement endpoint and the client negotiation rule; client-side mule v1→v2 batch conversion gated on capabilities, with the §11 store migrations formalized as an ordered, additive-only, idempotent chain; and the normative conformance test matrix (§15.7). Former §15 (Conformance checklist) is renumbered §16. Supporting pointer notes added in §3.1, §5.2, §9, §10.3, §10.5, §11 and §13.2. Additive only: no existing field, limit or endpoint behavior changed.
 
 - **1.1.1 (2026-10-04, documentation migration):** documentation-only change — this file was renamed from `docs/protocolo.md` to `docs/protocol.md` and its source references updated to the renamed `docs/DEVELOPMENT_PLAN.md` and `docs/MASTER_DEVELOPMENT_PROMPT.md`, as part of the repository-wide English documentation migration (issue #6). No field, limit, endpoint behavior or other normative content changed.
 - **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `docs/DEVELOPMENT_PLAN.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).

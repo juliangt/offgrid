@@ -45,6 +45,7 @@ type Store interface {
 // server carries the handler dependencies.
 type server struct {
 	store     Store
+	build     string
 	indexHTML []byte
 	assets    map[string]staticAsset
 }
@@ -65,7 +66,8 @@ var staticContentTypes = map[string]string{
 	".js":  "text/javascript; charset=utf-8",
 }
 
-// New wires the exact endpoint surface of §10.3 into a single handler:
+// New wires the exact endpoint surface of §10.3 (plus the §15.5 capabilities
+// document) into a single handler:
 //
 //	GET  /                      embedded index.html (text/html; charset=utf-8)
 //	GET  /css/…, GET /js/…      embedded same-origin static assets
@@ -74,14 +76,21 @@ var staticContentTypes = map[string]string{
 //	GET  /api/v1/directory      JSON array of directory entries
 //	POST /api/v1/directory      directory upsert
 //	POST /api/v1/sync           envelope push + pull
+//	GET  /api/v1/capabilities   version-advertisement document (§15.5)
 //
-// webAssets is the embedded web root supplied by the main package
-// (go:embed cannot cross package directories); its index.html and every
-// .css/.js file under css/ and js/ are read once at startup. Unknown paths
-// yield a JSON 404 and wrong methods a JSON 405 with an Allow header
-// (§10.1). The whole mux is wrapped with the canonical-host redirect and the
-// body-size limiter.
-func New(store Store, webAssets fs.FS) (http.Handler, error) {
+// build is the node build identifier advertised by the capabilities document
+// (§15.5); the main package threads its ldflags-stamped value through. An
+// empty build falls back to "dev" so the §15.5 non-empty invariant holds even
+// for a mis-stamped binary. webAssets is the embedded web root supplied by
+// the main package (go:embed cannot cross package directories); its
+// index.html and every .css/.js file under css/ and js/ are read once at
+// startup. Unknown paths yield a JSON 404 and wrong methods a JSON 405 with
+// an Allow header (§10.1). The whole mux is wrapped with the canonical-host
+// redirect and the body-size limiter.
+func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
+	if build == "" {
+		build = "dev"
+	}
 	webRoot, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		return nil, fmt.Errorf("locate web root in embedded assets: %w", err)
@@ -95,7 +104,7 @@ func New(store Store, webAssets fs.FS) (http.Handler, error) {
 		return nil, err
 	}
 
-	s := &server{store: store, indexHTML: indexHTML, assets: assets}
+	s := &server{store: store, build: build, indexHTML: indexHTML, assets: assets}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
@@ -106,6 +115,7 @@ func New(store Store, webAssets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/directory", s.handleGetDirectory)
 	mux.HandleFunc("POST /api/v1/directory", s.handlePostDirectory)
 	mux.HandleFunc("POST /api/v1/sync", s.handleSync)
+	mux.HandleFunc("GET /api/v1/capabilities", s.handleCapabilities)
 
 	// Method-specific fallbacks: same paths, wrong method → JSON 405 + Allow.
 	mux.HandleFunc("/{$}", methodNotAllowed("GET"))
@@ -115,6 +125,7 @@ func New(store Store, webAssets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("/hotspot-detect.html", methodNotAllowed("GET"))
 	mux.HandleFunc("/api/v1/directory", methodNotAllowed("GET, POST"))
 	mux.HandleFunc("/api/v1/sync", methodNotAllowed("POST"))
+	mux.HandleFunc("/api/v1/capabilities", methodNotAllowed("GET"))
 	// Everything else → JSON 404 (no SPA fallback; only GET / serves HTML).
 	mux.HandleFunc("/", handleNotFound)
 
@@ -350,7 +361,9 @@ type syncResponse struct {
 
 // handleSync implements the exact push+pull behavior of §10.4, failing closed:
 // any request-level violation rejects the whole request with 400 before a
-// single envelope is stored.
+// single envelope is stored. Admission per envelope uses the §15.3 widened
+// validation: v in the supported set {1, 2} plus the per-version meta rules,
+// every other §10.5 check version-invariant.
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if !decodeJSON(w, r, &req) {
@@ -404,6 +417,36 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, syncResponse{Status: "ok", PullEnvelopes: pulled})
+}
+
+// capabilitiesResponse is the version-advertisement document served by
+// GET /api/v1/capabilities (§15.5). The member set on this build is exactly
+// these six; new members may only be added additively (§15.4) and MUST be
+// ignored by clients. The three derived members stay consistent with
+// envelope_versions (min = first, max = last, §15.5).
+type capabilitiesResponse struct {
+	API                string  `json:"api"`
+	EnvelopeVersions   []int64 `json:"envelope_versions"`
+	MinEnvelopeVersion int64   `json:"min_envelope_version"`
+	MaxEnvelopeVersion int64   `json:"max_envelope_version"`
+	SchemaVersion      int     `json:"schema_version"`
+	Build              string  `json:"build"`
+}
+
+// handleCapabilities advertises the version facts clients negotiate on
+// (§15.5): the API generation, the supported envelope-version set (§15.3),
+// the storage schema version (wired to storage.SchemaVersion, never a
+// hardcoded copy) and the build identifier. It is read-only and sits behind
+// the same middleware as every other API route (§10.2).
+func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, capabilitiesResponse{
+		API:                "v1",
+		EnvelopeVersions:   envelope.SupportedVersions,
+		MinEnvelopeVersion: envelope.SupportedVersions[0],
+		MaxEnvelopeVersion: envelope.MaxSupportedVersion,
+		SchemaVersion:      storage.SchemaVersion,
+		Build:              s.build,
+	})
 }
 
 // isHex64 reports whether s matches ^[0-9a-f]{64}$ (§10.4 known_ids entries).

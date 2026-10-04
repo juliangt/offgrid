@@ -1,8 +1,9 @@
 // Command dtn-node is the self-contained HTTP daemon of Module B: a blind
 // SQLite dead-drop node for the off-grid DTN messaging system. It serves the
-// embedded portal SPA, the exact API surface of docs/protocol.md §10, the
-// canonical-host redirect with captive-probe exemption (§10.2) and the
-// 15-minute expired-envelope janitor (§10.6).
+// embedded portal SPA, the exact API surface of docs/protocol.md §10
+// (including the §15.5 capabilities document), the canonical-host redirect
+// with captive-probe exemption (§10.2) and the 15-minute expired-envelope
+// janitor (§10.6).
 //
 // Usage:
 //
@@ -45,6 +46,13 @@ var webFS embed.FS
 // cleanupInterval is the binding janitor period of §10.6 (plus one sweep at
 // startup, performed by cleanup.Start).
 const cleanupInterval = 15 * time.Minute
+
+// build is the node build identifier served by GET /api/v1/capabilities
+// (§15.5: non-empty, free-form — version or VCS string). It defaults to
+// "dev"; release builds stamp it at link time, e.g.:
+//
+//	go build -ldflags "-X offgrid/dtn-node.build=$(git describe --always --dirty)"
+var build = "dev"
 
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
@@ -97,7 +105,7 @@ func main() {
 
 	// The embedded web assets (index.html + css/js) are validated and loaded
 	// here as well: a broken embed must fail startup, not first request.
-	handler, err := api.New(store, webFS)
+	handler, err := api.New(store, build, webFS)
 	if err != nil {
 		log.Fatalf("cannot load embedded web assets: %v", err)
 	}

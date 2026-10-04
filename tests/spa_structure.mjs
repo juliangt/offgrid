@@ -85,10 +85,14 @@ const expectedApi = [
   "identityFromSeed", "deriveDestHint", "computeEnvelopeId", "buildEnvelope",
   "decryptEnvelope", "validEnvelopeShape", "classifyPullEnvelopes",
   "evictTransitQueue", "nacl",
+  // §15 versioning policy on the mule side (issue #18, Phase 3)
+  "convertEnvelopeV1toV2", "maxAdvertisedEnvelopeVersion", "prepareOutgoingBatch",
   // local store API (section 8)
   "loadIdentity", "saveIdentity", "addInboxMessages", "listInbox",
   "addTransitEnvelopes", "listTransit", "removeTransitIds",
   "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire",
+  // §15.6 store migrations chain
+  "DB_VERSION", "IDB_MIGRATIONS", "runIdbMigrations",
 ];
 for (const member of expectedApi) {
   ok(DTN[member] !== undefined, `DTN.${member} is exported`);
