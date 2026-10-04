@@ -29,7 +29,7 @@ The script cross-compiles fully static binaries (`-trimpath -ldflags "-s -w"`, C
 | `node/dtn-node-linux-arm` | 32-bit ARMv7 (fallback) | 11,141,280 bytes (~10.6 MiB) |
 | `node/dtn-node-dev` | host OS/arch (development) | 10,751,314 bytes (~10.3 MiB) |
 
-The web SPA (`node/web/index.html`) is embedded inside the binary via `go:embed` — a deployed node is exactly one file plus its SQLite database.
+The web SPA travels inside the binary via `go:embed`: `node/web/` holds the `index.html` skeleton, the `css/app.css` stylesheet and the plain ES5 scripts under `js/` (vendored tweetnacl, protocol engine, IndexedDB store, UI wiring), all served same-origin by the node. A deployed node is still exactly one file plus its SQLite database.
 
 ## 3. Run locally (no hardware)
 
@@ -63,10 +63,13 @@ From the repository root:
 # 1. Go unit tests (storage, api, envelope, sdnotify)
 cd node && go test ./... -count=1 && cd ..
 
-# 2. Crypto round-trip against the SPA's embedded engine
+# 2. Crypto round-trip against the SPA engine (scripts in index.html order)
 node tests/crypto_roundtrip.mjs
 
-# 3. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
+# 3. SPA layout contract: referenced assets, CSP, load order, DTN API surface
+node tests/spa_structure.mjs
+
+# 4. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
 bash tests/sync_e2e.sh
 ```
 
@@ -84,10 +87,16 @@ Expected outputs:
 2. The crypto test ends with:
 
    ```
-   PASS: 44 assertions against node/web/index.html embedded engine
+   PASS: 44 assertions against the SPA engine (index.html script order)
    ```
 
-3. The E2E script ends with 31 assertions and:
+3. The structural test ends with:
+
+   ```
+   PASS: 91 structural assertions on the SPA layout
+   ```
+
+4. The E2E script ends with 31 assertions and:
 
    ```
    e2e: summary: 31 passed, 0 failed

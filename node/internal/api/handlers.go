@@ -4,8 +4,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -43,26 +46,61 @@ type Store interface {
 type server struct {
 	store     Store
 	indexHTML []byte
+	assets    map[string]staticAsset
+}
+
+// staticAsset is one embedded same-origin web file (stylesheet or script)
+// held in memory, ready to serve.
+type staticAsset struct {
+	body        []byte
+	contentType string
+}
+
+// staticContentTypes lists the only file extensions the portal ever serves,
+// with their exact §10.1 content types. Anything else found in the embedded
+// css/ or js/ trees fails startup (fail closed: a half-shipped UI must not
+// serve stale assets).
+var staticContentTypes = map[string]string{
+	".css": "text/css; charset=utf-8",
+	".js":  "text/javascript; charset=utf-8",
 }
 
 // New wires the exact endpoint surface of §10.3 into a single handler:
 //
 //	GET  /                      embedded index.html (text/html; charset=utf-8)
+//	GET  /css/…, GET /js/…      embedded same-origin static assets
 //	GET  /generate_204          302 → canonical portal (Android probe; never 204)
 //	GET  /hotspot-detect.html   302 → canonical portal (iOS probe)
 //	GET  /api/v1/directory      JSON array of directory entries
 //	POST /api/v1/directory      directory upsert
 //	POST /api/v1/sync           envelope push + pull
 //
-// indexHTML is the embedded web/index.html supplied by the main package
-// (go:embed cannot cross package directories). Unknown paths yield a JSON 404
-// and wrong methods a JSON 405 with an Allow header (§10.1). The whole mux is
-// wrapped with the canonical-host redirect and the body-size limiter.
-func New(store Store, indexHTML []byte) http.Handler {
-	s := &server{store: store, indexHTML: indexHTML}
+// webAssets is the embedded web root supplied by the main package
+// (go:embed cannot cross package directories); its index.html and every
+// .css/.js file under css/ and js/ are read once at startup. Unknown paths
+// yield a JSON 404 and wrong methods a JSON 405 with an Allow header
+// (§10.1). The whole mux is wrapped with the canonical-host redirect and the
+// body-size limiter.
+func New(store Store, webAssets fs.FS) (http.Handler, error) {
+	webRoot, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		return nil, fmt.Errorf("locate web root in embedded assets: %w", err)
+	}
+	indexHTML, err := fs.ReadFile(webRoot, "index.html")
+	if err != nil {
+		return nil, fmt.Errorf("embedded web/index.html is missing: %w", err)
+	}
+	assets, err := loadStaticAssets(webRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &server{store: store, indexHTML: indexHTML, assets: assets}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /css/", s.handleStatic)
+	mux.HandleFunc("GET /js/", s.handleStatic)
 	mux.HandleFunc("GET /generate_204", s.handleProbe)
 	mux.HandleFunc("GET /hotspot-detect.html", s.handleProbe)
 	mux.HandleFunc("GET /api/v1/directory", s.handleGetDirectory)
@@ -71,6 +109,8 @@ func New(store Store, indexHTML []byte) http.Handler {
 
 	// Method-specific fallbacks: same paths, wrong method → JSON 405 + Allow.
 	mux.HandleFunc("/{$}", methodNotAllowed("GET"))
+	mux.HandleFunc("/css/", methodNotAllowed("GET"))
+	mux.HandleFunc("/js/", methodNotAllowed("GET"))
 	mux.HandleFunc("/generate_204", methodNotAllowed("GET"))
 	mux.HandleFunc("/hotspot-detect.html", methodNotAllowed("GET"))
 	mux.HandleFunc("/api/v1/directory", methodNotAllowed("GET, POST"))
@@ -78,7 +118,40 @@ func New(store Store, indexHTML []byte) http.Handler {
 	// Everything else → JSON 404 (no SPA fallback; only GET / serves HTML).
 	mux.HandleFunc("/", handleNotFound)
 
-	return canonicalHost(limitBody(mux))
+	return canonicalHost(limitBody(mux)), nil
+}
+
+// loadStaticAssets reads every .css/.js file under css/ and js/ of the
+// embedded web root into memory, keyed by its exact URL path ("/js/ui.js").
+// The allow-list is derived from the embed itself: nothing outside those
+// trees is ever served (no directory listing, no traversal — requests are
+// matched by exact path after the mux's path cleaning).
+func loadStaticAssets(webRoot fs.FS) (map[string]staticAsset, error) {
+	assets := make(map[string]staticAsset)
+	for _, dir := range []string{"css", "js"} {
+		err := fs.WalkDir(webRoot, dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return nil
+			}
+			ct, ok := staticContentTypes[strings.ToLower(filepath.Ext(path))]
+			if !ok {
+				return fmt.Errorf("embedded web asset %s has an unsupported extension", path)
+			}
+			body, err := fs.ReadFile(webRoot, path)
+			if err != nil {
+				return fmt.Errorf("read embedded web asset %s: %w", path, err)
+			}
+			assets["/"+filepath.ToSlash(path)] = staticAsset{body: body, contentType: ct}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("scan embedded web/%s assets: %w", dir, err)
+		}
+	}
+	return assets, nil
 }
 
 // error short codes used in the {"status":"error","error":"<code>"} bodies
@@ -128,12 +201,27 @@ func methodNotAllowed(allow string) http.HandlerFunc {
 	}
 }
 
-// handleIndex serves the embedded single-file SPA (Sprint 2 replaces the
-// placeholder content; the endpoint never changes).
+// handleIndex serves the embedded portal page (the §10.1 entry point).
 func (s *server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(s.indexHTML)
+}
+
+// handleStatic serves one embedded same-origin asset (css/js) by its exact
+// URL path (§10.1: no SPA fallback, no directory listing). Responses are
+// revalidated on every load (no-cache): a node is updated as a whole binary,
+// and captive clients must pick up the new UI immediately.
+func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
+	asset, ok := s.assets[r.URL.Path]
+	if !ok {
+		handleNotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", asset.contentType)
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(asset.body)
 }
 
 // handleProbe answers the OS captive-portal detection probes (§10.2). It must

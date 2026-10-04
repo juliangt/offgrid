@@ -9,13 +9,26 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"offgrid/dtn-node/internal/envelope"
 	"offgrid/dtn-node/internal/storage"
 )
 
-const testIndexHTML = "<!DOCTYPE html><html><head><title>DTN Node</title></head><body>placeholder</body></html>"
+// testIndexHTML is the portal page fixture: it carries the CSP that the UI
+// contract depends on (no inline script/style; everything same-origin).
+const testIndexHTML = `<!DOCTYPE html><html><head><title>DTN Node</title>` +
+	`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">` +
+	`</head><body><script src="/js/app.js"></script></body></html>`
+
+// testWebFS stands in for the go:embed'ed web root of the main package.
+var testWebFS = fstest.MapFS{
+	"web/index.html":     &fstest.MapFile{Data: []byte(testIndexHTML)},
+	"web/css/app.css":    &fstest.MapFile{Data: []byte("body { color: rebeccapurple; }")},
+	"web/js/app.js":      &fstest.MapFile{Data: []byte("var x = 1;")},
+	"web/js/vendor/x.js": &fstest.MapFile{Data: []byte("var y = 2;")},
+}
 
 // newTestHandler builds a handler backed by a real SQLite store in a temp dir.
 func newTestHandler(t *testing.T) (http.Handler, *storage.Store) {
@@ -25,7 +38,11 @@ func newTestHandler(t *testing.T) (http.Handler, *storage.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, []byte(testIndexHTML)), s
+	h, err := New(s, testWebFS)
+	if err != nil {
+		t.Fatalf("build handler: %v", err)
+	}
+	return h, s
 }
 
 // do runs a request against the handler with full control over the Host
@@ -172,6 +189,90 @@ func TestIndexServed(t *testing.T) {
 	var errBody map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil || errBody["status"] != "error" {
 		t.Fatalf("404 must carry a JSON error body, got %q", rec.Body.String())
+	}
+}
+
+// TestStaticAssets verifies the same-origin asset routes: exact-path serving
+// with the §10.1 content types, revalidation on every load, JSON 404 for
+// unknown assets (no SPA fallback) and JSON 405 + Allow for wrong methods.
+func TestStaticAssets(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	cases := []struct {
+		path     string
+		wantBody string
+		wantCT   string
+	}{
+		{"/css/app.css", "body { color: rebeccapurple; }", "text/css; charset=utf-8"},
+		{"/js/app.js", "var x = 1;", "text/javascript; charset=utf-8"},
+		{"/js/vendor/x.js", "var y = 2;", "text/javascript; charset=utf-8"},
+	}
+	for _, tc := range cases {
+		t.Run("GET "+tc.path, func(t *testing.T) {
+			rec := do(t, h, http.MethodGet, tc.path, CanonicalHost, nil, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != tc.wantCT {
+				t.Fatalf("Content-Type: got %q, want %q", ct, tc.wantCT)
+			}
+			if rec.Header().Get("Cache-Control") != "no-cache" {
+				t.Fatalf("assets must be revalidated on every load (Cache-Control: no-cache)")
+			}
+			if rec.Body.String() != tc.wantBody {
+				t.Fatalf("body: got %q, want %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+
+	// Unknown asset: JSON 404, exactly like any other unknown path (§10.1).
+	rec := do(t, h, http.MethodGet, "/js/nope.js", CanonicalHost, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown asset: got %d, want 404", rec.Code)
+	}
+	var errBody map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil || errBody["error"] != "not_found" {
+		t.Fatalf("unknown asset must carry the JSON 404 body, got %q", rec.Body.String())
+	}
+
+	// Nothing outside css/ and js/ is ever exposed (only index.html is HTML).
+	rec = do(t, h, http.MethodGet, "/index.html", CanonicalHost, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/index.html must not be served directly, got %d", rec.Code)
+	}
+
+	// Wrong method: JSON 405 with Allow: GET.
+	for _, path := range []string{"/css/app.css", "/js/app.js"} {
+		rec := do(t, h, http.MethodPost, path, CanonicalHost, nil, "application/json")
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s: got %d, want 405", path, rec.Code)
+		}
+		if got := rec.Header().Get("Allow"); got != "GET" {
+			t.Fatalf("POST %s Allow: got %q, want GET", path, got)
+		}
+	}
+}
+
+// TestNewFailsClosed verifies that a broken embed (missing page or an
+// unsupported file in the served trees) refuses to start the node instead of
+// serving a half-shipped UI.
+func TestNewFailsClosed(t *testing.T) {
+	s, err := storage.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := New(s, fstest.MapFS{}); err == nil {
+		t.Fatalf("missing web/index.html must fail startup")
+	}
+	broken := fstest.MapFS{
+		"web/index.html":  &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/css/app.css": &fstest.MapFile{Data: []byte("/* ok */")},
+		"web/js/evil.exe": &fstest.MapFile{Data: []byte("MZ")},
+	}
+	if _, err := New(s, broken); err == nil || !strings.Contains(err.Error(), "unsupported extension") {
+		t.Fatalf("unsupported asset extension must fail startup, got: %v", err)
 	}
 }
 

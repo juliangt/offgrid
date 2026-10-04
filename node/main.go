@@ -34,8 +34,10 @@ import (
 	"offgrid/dtn-node/internal/storage"
 )
 
-// webFS embeds the single-file portal UI. Sprint 2 replaces the placeholder
-// index.html with the real SPA; the endpoint and embedding stay identical.
+// webFS embeds the portal UI sources: index.html, the stylesheet and the
+// plain ES5 scripts under css/ and js/. They travel inside the single
+// static binary (see build.sh) and are served same-origin by the api
+// package; a node is still deployed by copying one file.
 //
 //go:embed web
 var webFS embed.FS
@@ -77,11 +79,6 @@ func main() {
 	dbPath := flag.String("db", "node_storage.db", "SQLite database file path")
 	flag.Parse()
 
-	indexHTML, err := fs.ReadFile(webFS, "web/index.html")
-	if err != nil {
-		log.Fatalf("embedded web/index.html is missing: %v", err)
-	}
-
 	// Cold start: create the -db parent directory when missing (log it, since
 	// an unexpected directory in the filesystem is worth knowing about).
 	created, err := ensureDBDir(*dbPath)
@@ -98,6 +95,13 @@ func main() {
 	}
 	defer store.Close()
 
+	// The embedded web assets (index.html + css/js) are validated and loaded
+	// here as well: a broken embed must fail startup, not first request.
+	handler, err := api.New(store, webFS)
+	if err != nil {
+		log.Fatalf("cannot load embedded web assets: %v", err)
+	}
+
 	// Shutdown context: cancelled by SIGINT/SIGTERM; stop() restores the
 	// default signal behavior afterwards so a second signal still kills us.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -109,7 +113,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           api.New(store, indexHTML),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

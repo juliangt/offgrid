@@ -1,0 +1,159 @@
+  /* System font stack only — zero external assets (task 2.1).
+   All styles are same-origin, served by the node itself. */
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f6f8;
+    --card: #ffffff;
+    --ink: #16232e;
+    --muted: #5b6b78;
+    --accent: #0b6e4f;
+    --accent-ink: #ffffff;
+    --danger: #b3261e;
+    --warn-bg: #fff7e0;
+    --warn-ink: #5c4400;
+    --line: #d7dee5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #10161b;
+      --card: #1a232b;
+      --ink: #e8eef2;
+      --muted: #9fb0bd;
+      --accent: #35b28a;
+      --accent-ink: #06231a;
+      --danger: #ff8a80;
+      --warn-bg: #3a3010;
+      --warn-ink: #ffe08a;
+      --line: #2c3a45;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+    -webkit-text-size-adjust: 100%;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 12px 12px 28px; }
+  h1 { font-size: 1.35rem; margin: 8px 0 12px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  p { margin: 8px 0; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+    margin: 0 0 14px;
+  }
+  label { display: block; font-weight: 600; font-size: 0.9rem; margin: 10px 0 4px; }
+  label.inline { display: flex; align-items: center; gap: 8px; font-weight: 400; margin: 10px 0; }
+  input[type="text"], textarea, select {
+    width: 100%;
+    padding: 10px;
+    font: inherit;
+    color: var(--ink);
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  textarea { resize: vertical; font-size: 1rem; word-break: break-word; }
+  textarea[readonly] { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
+
+  button {
+    font: inherit;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+  button.linkish { background: transparent; border: none; color: var(--accent); padding: 4px 0; text-decoration: underline; }
+  button.small { padding: 4px 10px; font-size: 0.85rem; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .hint { color: var(--muted); font-size: 0.85rem; margin: 4px 0 8px; }
+  .error { color: var(--danger); font-weight: 600; margin: 8px 0 0; }
+  .muted { color: var(--muted); }
+  .warn {
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    margin: 8px 0;
+  }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    word-break: break-all;
+  }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+
+  /* Captive mini-browser banner (plan §1.4). */
+  .banner {
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 0 auto 12px;
+    max-width: 616px;
+    font-size: 0.92rem;
+  }
+  .banner .banner-row { display: flex; align-items: flex-start; gap: 8px; }
+  .banner .banner-text { flex: 1; }
+  .banner strong { display: block; margin-bottom: 2px; }
+  .banner code { display: block; margin: 6px 0; font-size: 0.95rem; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 6px; margin: 4px 0 14px; }
+  .tab { flex: 1; padding: 10px 6px; border-radius: 8px; }
+  .tab.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+
+  /* Mule telemetry panel (§11) — always visible on the app screen. */
+  .telemetry {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    font-size: 0.88rem;
+    color: var(--muted);
+  }
+  .telemetry strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .telemetry button { padding: 6px 10px; font-size: 0.85rem; margin-left: auto; }
+
+  /* Inbox */
+  .inbox { list-style: none; margin: 0; padding: 0; }
+  .inbox li {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .msg-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 0.85rem; }
+  .msg-head .time { color: var(--muted); }
+  .msg-body { white-space: pre-wrap; word-break: break-word; }
+
+  .counter-row { display: flex; justify-content: flex-end; margin: 4px 0 10px; }
+  #byte-counter { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #byte-counter.over { color: var(--danger); font-weight: 700; }
+
+  .status-ok { color: var(--accent); }
+  .status-error { color: var(--danger); }
+
+  dl { margin: 0; }
+  dt { font-weight: 600; font-size: 0.85rem; color: var(--muted); margin-top: 10px; }
+  dd { margin: 2px 0 0; }
