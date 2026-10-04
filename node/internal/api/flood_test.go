@@ -342,6 +342,8 @@ func TestFloodPerIPEnvelopeQuotaIsolation(t *testing.T) {
 // brokenStore is an injected failing Store: write/read calls return the
 // configured error (the api.Store interface exists precisely so handlers
 // never touch SQL — here it lets a test simulate a full disk / dead SD card).
+// The health stat methods fail the same way: the diagnostics surface sheds
+// with 507 when it cannot truthfully read the store (issue #31).
 type brokenStore struct {
 	err error
 }
@@ -358,6 +360,9 @@ func (b *brokenStore) UpsertDirectory(pubkey, x25519, alias string, lastSeen int
 func (b *brokenStore) GetDirectory(limit int) ([]storage.DirectoryEntry, error) {
 	return nil, b.err
 }
+func (b *brokenStore) EnvelopeCount() (int64, error)  { return 0, b.err }
+func (b *brokenStore) DirectoryCount() (int64, error) { return 0, b.err }
+func (b *brokenStore) DBSizeBytes() (int64, error)    { return 0, b.err }
 
 // TestFloodStorageUnavailableMapsTo507 forces storage write failures: the
 // sync handler must translate them into a clean 507 storage_unavailable in

@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"strconv"
@@ -113,8 +114,11 @@ type DirectoryEntry struct {
 // Store wraps the SQLite database. All access is serialized through a single
 // connection (SetMaxOpenConns(1)): it removes write contention entirely, which
 // is the right trade-off for the trivial load of a Pi Zero 2 W node (§9).
+// path is retained so DBSizeBytes can report the on-disk footprint of the
+// database and its sidecars (health snapshot, issue #31).
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
 }
 
 // Open creates or opens the database at path with the binding pragmas of §9
@@ -227,7 +231,7 @@ func open(path string) (*Store, error) {
 		log.Printf("[storage] warning: WAL sidecar %s-wal holds %d bytes, over the %d-byte disk-exhaustion guard; wal_autocheckpoint normally keeps it at a few MiB — check disk pressure on the node",
 			path, info.Size(), maxWALWarnBytes)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
 }
 
 // maxWALWarnBytes is the WAL sidecar size over which open() logs a warning
@@ -396,6 +400,54 @@ func tableExists(db *sql.DB, name string) (bool, error) {
 // Close releases the database handle.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// MaxEnvelopes reports the per-node envelope cap (§8.1, 5000). It is an
+// exported accessor so the health snapshot (issue #31) can advertise
+// envelope_capacity from the same source the admission guard enforces,
+// instead of copying the constant.
+func MaxEnvelopes() int {
+	return maxEnvelopes
+}
+
+// EnvelopeCount returns the number of envelopes currently stored (§9). The
+// health snapshot serves it as the "envelopes" aggregate; it never inspects
+// or returns any row content.
+func (s *Store) EnvelopeCount() (int64, error) {
+	var n int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM envelopes`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("storage: count envelopes: %w", err)
+	}
+	return n, nil
+}
+
+// DirectoryCount returns the number of directory entries (§9). Served by the
+// health snapshot as the "directory_entries" aggregate.
+func (s *Store) DirectoryCount() (int64, error) {
+	var n int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM directory`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("storage: count directory: %w", err)
+	}
+	return n, nil
+}
+
+// DBSizeBytes returns the database's size on disk: the main file plus its
+// -wal and -shm sidecars, so a stale or growing WAL is visible to the
+// operator (a full-card symptom, docs/hardening.md §3). Sidecars that do not
+// currently exist contribute zero; any other stat error surfaces.
+func (s *Store) DBSizeBytes() (int64, error) {
+	var total int64
+	for _, p := range []string{s.path, s.path + "-wal", s.path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return 0, fmt.Errorf("storage: stat %s: %w", p, err)
+		}
+		total += info.Size()
+	}
+	return total, nil
 }
 
 // InsertEnvelopes inserts every envelope in one transaction using

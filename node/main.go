@@ -31,6 +31,7 @@ import (
 
 	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/cleanup"
+	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/sdnotify"
 	"offgrid/dtn-node/internal/storage"
 )
@@ -56,6 +57,27 @@ var build = "dev"
 
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
+
+// recordingJanitor adapts *storage.Store to cleanup.Janitor, recording every
+// COMPLETED TTL sweep in the shared health counters (issue #31): ttl_sweeps,
+// ttl_swept_envelopes and the last_cleanup_unix / last_cleanup_envelopes_deleted
+// pair the health snapshot serves. A failed sweep is not recorded — the
+// counters only ever report what actually happened. The counters themselves
+// are RAM-only and die with the process (internal/health; docs/protocol.md
+// §10.7, §13).
+type recordingJanitor struct {
+	store    *storage.Store
+	counters *health.Counters
+}
+
+// DeleteExpired implements cleanup.Janitor.
+func (r recordingJanitor) DeleteExpired(now int64) (int64, error) {
+	deleted, err := r.store.DeleteExpired(now)
+	if err == nil {
+		r.counters.RecordSweep(now, deleted)
+	}
+	return deleted, err
+}
 
 // ensureDBDir creates the parent directory of dbPath when it does not exist
 // yet, so a cold start succeeds on a fresh filesystem — e.g. -db
@@ -103,9 +125,13 @@ func main() {
 	}
 	defer store.Close()
 
+	// One shared RAM-only counter set feeds both the health snapshot (served
+	// by the API) and the janitor's sweep bookkeeping (issue #31).
+	counters := health.NewCounters()
+
 	// The embedded web assets (index.html + css/js) are validated and loaded
 	// here as well: a broken embed must fail startup, not first request.
-	handler, err := api.New(store, build, webFS)
+	handler, err := api.NewWithCounters(store, counters, build, webFS)
 	if err != nil {
 		log.Fatalf("cannot load embedded web assets: %v", err)
 	}
@@ -117,7 +143,7 @@ func main() {
 
 	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
 	defer cancelCleanup()
-	cleanup.Start(cleanupCtx, store, cleanupInterval)
+	cleanup.Start(cleanupCtx, recordingJanitor{store: store, counters: counters}, cleanupInterval)
 
 	srv := &http.Server{
 		Addr:              *addr,

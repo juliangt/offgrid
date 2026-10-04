@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"offgrid/dtn-node/internal/envelope"
+	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/storage"
 )
 
@@ -34,18 +36,26 @@ const (
 )
 
 // Store is the persistence surface the API needs. It is satisfied by
-// *storage.Store and kept as an interface so handlers never touch SQL.
+// *storage.Store and kept as an interface so handlers never touch SQL. The
+// three stat methods feed the health snapshot (issue #31): they are pure
+// COUNT/size queries that never inspect or return row content.
 type Store interface {
 	InsertEnvelopes(envs []envelope.Envelope) (int, error)
 	PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error)
 	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64) error
 	GetDirectory(limit int) ([]storage.DirectoryEntry, error)
+	EnvelopeCount() (int64, error)
+	DirectoryCount() (int64, error)
+	DBSizeBytes() (int64, error)
 }
 
 // server carries the handler dependencies. postBudget and pushQuota are the
 // per-client admission-control limiters of ratelimit.go (issue #16 Phase 2):
 // a POST request budget shared by the two write endpoints and a per-IP
-// pushed-envelope budget, both RAM-only and keyed by source IP.
+// pushed-envelope budget, both RAM-only and keyed by source IP. healthBudget
+// is the diagnostics budget of health.go (issue #31). counters is the shared
+// RAM-only aggregate set the health document serves (internal/health);
+// healthMu/healthCache/healthCachedAt implement the 1-second snapshot cache.
 type server struct {
 	store      Store
 	build      string
@@ -53,6 +63,13 @@ type server struct {
 	assets     map[string]staticAsset
 	postBudget *rateLimiter
 	pushQuota  *rateLimiter
+
+	counters       *health.Counters
+	healthBudget   *rateLimiter
+	started        time.Time
+	healthMu       sync.Mutex
+	healthCache    *healthResponse
+	healthCachedAt time.Time
 }
 
 // staticAsset is one embedded same-origin web file (stylesheet or script)
@@ -72,7 +89,7 @@ var staticContentTypes = map[string]string{
 }
 
 // New wires the exact endpoint surface of §10.3 (plus the §15.5 capabilities
-// document) into a single handler:
+// document and the §10.7 diagnostics surface) into a single handler:
 //
 //	GET  /                      embedded index.html (text/html; charset=utf-8)
 //	GET  /css/…, GET /js/…      embedded same-origin static assets
@@ -82,24 +99,42 @@ var staticContentTypes = map[string]string{
 //	POST /api/v1/directory      directory upsert
 //	POST /api/v1/sync           envelope push + pull
 //	GET  /api/v1/capabilities   version-advertisement document (§15.5)
+//	GET  /api/v1/health         aggregate health snapshot (§10.7, budgeted)
+//	GET  /status                operator status view, not linked from the
+//	                            portal (§10.7, budgeted)
 //
 // build is the node build identifier advertised by the capabilities document
-// (§15.5); the main package threads its ldflags-stamped value through. An
-// empty build falls back to "dev" so the §15.5 non-empty invariant holds even
-// for a mis-stamped binary. webAssets is the embedded web root supplied by
-// the main package (go:embed cannot cross package directories); its
-// index.html and every .css/.js file under css/ and js/ are read once at
-// startup. Unknown paths yield a JSON 404 and wrong methods a JSON 405 with
-// an Allow header (§10.1). The whole mux is wrapped with the canonical-host
-// redirect and the body-size limiter; the two POST endpoints additionally sit
-// behind the per-IP admission-control budgets of ratelimit.go (issue #16
-// Phase 2): exhaustion answers 429 rate_limited with a Retry-After header
-// before the body is read. GET endpoints stay unlimited — they are the read
-// path of every legitimate client; the outer firewall rate limits are the
-// abuse brake there.
+// (§15.5) and the health snapshot (§10.7); the main package threads its
+// ldflags-stamped value through. An empty build falls back to "dev" so the
+// §15.5 non-empty invariant holds even for a mis-stamped binary. webAssets is
+// the embedded web root supplied by the main package (go:embed cannot cross
+// package directories); its index.html and every .css/.js file under css/ and
+// js/ are read once at startup. Unknown paths yield a JSON 404 and wrong
+// methods a JSON 405 with an Allow header (§10.1). The whole mux is wrapped
+// with the canonical-host redirect and the body-size limiter; the two POST
+// endpoints additionally sit behind the per-IP admission-control budgets of
+// ratelimit.go (issue #16 Phase 2): exhaustion answers 429 rate_limited with
+// a Retry-After header before the body is read. GET endpoints stay unlimited
+// EXCEPT the diagnostics surface (§10.7), which carries its own small per-IP
+// budget — the health snapshot must not become the DoS surface it reports on;
+// the outer firewall rate limits remain the abuse brake for the other reads.
 func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
+	// Fresh RAM-only counters: binaries that do not need to share them with
+	// the cleanup janitor (tests, and main uses NewWithCounters instead).
+	return NewWithCounters(store, health.NewCounters(), build, webAssets)
+}
+
+// NewWithCounters is New with an explicit shared counter set: the daemon's
+// main passes the same *health.Counters to the cleanup-recording janitor and
+// to the API server, so TTL sweeps recorded by the janitor are exactly the
+// ones the health document reports (issue #31). A nil counters is replaced by
+// a fresh set.
+func NewWithCounters(store Store, counters *health.Counters, build string, webAssets fs.FS) (http.Handler, error) {
 	if build == "" {
 		build = "dev"
+	}
+	if counters == nil {
+		counters = health.NewCounters()
 	}
 	webRoot, err := fs.Sub(webAssets, "web")
 	if err != nil {
@@ -116,12 +151,15 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 
 	postBudget, pushQuota := newAdmissionControl()
 	s := &server{
-		store:      store,
-		build:      build,
-		indexHTML:  indexHTML,
-		assets:     assets,
-		postBudget: postBudget,
-		pushQuota:  pushQuota,
+		store:        store,
+		build:        build,
+		indexHTML:    indexHTML,
+		assets:       assets,
+		postBudget:   postBudget,
+		pushQuota:    pushQuota,
+		counters:     counters,
+		healthBudget: newRateLimiter(healthRequestBurst, healthRequestRefillInterval),
+		started:      time.Now(),
 	}
 	mux := http.NewServeMux()
 
@@ -132,10 +170,15 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("GET /hotspot-detect.html", s.handleProbe)
 	mux.HandleFunc("GET /api/v1/directory", s.handleGetDirectory)
 	// The two write endpoints sit behind the per-IP request budget (§ above);
-	// the GET read path stays unlimited.
+	// the GET read path stays unlimited. The sync variant counts a shed at
+	// this boundary as a rejected push (issue #31 counters).
 	mux.HandleFunc("POST /api/v1/directory", s.withRequestBudget(s.handlePostDirectory))
-	mux.HandleFunc("POST /api/v1/sync", s.withRequestBudget(s.handleSync))
+	mux.HandleFunc("POST /api/v1/sync", s.withSyncRequestBudget(s.handleSync))
 	mux.HandleFunc("GET /api/v1/capabilities", s.handleCapabilities)
+	// Diagnostics surface (§10.7): snapshot + operator page behind one small
+	// per-IP budget.
+	mux.HandleFunc("GET /api/v1/health", s.withHealthBudget(s.handleHealth))
+	mux.HandleFunc("GET /status", s.withHealthBudget(s.handleStatus))
 
 	// Method-specific fallbacks: same paths, wrong method → JSON 405 + Allow.
 	mux.HandleFunc("/{$}", methodNotAllowed("GET"))
@@ -146,6 +189,8 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("/api/v1/directory", methodNotAllowed("GET, POST"))
 	mux.HandleFunc("/api/v1/sync", methodNotAllowed("POST"))
 	mux.HandleFunc("/api/v1/capabilities", methodNotAllowed("GET"))
+	mux.HandleFunc("/api/v1/health", methodNotAllowed("GET"))
+	mux.HandleFunc("/status", methodNotAllowed("GET"))
 	// Everything else → JSON 404 (no SPA fallback; only GET / serves HTML).
 	mux.HandleFunc("/", handleNotFound)
 
@@ -270,24 +315,26 @@ func (s *server) handleProbe(w http.ResponseWriter, r *http.Request) {
 // decodeJSON parses the request body into dst, enforcing the §10.1
 // conventions: Content-Type must be application/json (400 otherwise) and an
 // oversized body surfaces the limitBody middleware's *http.MaxBytesError as
-// 413. It writes the error response itself and returns false on failure.
-func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+// 413. It writes the error response itself and returns the short code it
+// answered plus false on failure (the sync handler classifies the failure
+// into its rejection counters, issue #31; other callers ignore the code).
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) (string, bool) {
 	ct := r.Header.Get("Content-Type")
 	mediaType, _, err := mime.ParseMediaType(ct)
 	if err != nil || mediaType != "application/json" {
 		writeError(w, http.StatusBadRequest, codeContentType)
-		return false
+		return codeContentType, false
 	}
 	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, codeBodyTooLarge)
-			return false
+			return codeBodyTooLarge, false
 		}
 		writeError(w, http.StatusBadRequest, codeInvalidJSON)
-		return false
+		return codeInvalidJSON, false
 	}
-	return true
+	return "", true
 }
 
 // decodeBase64Key validates a directory public key: standard-alphabet padded
@@ -345,7 +392,7 @@ type directoryRequest struct {
 // key with last_seen = now (§10.3). Invalid alias or keys → 400.
 func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	var req directoryRequest
-	if !decodeJSON(w, r, &req) {
+	if _, ok := decodeJSON(w, r, &req); !ok {
 		return
 	}
 	if !envelope.ValidAlias(req.Alias) {
@@ -388,15 +435,22 @@ type syncResponse struct {
 // every other §10.5 check version-invariant.
 //
 // Issue #16 Phase 2 additions, in path order:
-//   - the outer withRequestBudget wrapper has already spent this client's
+//   - the outer withSyncRequestBudget wrapper has already spent this client's
 //     per-IP request token before the body was read;
 //   - after the §8.1 shape checks but BEFORE per-envelope validation and any
 //     storage work, the batch cost (its envelope count) is checked against
 //     the client's per-IP envelope budget; an exhausted budget rejects the
 //     whole batch with 429 rate_limited while other IPs keep full service.
+//
+// Issue #31 additions: every request outcome is classified once into the
+// RAM-only push counters (internal/health) — accepted on a 200 that stored a
+// batch, rejected under its error-code class otherwise. The counters carry no
+// identity: they are aggregates only (§10.7, §13).
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
-	if !decodeJSON(w, r, &req) {
+	if code, ok := decodeJSON(w, r, &req); !ok {
+		// decodeJSON already wrote the error body; classify it only.
+		s.recordSyncRejection(code)
 		return
 	}
 
@@ -405,21 +459,21 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		limit = *req.Limit
 	}
 	if limit < 1 || limit > maxSyncLimit {
-		writeError(w, http.StatusBadRequest, codeInvalidLimit)
+		s.syncError(w, http.StatusBadRequest, codeInvalidLimit)
 		return
 	}
 	if len(req.KnownIDs) > maxKnownIDs {
-		writeError(w, http.StatusBadRequest, codeTooManyKnownIDs)
+		s.syncError(w, http.StatusBadRequest, codeTooManyKnownIDs)
 		return
 	}
 	for _, id := range req.KnownIDs {
 		if !isHex64(id) {
-			writeError(w, http.StatusBadRequest, codeInvalidKnownID)
+			s.syncError(w, http.StatusBadRequest, codeInvalidKnownID)
 			return
 		}
 	}
 	if len(req.PushEnvelopes) > maxPushEnvelopes {
-		writeError(w, http.StatusBadRequest, codeTooManyPush)
+		s.syncError(w, http.StatusBadRequest, codeTooManyPush)
 		return
 	}
 	// Per-IP envelope budget (issue #16 Phase 2; complements the global §8.1
@@ -433,6 +487,7 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	// envelope (docs/protocol.md §13: no user-identifying data on disk).
 	if len(req.PushEnvelopes) > 0 {
 		if ok, wait := s.pushQuota.allow(clientKey(r), float64(len(req.PushEnvelopes))); !ok {
+			s.counters.RecordPushRejected(health.ClassRateLimited)
 			writeRateLimited(w, wait)
 			return
 		}
@@ -440,12 +495,13 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	for _, e := range req.PushEnvelopes {
 		if err := e.Validate(now); err != nil {
-			writeError(w, http.StatusBadRequest, codeInvalidEnvelope)
+			s.syncError(w, http.StatusBadRequest, codeInvalidEnvelope)
 			return
 		}
 	}
 
-	if _, err := s.store.InsertEnvelopes(req.PushEnvelopes); err != nil {
+	inserted, err := s.store.InsertEnvelopes(req.PushEnvelopes)
+	if err != nil {
 		// The per-node envelope cap (§8.1, plan §7 anti-abuse risk): the node
 		// is full, so pushes are shed with 429 instead of 500 — a capacity
 		// condition is expected behavior, not an internal error. The policy
@@ -455,24 +511,69 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		// the flood, almost by definition — are the ones refused, and the
 		// oldest legitimate mail keeps being served until it expires.
 		if errors.Is(err, storage.ErrCapacity) {
-			writeError(w, http.StatusTooManyRequests, codeNodeFull)
+			s.syncError(w, http.StatusTooManyRequests, codeNodeFull)
 			return
 		}
 		// Full disk / I/O failure under fire (issue #16 Phase 2): translate
 		// unexpected storage errors into a clean 507 with the standard error
 		// shape instead of 500-chaos. A solar-powered node with a saturated
 		// SD card must answer legibly and stay up, not spew internal errors.
-		writeError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
+		s.syncError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
 		return
+	}
+	// The push landed: count absorbed duplicates (batch ids the store already
+	// held — the §10.4 INSERT OR IGNORE dedup at work) and, since the batch
+	// was non-empty by the budget guard above, one accepted push request.
+	// Envelope-granular dedup, request-granular acceptance (§10.7).
+	if absorbed := len(req.PushEnvelopes) - inserted; absorbed > 0 {
+		s.counters.RecordDedupHits(absorbed)
+	}
+	if len(req.PushEnvelopes) > 0 {
+		s.counters.RecordPushAccepted()
 	}
 	pulled, err := s.store.PullEnvelopes(req.KnownIDs, limit, now)
 	if err != nil {
 		// Reads fail the same clean way when the storage engine is unhappy
-		// (e.g. WAL writes on a full disk surface even on selects).
-		writeError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
+		// (e.g. WAL writes on a full disk surface even on selects). Counted
+		// by final outcome: the request failed 507 (the pushed envelopes did
+		// land, but the aggregate counters are request-level — §10.7).
+		s.syncError(w, http.StatusInsufficientStorage, codeStorageUnavailable)
 		return
 	}
 	writeJSON(w, http.StatusOK, syncResponse{Status: "ok", PullEnvelopes: pulled})
+}
+
+// syncError classifies one rejected POST /api/v1/sync request into the
+// RAM-only rejection counters (issue #31) and writes the §10.1 error body.
+// The class derives from the short error code alone, so the counter can never
+// disagree with what the client actually saw.
+func (s *server) syncError(w http.ResponseWriter, status int, code string) {
+	s.recordSyncRejection(code)
+	writeError(w, status, code)
+}
+
+// recordSyncRejection is the record-only half of syncError, for the decodeJSON
+// failure path (that helper writes its own response body).
+func (s *server) recordSyncRejection(code string) {
+	s.counters.RecordPushRejected(rejectionClass(code))
+}
+
+// rejectionClass maps a sync error short code to its counter class (§10.7):
+// the two 429 shapes, the 413 body cap and the 507 shed have their own class;
+// every 400 shape (bad envelope, bad limit, bad JSON, ...) is "invalid".
+func rejectionClass(code string) health.RejectionClass {
+	switch code {
+	case codeRateLimited:
+		return health.ClassRateLimited
+	case codeNodeFull:
+		return health.ClassNodeFull
+	case codeStorageUnavailable:
+		return health.ClassStorageUnavailable
+	case codeBodyTooLarge:
+		return health.ClassTooLarge
+	default:
+		return health.ClassInvalid
+	}
 }
 
 // capabilitiesResponse is the version-advertisement document served by
