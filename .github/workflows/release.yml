@@ -1,0 +1,86 @@
+# release.yml — publishes the cross-compiled node binaries on every version
+# tag. Each release carries, per the plan in issue #15:
+#   * dtn-node-linux-arm64 / -armv7 / -armv6   (one per Raspberry Pi ISA class)
+#   * raspberry-<tag>.tar.gz                   (the provisioning tree)
+#   * DEPLOY.md                                (per-model installation guide,
+#                                               rendered from docs/pi-models.md)
+#   * SHA256SUMS                               (covers the five assets above)
+# raspberry/install.sh downloads exactly these assets, so the release page is
+# itself the deployment kit — and every release documents how to install on
+# each board model.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: node/go.mod
+
+      - name: Build all targets
+        working-directory: node
+        run: ./build.sh
+
+      - name: Package the provisioning tree
+        run: tar -czf "raspberry-${GITHUB_REF_NAME}.tar.gz" raspberry
+
+      - name: Render per-model deployment guide (DEPLOY.md)
+        run: |
+          {
+            echo "# DTN node ${GITHUB_REF_NAME} — per-model deployment guide"
+            echo
+            echo "Downloads in this release:"
+            echo
+            echo "| Asset | Board class |"
+            echo "|---|---|"
+            echo "| \`dtn-node-linux-arm64\` | Pi Zero 2 W, 3, 4, 400, 5, CM4/CM5 (64-bit OS) |"
+            echo "| \`dtn-node-linux-armv7\` | Pi 2, or a 64-bit board running a 32-bit OS |"
+            echo "| \`dtn-node-linux-armv6\` | Pi Zero W, Pi 1, CM1 (32-bit OS only) |"
+            echo "| \`raspberry-${GITHUB_REF_NAME}.tar.gz\` | provisioning tree (offline install, manual path) |"
+            echo "| \`SHA256SUMS\` | checksums for everything above |"
+            echo
+            echo "One-line install on the Pi (online):"
+            echo
+            echo "\`\`\`bash"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/raspberry/install.sh \\"
+            echo "  | sudo bash -s -- --country AR"
+            echo "\`\`\`"
+            echo
+            echo "Offline (USB stick / SD card): copy this release's assets to the drive, then on the Pi:"
+            echo
+            echo "\`\`\`bash"
+            echo "sudo ./install.sh --offline /media/usb --country AR"
+            echo "\`\`\`"
+            echo
+            echo "The per-model matrix follows (mirrored from \`docs/pi-models.md\`):"
+            echo
+            cat docs/pi-models.md
+          } > DEPLOY.md
+
+      - name: Checksums
+        run: |
+          sha256sum node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 \
+            node/dtn-node-linux-armv6 "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "DTN node ${GITHUB_REF_NAME}" \
+            --notes-file DEPLOY.md \
+            node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 node/dtn-node-linux-armv6 \
+            "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md SHA256SUMS

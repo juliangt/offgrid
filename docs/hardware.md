@@ -1,10 +1,10 @@
-# Hardware Guide — Solar-Powered DTN Node (Raspberry Pi Zero 2 W)
+# Hardware Guide — Solar-Powered DTN Node (Raspberry Pi Zero W or newer)
 
-Power budget, sizing math, wiring, parts and assembly for one fixed node. The software side of a node is documented in `docs/BUILD.md`; the radio/network configuration lives in `raspberry/` (`hostapd`, `dnsmasq`, firewall, `provision.sh`). The power-trim measures referenced here (HDMI off, LEDs off, Bluetooth disabled, `powersave` governor) are already applied by `raspberry/power/` and `provision.sh`.
+Power budget, sizing math, wiring, parts and assembly for one fixed node. The software side of a node is documented in `docs/BUILD.md`; the radio/network configuration lives in `raspberry/` (`hostapd`, `dnsmasq`, firewall, `provision.sh`). The power-trim measures referenced here (HDMI off, LEDs off, Bluetooth disabled, `powersave` governor) are already applied by `raspberry/power/` and `provision.sh`. Which board model to pick, and the per-model power/performance notes, are in `docs/pi-models.md` — the baseline is the Pi Zero W, and every figure below holds for it (it idles slightly below the Zero 2 W).
 
 ## 1. Design target: ~1 W continuous
 
-After the power trim, the node is designed around a **1 W continuous electrical load** at the Pi (5 V × ~200 mA average, dominated by the Wi-Fi radio beaconing in AP mode plus the Go daemon, which idles at negligible CPU on a Zero 2 W). Everything in this guide sizes the energy system so the load never browns out, including through multi-day overcast weather.
+After the power trim, the node is designed around a **1 W continuous electrical load** at the Pi (5 V × ~200 mA average, dominated by the Wi-Fi radio beaconing in AP mode plus the Go daemon, which idles at negligible CPU on a Zero W or Zero 2 W). Everything in this guide sizes the energy system so the load never browns out, including through multi-day overcast weather. Larger boards (Pi 3/4/5) run the same node at a higher idle draw — feed the measured number into §2 instead of 1 W if you deploy one.
 
 ## 2. Sizing math (worked example)
 
@@ -69,8 +69,8 @@ W_panel = E_design / (PSH_worst_month × derate)
                                  └────────────────────────────┘               │
                                                                               ▼
                                                     ┌──────────────────┐   ┌──────────────────────┐
-                                                    │ Buck converter   │   │ Raspberry Pi Zero 2 W│
-                                                    │ 12.8 V → 5 V/3A  ├──►│ 5 V (pin 2) + GND(6) │
+                                                    │ Buck converter   │   │ Raspberry Pi         │
+                                                    │ 12.8 V → 5 V/3A  ├──►│ 5V (pin 2) + GND(6)  │
                                                     │ (or USB-A out)   │   │ or USB-C             │
                                                     └──────────────────┘   └──────────────────────┘
 ```
@@ -93,12 +93,12 @@ Wiring rules:
 
 - **IP65 or better**, UV-stable plastic or fiberglass, with cable glands (not drilled loose holes) and a small drain hole at the lowest point.
 - **Battery inside the enclosure, shaded**: LiFePO4 chemistry must not be **charged** below 0 °C (metallic lithium plating) — the enclosure's thermal mass plus the controller's low-temperature charge cutoff covers this; in climates with hard freezes, insulate the battery compartment or bury the battery portion below the frost line. Discharge down to −20 °C is fine.
-- **Pi and buck inside the same box**: a Zero 2 W dissipates < 1 W and needs no heatsink if the box is not in direct sunlight; mount the box in the shade of the panel or face it away from the afternoon sun. Leave 1–2 cm of air above the buck converter.
+- **Pi and buck inside the same box**: a Zero W or Zero 2 W dissipates < 1 W and needs no heatsink if the box is not in direct sunlight; mount the box in the shade of the panel or face it away from the afternoon sun. Leave 1–2 cm of air above the buck converter.
 - **Panel mount**: tilt ≈ site latitude (or latitude + 15° for a winter-biased fixed mount), oriented toward the worst-month sun, above the height of grass/snow, so it also shades the enclosure.
 
 ## 7. Assembly and first boot, step by step
 
-1. **Flash** Raspberry Pi OS **Lite (64-bit, Bookworm)** onto the industrial SD with the official Imager (enable SSH only if you plan the ALLOW_SSH=1 variant; the node does not need it).
+1. **Flash** Raspberry Pi OS **Lite** onto the industrial SD with the official Imager — **32-bit for a Zero W / Pi 1 / plain Zero** (ARMv6 has no 64-bit mode), 64-bit for every newer board (`docs/pi-models.md` §5). Enable SSH only if you plan the ALLOW_SSH=1 variant; the node does not need it.
 2. **Bench-wire** the system per §4 with the Pi DISCONNECTED. Power from the battery alone and verify: controller recognizes 4S LiFePO4 profile, buck output 5.1 V ± 0.1 V.
 3. **Bench-boot the Pi** (from its buck or a bench USB supply) with keyboard + monitor or a serial console. Do not run `provision.sh` over NetworkManager Wi-Fi — the script disables and masks NetworkManager by design (`docs/DEVELOPMENT_PLAN.md` §1.6).
 4. Copy the cross-compiled binary and the `raspberry/` tree to the Pi and run, as root, from the local console (details in `docs/BUILD.md` §5):
