@@ -42,6 +42,9 @@ DTN.decryptEnvelope = decryptEnvelope;
 DTN.validEnvelopeShape = validEnvelopeShape;
 DTN.classifyPullEnvelopes = classifyPullEnvelopes;
 DTN.evictTransitQueue = evictTransitQueue;
+DTN.convertEnvelopeV1toV2 = convertEnvelopeV1toV2;
+DTN.maxAdvertisedEnvelopeVersion = maxAdvertisedEnvelopeVersion;
+DTN.prepareOutgoingBatch = prepareOutgoingBatch;
 DTN.nacl = naclRef;
 
 if (typeof window !== "undefined") {

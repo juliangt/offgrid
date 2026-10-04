@@ -1,6 +1,6 @@
 /*
  * Off-grid DTN messaging SPA — local store, IndexedDB
- * "dtn_local_store" v1 (§11). Extends the DTN export with the
+ * "dtn_local_store" v1 (§11, §15.6). Extends the DTN export with the
  * persistence API; no DOM here, so the store stays usable headless.
  * ES5 on purpose: captive-portal mini-browsers run the OS WebView.
  */
@@ -15,9 +15,13 @@
  *      seen_ids      dedup memory of every envelope id ever pulled or
  *                    pushed, so known_ids = inbox ∪ transit ∪ seen (§11)
  *      meta          key/value state: last sync, sent/evicted counters
- *    Migrations chain by version number in idbOpen's onupgradeneeded.
- *    All helpers are Promise-wrapped and only touch the indexedDB global
- *    when called (Node headless runs never call them).
+ *    Schema migrations are the explicit migrations chain of §15.6 (the
+ *    client-side analogue of the node's forward-only SQLite chain,
+ *    §15.3): IDB_MIGRATIONS holds one {version, migrate} step per schema
+ *    version, applied in ascending order by runIdbMigrations inside
+ *    idbOpen's onupgradeneeded. All helpers are Promise-wrapped and only
+ *    touch the indexedDB global when called (Node headless runs never
+ *    call them).
  * ------------------------------------------------------------------- */
 var DB_NAME = "dtn_local_store";
 var DB_VERSION = 1;
@@ -28,6 +32,49 @@ var STORE_SEEN = "seen_ids";
 var STORE_META = "meta";
 var IDENTITY_KEY = "identity";
 
+/* ---------------------------------------------------------------------
+ * Migrations chain (§15.6 — normative, mirrors the node's §15.3 chain):
+ * one entry per schema version, strictly ascending, each migrating FROM
+ * the previous version TO `version`. The chain is:
+ *   - additive-only: a step only CREATEs stores/indexes; it never
+ *     mutates or deletes existing records (§15.6);
+ *   - idempotent: runIdbMigrations gates every step on the database's
+ *     current version, so each step runs at most once per database and
+ *     a re-open at DB_VERSION runs none;
+ *   - forward-only: version N+1 is a delta from N only (§15.6). Future
+ *     schema changes APPEND one step and bump DB_VERSION by one — no
+ *     artificial bumps, never rewrite history.
+ * IndexedDB runs the whole chain inside the versionchange upgrade
+ * transaction, so a crash mid-chain leaves a consistent prefix and the
+ * next open resumes from the database version — the exact analogue of
+ * the node's per-step transaction (§15.3).
+ * ------------------------------------------------------------------- */
+var IDB_MIGRATIONS = [
+  {
+    version: 1,
+    /* v1 initial schema (§11): the five stores of the mule. */
+    migrate: function (db) {
+      db.createObjectStore(STORE_IDENTITY);                      /* out-of-line keys */
+      db.createObjectStore(STORE_INBOX, { keyPath: "id" });
+      db.createObjectStore(STORE_TRANSIT, { keyPath: "id" });
+      db.createObjectStore(STORE_SEEN);                          /* key = envelope id */
+      db.createObjectStore(STORE_META);                          /* key = state name */
+    }
+  }
+  /* Future versions append here, e.g. (never added speculatively):
+   * { version: 2, migrate: function (db) { db.createObjectStore(...) } }
+   */
+];
+
+/* §15.6 chain runner: apply, in ascending order, every step newer than
+ * the database's current version (`e.oldVersion`; 0 for a fresh
+ * database). Each step therefore runs at most once per database. */
+function runIdbMigrations(db, oldVersion) {
+  for (var i = 0; i < IDB_MIGRATIONS.length; i++) {
+    if (IDB_MIGRATIONS[i].version > oldVersion) IDB_MIGRATIONS[i].migrate(db);
+  }
+}
+
 function idbOpen() {
   return new Promise(function (resolve, reject) {
     if (typeof indexedDB === "undefined") {
@@ -36,15 +83,7 @@ function idbOpen() {
     }
     var req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = function (e) {
-      var db = e.target.result;
-      /* v1 initial schema; future versions migrate from e.oldVersion. */
-      if (e.oldVersion < 1) {
-        db.createObjectStore(STORE_IDENTITY);                      /* out-of-line keys */
-        db.createObjectStore(STORE_INBOX, { keyPath: "id" });
-        db.createObjectStore(STORE_TRANSIT, { keyPath: "id" });
-        db.createObjectStore(STORE_SEEN);                          /* key = envelope id */
-        db.createObjectStore(STORE_META);                          /* key = state name */
-      }
+      runIdbMigrations(e.target.result, e.oldVersion);
     };
     req.onsuccess = function () { resolve(req.result); };
     req.onerror = function () { reject(req.error || new Error("no se pudo abrir IndexedDB")); };
@@ -337,3 +376,6 @@ DTN.listSeenIds = listSeenIds;
 DTN.getMeta = getMeta;
 DTN.setMeta = setMeta;
 DTN.toEnvelopeWire = toEnvelopeWire;
+DTN.DB_VERSION = DB_VERSION;
+DTN.IDB_MIGRATIONS = IDB_MIGRATIONS;
+DTN.runIdbMigrations = runIdbMigrations;
