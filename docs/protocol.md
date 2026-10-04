@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Document source** | `PLAN_DESARROLLO.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `prompt_maestro_de_desarrollo.md` |
-| **Version** | 1.1.0 |
+| **Document source** | `DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `MASTER_DEVELOPMENT_PROMPT.md` |
+| **Version** | 1.1.1 |
 | **Date** | 2026-10-03 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -519,7 +519,7 @@ Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at ever
 |---|---|
 | `node/internal/envelope/envelope.go` — doc comment on type `Envelope` | Complete mapping for the node implementation: frozen semantic field list, the JSON → CBOR field/type table, the L2CAP CoC frame layout (length prefix, one envelope = one SDU, MTU ≥ 512 B), `hop_count ≤ 7` reserved semantics (always 0/absent in Phase 1), the LoRa 222-byte budget with the 1-byte fragment header `win_id(4) \| idx(2) \| total(2)` and the short-message single-frame mode; references §14 as normative source. |
 | `node/web/index.html` — comment block immediately above `buildEnvelope` (pure-engine section 5) | Same mapping mirrored on the client implementation that produces Phase 1 envelopes, so SPA-side changes stay aware of the frozen fields and the Phase 2/3 encodings. |
-| `docs/protocolo.md` §14.2 / §14.3 (this document) | Normative math the anchors summarize: CBOR size derivation, fragment capacity (`2 × 221 = 442 ≥ 399`), short-mode 222-byte table. |
+| `docs/protocol.md` §14.2 / §14.3 (this document) | Normative math the anchors summarize: CBOR size derivation, fragment capacity (`2 × 221 = 442 ≥ 399`), short-mode 222-byte table. |
 
 ## 15. Conformance checklist
 
@@ -529,9 +529,10 @@ Sprint 4 audit record: the Phase 2/3 mapping is mirrored in doc-comments at ever
 
 ## Changelog
 
-- **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `PLAN_DESARROLLO.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).
+- **1.1.1 (2026-10-04, documentation migration):** documentation-only change — this file was renamed from `docs/protocolo.md` to `docs/protocol.md` and its source references updated to the renamed `DEVELOPMENT_PLAN.md` and `MASTER_DEVELOPMENT_PROMPT.md`, as part of the repository-wide English documentation migration (issue #6). No field, limit, endpoint behavior or other normative content changed.
+- **1.1.0 (2026-10-03, Sprint 4):** added the per-node envelope cap of §8.1 (rejects pushes with `429 node_full` when the node holds 5000 envelopes), the corresponding `429` entry in §10.1, and the non-normative implementation-anchors table of §14.4. No existing field, limit or endpoint behavior changed; the `DEVELOPMENT_PLAN.md` §1.7 table intentionally stays untouched (its §7 already anticipates this cap as hardening 4.6).
 - **1.0.0 (2026-10-03):** initial normative release.
 
 ---
 
-*End of normative specification. Changes require a version bump of this document and a corresponding update to `PLAN_DESARROLLO.md` §1.7.*
+*End of normative specification. Changes require a version bump of this document and a corresponding update to `DEVELOPMENT_PLAN.md` §1.7.*

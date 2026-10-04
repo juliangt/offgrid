@@ -23,15 +23,15 @@ All cryptography happens on the client (X25519 + XSalsa20-Poly1305 for confident
 | **A — Node network configuration** | `hostapd` (open AP), `dnsmasq` (DHCP + wildcard DNS), `iptables` (captive-portal redirects, client isolation), power optimizations for solar + LiFePO4 | `raspberry/` |
 | **B — Node daemon** | Single static Go binary: HTTP API, SQLite storage (`WAL`), canonical-host middleware, 15-minute cleanup worker, `index.html` embedded via `embed.FS` | `node/` |
 | **C — SPA + crypto engine** | Single-file `web/index.html` (inline HTML/CSS/JS) with `tweetnacl.js` embedded, IndexedDB store (`identity`, `inbox`, `transit_queue`), mule sync engine | `node/web/` |
-| **D — Protocol evolution mapping** | How the universal Envelope maps to BLE L2CAP CoC with `hop_count <= 7` (Phase 2) and to LoRa SX1262 at 915 MHz in CBOR within a 222-byte MTU (Phase 3) | `docs/protocolo.md` |
+| **D — Protocol evolution mapping** | How the universal Envelope maps to BLE L2CAP CoC with `hop_count <= 7` (Phase 2) and to LoRa SX1262 at 915 MHz in CBOR within a 222-byte MTU (Phase 3) | `docs/protocol.md` |
 
 ## Documentation
 
-- **`docs/protocolo.md`** — the *normative* protocol specification: envelope format, canonical serialization, key derivations (`id`, `dest_hint`), crypto primitives, binding limits, node SQLite schema and API behavior, threat model and the Phase 2/3 evolution mapping (§14, with §14.4 listing where each mapping lives in the code). If you implement Modules B or C, start there.
-- **`docs/COMPILACION.md`** — step-by-step build, run, test and Raspberry Pi deployment guide, with troubleshooting.
+- **`docs/protocol.md`** — the *normative* protocol specification: envelope format, canonical serialization, key derivations (`id`, `dest_hint`), crypto primitives, binding limits, node SQLite schema and API behavior, threat model and the Phase 2/3 evolution mapping (§14, with §14.4 listing where each mapping lives in the code). If you implement Modules B or C, start there.
+- **`docs/BUILD.md`** — step-by-step build, run, test and Raspberry Pi deployment guide, with troubleshooting.
 - **`docs/hardware.md`** — solar + LiFePO4 sizing math, wiring, SD/enclosure guidance and the node assembly checklist.
-- **`PLAN_DESARROLLO.md`** — binding development plan (in Spanish): design decisions, architecture, sprint breakdown and acceptance criteria.
-- **`prompt_maestro_de_desarrollo.md`** — original master specification (in Spanish, source of truth for requirements).
+- **`DEVELOPMENT_PLAN.md`** — binding development plan: design decisions, architecture, sprint breakdown and acceptance criteria.
+- **`MASTER_DEVELOPMENT_PROMPT.md`** — original master specification (source of truth for requirements).
 
 ## Repository layout
 
@@ -45,11 +45,11 @@ offgrid/
 
 ## Architecture recap
 
-One self-contained static Go binary (`node/`, with the single-file SPA embedded via `go:embed`) serves, behind a canonical-host redirect that forces every browser onto the shared origin `http://portal.red.local:8080`, a blind SQLite dead-drop API: clients do all cryptography (X25519 + XSalsa20-Poly1305 boxes, Ed25519 signatures, sign-then-encrypt — tweetnacl embedded in `node/web/index.html`), so nodes store and serve opaque envelopes deduplicated by client-computed ids, TTL-filtered, and swept by a 15-minute janitor. Phones are the transport: each portal visit pushes what a mule carries and pulls what it does not know into a 100-envelope `IndexedDB` transit queue, and physical movement between identical nodes delivers mail — the same envelope format maps, without rewrites, onto BLE L2CAP (Phase 2) and LoRa CBOR (Phase 3) per `docs/protocolo.md` §14. See `docs/` for the normative protocol, the build/deploy guide and the hardware design.
+One self-contained static Go binary (`node/`, with the single-file SPA embedded via `go:embed`) serves, behind a canonical-host redirect that forces every browser onto the shared origin `http://portal.red.local:8080`, a blind SQLite dead-drop API: clients do all cryptography (X25519 + XSalsa20-Poly1305 boxes, Ed25519 signatures, sign-then-encrypt — tweetnacl embedded in `node/web/index.html`), so nodes store and serve opaque envelopes deduplicated by client-computed ids, TTL-filtered, and swept by a 15-minute janitor. Phones are the transport: each portal visit pushes what a mule carries and pulls what it does not know into a 100-envelope `IndexedDB` transit queue, and physical movement between identical nodes delivers mail — the same envelope format maps, without rewrites, onto BLE L2CAP (Phase 2) and LoRa CBOR (Phase 3) per `docs/protocol.md` §14. See `docs/` for the normative protocol, the build/deploy guide and the hardware design.
 
 ## Verification
 
-From the repository root (expected outputs in `docs/COMPILACION.md` §4):
+From the repository root (expected outputs in `docs/BUILD.md` §4):
 
 ```bash
 cd node && go test ./... -count=1 && cd ..   # Go unit tests (storage, api, envelope, main, sdnotify)
@@ -61,7 +61,7 @@ All three must pass; `bash tests/sync_e2e.sh` additionally simulates the full Al
 
 ## Acceptance traceability
 
-Translation of `PLAN_DESARROLLO.md` §8 — every master-prompt acceptance criterion and where it is implemented:
+Translation of `DEVELOPMENT_PLAN.md` §8 — every master-prompt acceptance criterion and where it is implemented:
 
 | Master-prompt criterion | Where implemented |
 |---|---|
@@ -77,17 +77,17 @@ Translation of `PLAN_DESARROLLO.md` §8 — every master-prompt acceptance crite
 | `dtn_local_store`: identity / inbox / transit_queue (capacity 100) | `node/web/index.html` (IndexedDB layer, `TRANSIT_CAPACITY`) |
 | Sync on page load + own/foreign envelope classification | `node/web/index.html` (mule sync engine), exercised E2E by `tests/sync_e2e.sh` |
 | UI: registration, directory, composer with byte counter, inbox, mule telemetry | `node/web/index.html` (sections 6+) |
-| bitchat L2CAP mapping (`hop_count ≤ 7`) and LoRa CBOR within 222 B | `docs/protocolo.md` §14 (+ §14.4 anchors table), mirrored in `node/internal/envelope/envelope.go` and above `buildEnvelope` in `node/web/index.html` |
+| bitchat L2CAP mapping (`hop_count ≤ 7`) and LoRa CBOR within 222 B | `docs/protocol.md` §14 (+ §14.4 anchors table), mirrored in `node/internal/envelope/envelope.go` and above `buildEnvelope` in `node/web/index.html` |
 | Complete code without `TODO` placeholders | repo-wide; `gofmt`/`go vet` clean, no placeholders in any shipped file |
-| Step-by-step build/run/test instructions | `docs/COMPILACION.md` |
+| Step-by-step build/run/test instructions | `docs/BUILD.md` |
 
 ## Status
 
-Development follows five sprints (see `PLAN_DESARROLLO.md` §5):
+Development follows five sprints (see `DEVELOPMENT_PLAN.md` §5):
 
 | Sprint | Scope | Status |
 |---|---|---|
-| 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocolo.md`, threat model | **Complete** |
+| 0 | Protocol & scaffolding: `.gitignore`, repo structure, README, normative `docs/protocol.md`, threat model | **Complete** |
 | 1 | Module B: Go node daemon (storage, API, cleanup, embedded SPA host) | **Complete** |
 | 2 | Module C: SPA + crypto engine + mule engine | **Complete** |
 | 3 | Module A: Raspberry Pi infrastructure | **Complete** |
@@ -114,13 +114,13 @@ and never starts services mid-run — a reboot is the activation step.
 
 Sprint 4 closed the plan: `tests/sync_e2e.sh` reproduces the complete mule
 journey without hardware (two real daemons, the §3.2 spec envelope parsed
-verbatim from `docs/protocolo.md`, byte-integrity assertions through the
+verbatim from `docs/protocol.md`, byte-integrity assertions through the
 mule, dedup/TTL/limit/redirect negatives); the Module D Phase 2/3 mapping is
 anchored on all three surfaces (Go `Envelope` doc-comment, SPA
-`buildEnvelope` comment, spec §14.4); `docs/COMPILACION.md` and
+`buildEnvelope` comment, spec §14.4); `docs/BUILD.md` and
 `docs/hardware.md` document the whole build→deploy→verify path; and a
 hardening pass added the cold-start `-db` directory bootstrap plus the
 5000-envelope anti-abuse node cap (`429 node_full`, spec §8.1). Remaining
 manual items require physical hardware (two-node walk test and captive
-mini-browser on real Android/iOS) — see `docs/COMPILACION.md` §5 and §7 for
+mini-browser on real Android/iOS) — see `docs/BUILD.md` §5 and §7 for
 the on-site checklists.

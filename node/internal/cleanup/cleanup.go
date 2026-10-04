@@ -1,4 +1,4 @@
-// Package cleanup runs the expired-envelope janitor of docs/protocolo.md
+// Package cleanup runs the expired-envelope janitor of docs/protocol.md
 // §10.6: one sweep immediately at daemon startup, then a sweep every 15
 // minutes. Sweeps apply the exclusive expiry boundary
 // (DELETE FROM envelopes WHERE created_at + ttl < now), which pairs with the

@@ -1,5 +1,5 @@
 // Package storage implements the node's SQLite dead-drop persistence layer
-// per docs/protocolo.md §9: two tables (envelopes, directory), WAL journaling,
+// per docs/protocol.md §9: two tables (envelopes, directory), WAL journaling,
 // a busy timeout, and a single serialized connection.
 //
 // The store is deliberately dumb and blind: envelopes are opaque rows keyed by
@@ -49,7 +49,7 @@ const knownIDChunkSize = 900
 // maxEnvelopes is the per-node hard cap on stored envelopes (5000): the open
 // access point accepts anonymous pushes, so without a ceiling the node could
 // be filled by abuse (plan §7 risk "Llenado del nodo por abuso"; normative
-// row in docs/protocolo.md §8.1). At or over the cap, InsertEnvelopes rejects
+// row in docs/protocol.md §8.1). At or over the cap, InsertEnvelopes rejects
 // the whole batch with ErrCapacity (fail closed, §10.4) and the API maps that
 // to 429 node_full.
 //

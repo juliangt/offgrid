@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// specVector is the normative test envelope of docs/protocolo.md §3.2, whose
+// specVector is the normative test envelope of docs/protocol.md §3.2, whose
 // §6.2 test vector 2 fixes the id for this exact canonical serialization.
 const specVectorPayload = "f46MqdLy8TaHj3lnjcYvHnOuAU8lrXD/nDHUzwGAW/5rQERh00/2ez0ZkfsZz6yc2FpGq2ukrJYxb/P0OQPt6vbAt4I3TKcA21aBVxCxjX4ZZZA23cub/SQusRHDZzjPDmI3HQj6ZpTbEntNfCKagXtQY/MCjvusFuP24DZVGxRhZ0K6l1KKsV0fZ5MOgg+QfFheegNat7plIFMf1Y0TuQrii+JffAfgGh1vAWRr3OvAxWyRbH04Ofw/UBrKZLdevwAcCUcn7mgYcCrXZvSFlHavFH84Pyk2egL0mnPXubm9iMVQOraXcklUzgYVbGlme8w+0yZrDNE="
 
@@ -32,7 +32,7 @@ func validEnv() Envelope {
 	}
 }
 
-// TestValidateSpecTestVector pins the normative envelope of protocolo.md
+// TestValidateSpecTestVector pins the normative envelope of protocol.md
 // §3.2: it must validate at its own creation time, and its payload must
 // decode to 332 bytes (inside [248, 400]).
 func TestValidateSpecTestVector(t *testing.T) {

@@ -1,5 +1,5 @@
 // Package api exposes the node's HTTP surface: the exact endpoint set of
-// docs/protocolo.md §10, the canonical-host middleware with its captive-probe
+// docs/protocol.md §10, the canonical-host middleware with its captive-probe
 // exemption (§10.2), and the per-request limits of §8.1.
 package api
 

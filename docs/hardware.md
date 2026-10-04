@@ -1,6 +1,6 @@
 # Hardware Guide — Solar-Powered DTN Node (Raspberry Pi Zero 2 W)
 
-Power budget, sizing math, wiring, parts and assembly for one fixed node. The software side of a node is documented in `docs/COMPILACION.md`; the radio/network configuration lives in `raspberry/` (`hostapd`, `dnsmasq`, firewall, `provision.sh`). The power-trim measures referenced here (HDMI off, LEDs off, Bluetooth disabled, `powersave` governor) are already applied by `raspberry/power/` and `provision.sh`.
+Power budget, sizing math, wiring, parts and assembly for one fixed node. The software side of a node is documented in `docs/BUILD.md`; the radio/network configuration lives in `raspberry/` (`hostapd`, `dnsmasq`, firewall, `provision.sh`). The power-trim measures referenced here (HDMI off, LEDs off, Bluetooth disabled, `powersave` governor) are already applied by `raspberry/power/` and `provision.sh`.
 
 ## 1. Design target: ~1 W continuous
 
@@ -100,8 +100,8 @@ Wiring rules:
 
 1. **Flash** Raspberry Pi OS **Lite (64-bit, Bookworm)** onto the industrial SD with the official Imager (enable SSH only if you plan the ALLOW_SSH=1 variant; the node does not need it).
 2. **Bench-wire** the system per §4 with the Pi DISCONNECTED. Power from the battery alone and verify: controller recognizes 4S LiFePO4 profile, buck output 5.1 V ± 0.1 V.
-3. **Bench-boot the Pi** (from its buck or a bench USB supply) with keyboard + monitor or a serial console. Do not run `provision.sh` over NetworkManager Wi-Fi — the script disables and masks NetworkManager by design (`PLAN_DESARROLLO.md` §1.6).
-4. Copy the cross-compiled binary and the `raspberry/` tree to the Pi and run, as root, from the local console (details in `docs/COMPILACION.md` §5):
+3. **Bench-boot the Pi** (from its buck or a bench USB supply) with keyboard + monitor or a serial console. Do not run `provision.sh` over NetworkManager Wi-Fi — the script disables and masks NetworkManager by design (`DEVELOPMENT_PLAN.md` §1.6).
+4. Copy the cross-compiled binary and the `raspberry/` tree to the Pi and run, as root, from the local console (details in `docs/BUILD.md` §5):
 
    ```bash
    COUNTRY=AR ./provision.sh    # 9 verified steps, [OK]/[FAIL], fail-fast
