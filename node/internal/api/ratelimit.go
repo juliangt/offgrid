@@ -26,6 +26,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"offgrid/dtn-node/internal/health"
 )
 
 // Admission-control defaults (issue #16 Phase 2). Both budgets are sized
@@ -44,15 +46,22 @@ import (
 //     visits are unaffected while a single station filling the entire
 //     5000-envelope store needs more than eight hours — the global §8.1 cap
 //     plus the TTL janitor (§10.6) win that race by design.
+//   - Health budget (issue #31, §10.7): burst 60 requests per IP on the
+//     diagnostics surface (GET /api/v1/health and GET /status share it),
+//     refilled at 1 request per second. Generous for an operator polling
+//     from a phone (one page load is two requests), yet a scripted GET flood
+//     is shed at the door instead of being waved at the snapshot cache.
 //
 // These are vars purely as a test hook (the maxEnvelopes pattern of the
 // storage package); production code must never reassign them. Tests use
 // overrideAdmissionLimits below.
 var (
-	postRequestBurst          = 60
-	postRequestRefillInterval = 2 * time.Second // one request token per interval
-	syncEnvelopeBurst         = 600
-	syncEnvelopeRefillPerHour = 600
+	postRequestBurst            = 60
+	postRequestRefillInterval   = 2 * time.Second // one request token per interval
+	syncEnvelopeBurst           = 600
+	syncEnvelopeRefillPerHour   = 600
+	healthRequestBurst          = 60
+	healthRequestRefillInterval = time.Second // one request token per interval
 )
 
 // Bucket-map bounding: the map is keyed by source IP and must not grow
@@ -246,6 +255,23 @@ func overrideAdmissionLimits(postBurst int, postRefill time.Duration, envBurst, 
 func (s *server) withRequestBudget(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if ok, wait := s.postBudget.allow(clientKey(r), 1); !ok {
+			writeRateLimited(w, wait)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withSyncRequestBudget is withRequestBudget for the sync endpoint, plus the
+// issue #31 counters: a request shed at this boundary is recorded as one
+// rejected push of class rate_limited. The count is conservative by
+// construction — the body has not been read yet, so a pull-only sync that
+// hammers past its budget is also counted here; the aggregate deliberately
+// answers "how many requests did the node refuse at this door", never who.
+func (s *server) withSyncRequestBudget(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if ok, wait := s.postBudget.allow(clientKey(r), 1); !ok {
+			s.counters.RecordPushRejected(health.ClassRateLimited)
 			writeRateLimited(w, wait)
 			return
 		}
