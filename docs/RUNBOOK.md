@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Date** | 2026-10-04 |
 | **Audience** | Whoever can physically reach a deployed node (local console or keyboard on the Pi). Every command below runs on the node unless stated otherwise; access is by console, not SSH — the firewall drops client→tcp/22 by default (`docs/hardening.md` §2). |
 | **Scope** | Reading the telemetry, detecting abuse, restoring a node in minutes, escalation. Design and rationale: `docs/hardening.md`. Build/deploy and the after-reboot verification commands: `docs/BUILD.md` §5. Normative protocol: `docs/protocol.md`. |
@@ -39,13 +39,31 @@ Line format (labels + integers, or `na` = "could not look this run"):
 
 Consequence of the last row: **iptables counters are the source of truth** for request-level shedding. There is no "429 storm" to grep for in `journalctl -u dtn-node` — do not look for one, and do not add per-request logging to create one.
 
+### 2.1 Node health from a phone or laptop (no console)
+
+The daemon serves its own aggregate health picture (`docs/protocol.md` §10.7), so the first look at a suspicious node needs no console at all — connect to the AP and, from any browser:
+
+```text
+http://offgrid.local:8080/status        ← operator view (server-rendered, no JS)
+```
+
+That page is deliberately **not linked from the public portal** (visitors never see operational detail); type the URL. It shows, all as aggregates: liveness (`status: ok` = the process the watchdog supervises is answering), build, uptime, envelopes held vs. the 5000 capacity, directory entries, database size on disk (a growing figure past a few MiB = WAL pressure — full-card symptom), the last TTL cleanup, and the since-boot counters (pushes accepted/rejected with rejection classes, dedup hits, TTL sweeps). If the page or its JSON twin fails with `507 storage_unavailable`, the daemon is up but cannot read its store — go to §4.1 (reboot), then §4.3 (quarantine evidence).
+
+From a console the machine-readable twin answers the same numbers:
+
+```bash
+curl -s -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/api/v1/health
+```
+
+Reading the counters: `node_full` rejections climbing means the store hit the 5000 cap (§3 row below — the janitor reclaims it, do nothing); `rate_limited` climbing means someone is hammering the write path (the §2 `portal_dropped` firewall counter is its network-layer twin); `dedup_hits` climbing alone is normal mule traffic re-offering known mail. Both diagnostics endpoints are rate-limited per client (burst 60, `429` beyond) and cached server-side for one second — a fast poll cannot hurt the node, and there is nothing to tune. Like everything else here, the page carries **aggregates only**: no ids, no hints, no aliases, no addresses — never add any.
+
 ## 3. Detecting abuse (symptom → likely cause → check → action)
 
 | Symptom | Likely cause | Check | Action |
 |---|---|---|---|
 | AP invisible / portal won't load | A component died after a clean boot (brcmfmac wedge, dnsmasq OOM) | `journalctl -u dtn-network-watchdog -b` — the watchdog probes hostapd, dnsmasq and dtn-node every 2 min and restarts only what failed | Wait ≤ 2–4 min: recovery is automatic (`docs/hardening.md` §4). If it flaps, see §4.4 |
 | Portal slow for EVERYONE | One station saturating airtime or sockets | `station_cooldowns` (the 64 MiB/association shed), `acc_bytes` growth rate, `portal_dropped` | Let the shields work — the shed is per-station, never AP-wide. If honest syncs still fail, record it (FIELD-5, §5) |
-| Clients see `429 node_full` | Store at the 5000-envelope cap (`docs/protocol.md` §8.1) | `sudo sqlite3 /var/lib/dtn-node/node_storage.db 'SELECT COUNT(*) FROM envelopes;'` (if the `sqlite3` CLI is present); `journalctl -u dtn-node -b` shows the janitor's sweeps | Nothing: the TTL janitor (every 15 min, §10.6) reclaims capacity on its own — the flood loses the race by design. NEVER delete the database to "fix" it |
+| Clients see `429 node_full` | Store at the 5000-envelope cap (`docs/protocol.md` §8.1) | `http://offgrid.local:8080/status` shows `envelopes` vs capacity from any connected device (§2.1); on the console: `sudo sqlite3 /var/lib/dtn-node/node_storage.db 'SELECT COUNT(*) FROM envelopes;'` (if the `sqlite3` CLI is present); `journalctl -u dtn-node -b` shows the janitor's sweeps | Nothing: the TTL janitor (every 15 min, §10.6) reclaims capacity on its own — the flood loses the race by design. NEVER delete the database to "fix" it |
 | DNS-tunneling suspicion (quirky client behavior, query storms) | A device is abusing the resolver | `dns_shed_active > 0` or `dns_shed_packets` growing; `journalctl -u dtn-dns-shield -b` logs each shed as `shed <source> — <reason>` without names | Nothing to do: shed lasts 600 s, re-offenders re-qualify. The resolver answers every name with the portal IP only (`raspberry/dnsmasq/dnsmasq.conf`: `no-resolv`, zero upstreams) — there is no tunnel to the outside to close |
 | Portal unreachable but stations associated | Daemon wedged or down | `systemctl status dtn-node` — `Type=notify`, `WatchdogSec=30`, `Restart=always` means systemd has already restarted it; check restart count | If restarts keep climbing, §4.4; else §4.1 |
 

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.2.1 |
+| **Version** | 1.3.0 |
 | **Date** | 2026-10-04 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -291,7 +291,8 @@ Pragmas and connection policy (binding):
 - Body size limit for POST endpoints: 1 MiB → `413` if exceeded.
 - Error responses use HTTP status codes `400` (malformed/invalid), `404` (unknown path), `405` (wrong method), `413` (body too large), `429` (shed — node envelope cap reached, §8.1, or per-client admission budget exhausted, issue #16: below), `507` (storage unavailable, issue #16: below) with JSON body `{"status":"error","error":"<short_code>"}`.
 - Unknown paths → `404`. There is no SPA fallback: only `GET /` serves `index.html`.
-- **Per-client admission control (issue #16, additive).** Both write endpoints (`POST /api/v1/sync`, `POST /api/v1/directory`) sit behind two RAM-only, per-source-IP token budgets: a request budget (burst 60, refill 1 request per 2 s) checked **before the body is read**, and a pushed-envelope budget on sync (burst 600, refill 600 envelopes/hour) withdrawn **atomically for the whole batch** before any per-envelope validation or storage work. Exhaustion answers `429 {"status":"error","error":"rate_limited"}` with a `Retry-After` header in whole seconds (≥ 1). Budget keys derive from the network-layer source address only (`RemoteAddr`); forwarding headers MUST NOT be consulted. Budget state is ephemeral — RAM-only, dies on restart — and MUST NOT be persisted or logged per request (§13). Pull-only syncs (empty `push_envelopes`) cost nothing. The GET read path is not budgeted by the daemon.
+- **Per-client admission control (issue #16, additive).** Both write endpoints (`POST /api/v1/sync`, `POST /api/v1/directory`) sit behind two RAM-only, per-source-IP token budgets: a request budget (burst 60, refill 1 request per 2 s) checked **before the body is read**, and a pushed-envelope budget on sync (burst 600, refill 600 envelopes/hour) withdrawn **atomically for the whole batch** before any per-envelope validation or storage work. Exhaustion answers `429 {"status":"error","error":"rate_limited"}` with a `Retry-After` header in whole seconds (≥ 1). Budget keys derive from the network-layer source address only (`RemoteAddr`); forwarding headers MUST NOT be consulted. Budget state is ephemeral — RAM-only, dies on restart — and MUST NOT be persisted or logged per request (§13). Pull-only syncs (empty `push_envelopes`) cost nothing. The GET read path is not budgeted by the daemon — except the diagnostics endpoints of §10.7, which carry their own small per-IP budget defined there.
+- **Diagnostics surface (issue #31, additive).** `GET /api/v1/health` and the operator status view `GET /status` (both §10.7) are bounded endpoints: they answer from a snapshot cached in RAM for at most one second (at most one store refresh per second, however many clients ask), sit behind a per-source-IP token budget (burst 60, refill 1 request per second; `429 rate_limited` + `Retry-After` exactly like the write budgets above; one budget shared by both paths), and carry a fixed member set with no query parameters — there is no way to make the node do per-request storage work through them.
 - **Clean storage-error shed (issue #16, additive).** A push rejected because the node is at its envelope cap → `429 node_full` (§8.1, unchanged). Any other storage error on the sync push or pull path (e.g. a full SD card surfacing as ENOSPC) → `507 {"status":"error","error":"storage_unavailable"}` instead of `500`: a capacity/IO condition is expected behavior on solar-powered hardware, not an internal error. The daemon stays up and serving; pushes are accepted again once the condition clears, without a restart.
 
 ### 10.2 Canonical-host middleware
@@ -318,6 +319,8 @@ This covers direct IP access (`10.42.0.1:8080`), any spoofed domain resolved by 
 | `POST /api/v1/directory` | Body `{"alias","pubkey","x25519"}`. Validate alias regex and that both keys are Base64 decoding to exactly 32 bytes. Upsert keyed by `pubkey`; set `last_seen = now`. → `200 {"status":"ok"}`. Invalid → `400`. |
 | `POST /api/v1/sync` | See §10.4. |
 | `GET /api/v1/capabilities` | `200` with the version-advertisement document (§15.5): API generation, supported envelope-version set, storage schema version, build identifier. |
+| `GET /api/v1/health` | `200` with the health snapshot document (§10.7): build identity, uptime, aggregate store figures and RAM-only counters. Budgeted and cached (§10.1, §10.7). |
+| `GET /status` | The operator status view (§10.7): a server-rendered HTML page built from the same cached snapshot as `/api/v1/health`, requiring no JavaScript. Not linked from the portal (§10.7). |
 
 ### 10.4 `POST /api/v1/sync` (exact behavior)
 
@@ -368,6 +371,60 @@ A goroutine with `time.Ticker` runs **every 15 minutes**, plus **once at daemon 
 ```sql
 DELETE FROM envelopes WHERE created_at + ttl < now;
 ```
+
+### 10.7 Health snapshot and operator status view (issue #31)
+
+**`GET /api/v1/health`** → `200`, `application/json; charset=utf-8`, the machine-readable snapshot a deployer uses to verify a field node's wellbeing in seconds — without SSH and without learning anything about the mail it holds:
+
+```json
+{
+  "status": "ok",
+  "api": "v1",
+  "build": "<node build identifier>",
+  "envelope_versions": [1, 2],
+  "schema_version": 2,
+  "uptime_seconds": 1234,
+  "envelopes": 87,
+  "envelope_capacity": 5000,
+  "directory_entries": 12,
+  "db_size_bytes": 1048576,
+  "last_cleanup_unix": 1759500000,
+  "last_cleanup_envelopes_deleted": 3,
+  "counters": {
+    "pushes_accepted": 40,
+    "pushes_rejected": 5,
+    "pushes_rejected_by_class": {
+      "invalid": 2,
+      "rate_limited": 1,
+      "node_full": 1,
+      "storage_unavailable": 1,
+      "too_large": 0
+    },
+    "dedup_hits": 9,
+    "ttl_sweeps": 82,
+    "ttl_swept_envelopes": 31
+  }
+}
+```
+
+| Member | Semantics |
+|---|---|
+| `status` | `"ok"` — a liveness statement, nothing more: the daemon answering IS the alive signal. The node has no TLS and no uplink **by design** (§12); builds MUST NOT invent health judgments beyond what is known, and MUST NOT fabricate watchdog detail (the `sd_notify` implementation holds no queryable runtime state — it sends fire-and-forget `READY=1`/`WATCHDOG=1` datagrams). |
+| `api`, `build`, `envelope_versions`, `schema_version` | The §15.5 identity members, byte-identical to `GET /api/v1/capabilities` by construction (see "Two documents, one identity" below). |
+| `uptime_seconds` | Seconds since the daemon process started — the same process lifetime the systemd watchdog supervises. |
+| `envelopes` / `envelope_capacity` | Live envelope count (a pure `COUNT(*)`) and the §8.1 per-node cap as enforced by admission. |
+| `directory_entries` | Registered directory entries (a pure `COUNT(*)`). |
+| `db_size_bytes` | Database size on disk, main file plus `-wal`/`-shm` sidecars (a stale/growing WAL is a full-card symptom, `docs/hardening.md` §3). |
+| `last_cleanup_unix` / `last_cleanup_envelopes_deleted` | The most recent completed §10.6 sweep (unix time and its delete count). `0` = no sweep completed since process start (the startup sweep normally sets it within seconds of boot). |
+| `counters` | Process-lifetime aggregates (below). `pushes_accepted` counts sync requests that ended `200` carrying ≥ 1 pushed envelope; `pushes_rejected` counts sync requests that ended in an error, bucketed by the error code answered (`invalid` = any 400 shape, `too_large` = 413, `rate_limited`/`node_full` = the two 429 shapes, `storage_unavailable` = 507); `dedup_hits` counts envelope ids absorbed by the §10.4 `INSERT OR IGNORE` (envelope-granular); `ttl_sweeps` / `ttl_swept_envelopes` accumulate completed janitor passes. All counters reset to zero on restart — that is accepted graceful degradation, identical to the §10.1 budgets. |
+
+**Privacy (binding, reviewed against §13).** The response, the persistence and the logs carry **aggregates only**: no envelope id, no `dest_hint`, no alias, no key, no payload fragment, no source address, no timestamp of any individual envelope. Every counter lives in RAM as an atomic integer, is never persisted, and is never logged per request — the §13.6/A7 constraint of `docs/hardening.md` applied to the diagnostics themselves. No field of the document can link envelopes to users; the store figures are pure counts that never inspect row content.
+
+**Bounded and fast (binding).** Both diagnostics endpoints answer from a snapshot cached in RAM for at most **one second** — at most one store refresh per second, whatever the request rate, so a GET flood cannot hammer SQLite — and sit behind a per-source-IP budget (burst 60, refill 1 request/second, one budget shared by both paths; exhaustion → `429 rate_limited` + `Retry-After`, §10.1). The document is fixed-shape with no query parameters. A healthy node answers in well under 50 ms. If the store cannot be read, the endpoints shed with `507 storage_unavailable` (§10.1) instead of serving a frozen or zeroed snapshot: truthful beats available.
+
+**Operator status view.** `GET /status` serves a small server-rendered HTML page built from the same cached snapshot, consistent with the portal's look, requiring no JavaScript (it must render on the cheap captive-portal mini-browser of any phone a field operator carries). It MUST go through the same canonical-host middleware (§10.2) and MUST NOT be linked from the portal index or its scripts — ordinary visitors are never shown operational detail; the deployer reaches it directly at `http://offgrid.local:8080/status`. The same privacy constraint applies: aggregates only.
+
+**Two documents, one identity.** `GET /api/v1/capabilities` (§15.5) and `GET /api/v1/health` deliberately remain two documents: capabilities is the **stable negotiation contract** clients fetch, cache and act on (§15.6); health is a **volatile operational snapshot** for humans and monitoring. They are not merged because their audiences, lifecycles and cache semantics differ; instead they repeat the four shared identity members (`api`, `build`, `envelope_versions`, `schema_version`) with **identical values, guaranteed by construction** — both endpoints fill them from the same constants and sources in the daemon, so they can never diverge. Builds MUST keep this single-source property when extending either document.
 
 ## 11. Client (mule) behavior — Module C normative summary
 
@@ -658,11 +715,13 @@ A build claiming conformance to this section MUST be covered by tests for each o
 
 ## 16. Conformance checklist
 
-**Module B (node daemon) MUST:** implement the schema and pragmas of §9; the seven endpoints with the exact status codes, limits and redirect/exemption behavior of §10; envelope validation of §10.5; the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
+**Module B (node daemon) MUST:** implement the schema and pragmas of §9; the nine endpoints with the exact status codes, limits and redirect/exemption behavior of §10 (including the diagnostics surface of §10.7: the health snapshot and the operator status view, aggregate-only, with RAM-only counters, the 1-second snapshot cache and the per-IP diagnostics budget); envelope validation of §10.5; the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
 
 **Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
 
 ## Changelog
+
+- **1.3.0 (2026-10-04, issue #31 — health diagnostics):** added §10.7 "Health snapshot and operator status view": the new `GET /api/v1/health` endpoint (machine-readable, aggregate-only snapshot — build identity, supported envelope versions, storage schema version, process uptime, live envelope count and §8.1 capacity, directory size, database size on disk, the most recent §10.6 cleanup, and process-lifetime RAM-only counters for pushes accepted/rejected with per-class breakdown, dedup hits and TTL sweeps) and the `GET /status` operator status view (server-rendered HTML from the same cached snapshot, no JavaScript, not linked from the portal, behind the same §10.2 canonical-host middleware). Both diagnostics endpoints are bounded: they answer from a snapshot cached at most one second (never one store read per request) and sit behind a per-source-IP budget (burst 60, refill 1/second, `429 rate_limited` + `Retry-After`), recorded as an explicit exception to the otherwise-unbudgeted GET read path in §10.1; an unreadable store sheds `507 storage_unavailable` instead of fabricating numbers. Privacy is normative (reviewed against §13): aggregates only, no per-envelope/per-alias/per-IP datum anywhere in the response, persistence or logs — counters are RAM-only atomics that die on restart, the same §13.6/A7 constraint the hardening defenses already obey. `capabilities` (§15.5) and `health` deliberately remain two documents (stable negotiation contract vs. volatile operational snapshot) with the four shared identity members (`api`, `build`, `envelope_versions`, `schema_version`) guaranteed identical by single-sourcing in the daemon. `status` is liveness only — no fabricated health judgments and no watchdog detail (the `sd_notify` implementation exposes no queryable state). §16 Module B conformance extended to the nine-endpoint surface. Additive only: no frozen field, limit, envelope-format or existing endpoint behavior changed.
 
 - **1.2.1 (2026-10-04, issue #16 — defensive hardening):** added §13.6 "Sabotage and circumvention scenarios", mapping the abuse scenarios of the hardening work to the standing defenses of the reference deployment (`docs/hardening.md`, operational) and to what the protocol itself guarantees (normative). Additive API behavior on the write paths, recorded in §10.1 and verified against the node implementation (`node/internal/api/ratelimit.go`, `node/internal/api/handlers.go`): per-source-IP admission control on both POST endpoints (request budget burst 60 / refill 1 per 2 s, checked before the body is read; pushed-envelope budget burst 600 / refill 600 per hour, withdrawn per batch before any storage work) answering `429 rate_limited` with a `Retry-After` header, and storage errors on the sync push/pull path surfaced as `507 storage_unavailable` instead of `500`. Module B conformance (§16) extended accordingly. No frozen field, limit or semantics changed: `429 node_full` (§8.1) predates this revision (1.1.0); the new behaviors are admission control and error-shape changes on paths that previously either succeeded or answered `500`, and every previously specified response is unchanged. The §13 blindness constraint is restated as a constraint on the defenses themselves: budget/shed state is RAM/tmpfs-only, never persisted, never logged per request.
 
