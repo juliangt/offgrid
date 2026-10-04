@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/sync_e2e.sh — full E2E integration test WITHOUT hardware (plan 4.3).
 #
-# Simulates the complete mule journey of docs/protocolo.md §2 against two
+# Simulates the complete mule journey of docs/protocol.md §2 against two
 # real daemon instances, using curl only:
 #
 #   Alice --push--> node A --pull--> MULE --push--> node B --pull--> Bob
@@ -23,7 +23,7 @@
 #      exemption (§10.2).
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
-# docs/protocolo.md at runtime (so the test vector cannot drift from the
+# docs/protocol.md at runtime (so the test vector cannot drift from the
 # spec; the expected id is asserted, so parser drift fails loudly). Its
 # created_at (1759500000) is fixed in the past, therefore:
 #   - the positive path re-dates ONLY created_at to "now" (id, dest_hint and
@@ -50,7 +50,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SPEC="$ROOT/docs/protocolo.md"
+SPEC="$ROOT/docs/protocol.md"
 
 PORT_A="${PORT_A:-18091}"
 PORT_B="${PORT_B:-18092}"
@@ -166,9 +166,9 @@ if [ "$NODE_A_READY" -ne 0 ] || [ "$NODE_B_READY" -ne 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 1. Parse the §3.2 example envelope verbatim out of docs/protocolo.md.
+# 1. Parse the §3.2 example envelope verbatim out of docs/protocol.md.
 # ---------------------------------------------------------------------------
-log "parsing the §3.2 example envelope verbatim from docs/protocolo.md"
+log "parsing the §3.2 example envelope verbatim from docs/protocol.md"
 ENVELOPE_DOC_JSON="$(awk '
     /^### 3\.2 Example/        {seen = 1; next}
     seen && fence_seen != 1 && /^```json/ {fence_seen = 1; next}
@@ -206,7 +206,7 @@ ENV_BADID_ID="$(printf 'g%.0s' $(seq 1 64))"
 ENV_BADID="{\"v\":1,\"id\":\"$ENV_BADID_ID\",\"dest_hint\":\"$ENV_HINT\",\"created_at\":$NOW,\"ttl\":$ENV_TTL,\"payload\":\"$ENV_PAYLOAD\"}"
 
 if [ "$ENV_CREATED_AT" -gt "$NOW" ] || [ "$((ENV_CREATED_AT + ENV_TTL))" -ge "$NOW" ]; then
-    printf 'e2e: FAIL: the §3.2 example (created_at=%s ttl=%s) is no longer expired at run time; docs/protocolo.md was re-dated — update this script\n' "$ENV_CREATED_AT" "$ENV_TTL" >&2
+    printf 'e2e: FAIL: the §3.2 example (created_at=%s ttl=%s) is no longer expired at run time; docs/protocol.md was re-dated — update this script\n' "$ENV_CREATED_AT" "$ENV_TTL" >&2
     exit 1
 fi
 

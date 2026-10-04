@@ -1,7 +1,7 @@
 // Package envelope defines the DTN envelope wire format (Phase 1, JSON) and
 // its server-side validation rules.
 //
-// The format is normatively specified in docs/protocolo.md §3 (fields),
+// The format is normatively specified in docs/protocol.md §3 (fields),
 // §8.2 (payload size bounds) and §10.5 (push-path validation). The node is a
 // blind intermediary: it validates structure only — it MUST NOT decrypt
 // payloads, verify signatures, or require id recomputation (§6.2).

@@ -22,7 +22,7 @@
 # probes (/generate_204 for Android, /hotspot-detect.html for iOS) arrive on
 # port 80 with spoofed Hosts via the wildcard DNS, hit the REDIRECT below and
 # are answered by the dtn-node daemon itself with a 302 to the canonical
-# origin — docs/protocolo.md §10.2. Filtering them separately would only
+# origin — docs/protocol.md §10.2. Filtering them separately would only
 # break captive-portal detection.
 
 set -euo pipefail

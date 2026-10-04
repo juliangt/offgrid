@@ -1,6 +1,6 @@
 # Build, Deploy and Run Guide
 
-Step-by-step instructions to build, test, run and deploy the off-grid DTN node (Module B daemon + Module C SPA) and its Raspberry Pi infrastructure (Module A). For the wire protocol see `docs/protocolo.md`; for the power budget and wiring see `docs/hardware.md`.
+Step-by-step instructions to build, test, run and deploy the off-grid DTN node (Module B daemon + Module C SPA) and its Raspberry Pi infrastructure (Module A). For the wire protocol see `docs/protocol.md`; for the power budget and wiring see `docs/hardware.md`.
 
 ## 1. Prerequisites
 
@@ -100,7 +100,7 @@ Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `no
 
 ## 5. Deploy to a Raspberry Pi Zero 2 W
 
-The provisioning is idempotent and never starts services mid-run: **the reboot is the activation step**. Run it from a LOCAL console (keyboard + monitor or serial), not over an SSH session on NetworkManager-managed Wi-Fi — the script disables and masks NetworkManager (binding decision, `PLAN_DESARROLLO.md` §1.6).
+The provisioning is idempotent and never starts services mid-run: **the reboot is the activation step**. Run it from a LOCAL console (keyboard + monitor or serial), not over an SSH session on NetworkManager-managed Wi-Fi — the script disables and masks NetworkManager (binding decision, `DEVELOPMENT_PLAN.md` §1.6).
 
 1. **Build the deployment binary** (on any machine, from step 2):
 

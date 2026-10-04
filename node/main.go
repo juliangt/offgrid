@@ -1,6 +1,6 @@
 // Command dtn-node is the self-contained HTTP daemon of Module B: a blind
 // SQLite dead-drop node for the off-grid DTN messaging system. It serves the
-// embedded portal SPA, the exact API surface of docs/protocolo.md §10, the
+// embedded portal SPA, the exact API surface of docs/protocol.md §10, the
 // canonical-host redirect with captive-probe exemption (§10.2) and the
 // 15-minute expired-envelope janitor (§10.6).
 //

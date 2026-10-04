@@ -29,8 +29,8 @@
 #   COUNTRY=AR ./provision.sh   # regulatory country written into hostapd.conf
 #   ALLOW_SSH=1 ./provision.sh  # firewall accepts SSH from AP clients (off by default)
 #
-# See PLAN_DESARROLLO.md §1.6 (NetworkManager vs classic stack — BINDING
-# DECISION), §5 Sprint 3 and docs/protocolo.md §12 (canonical origin).
+# See DEVELOPMENT_PLAN.md §1.6 (NetworkManager vs classic stack — BINDING
+# DECISION), §5 Sprint 3 and docs/protocol.md §12 (canonical origin).
 
 set -euo pipefail
 
@@ -162,7 +162,7 @@ install_packages() {
 # --- step 4: static IP on wlan0 ------------------------------------------------
 
 # The node is 10.42.0.1/24 on every deployment — a fixed constant of the
-# same-origin design (docs/protocolo.md §12: all nodes must share the
+# same-origin design (docs/protocol.md §12: all nodes must share the
 # gateway IP). Wi-Fi power save stays OFF for AP beacon stability.
 static_ip() {
     log "step 4/9: static IP 10.42.0.1/24 on wlan0"
@@ -171,7 +171,7 @@ static_ip() {
     cat > "$tmp" <<'EOF'
 # Managed by provision.sh (off-grid DTN node). Static address of the isolated
 # AP subnet; 10.42.0.1 is the router and DNS that dnsmasq advertises and the
-# gateway IP of the canonical origin (docs/protocolo.md §12).
+# gateway IP of the canonical origin (docs/protocol.md §12).
 auto wlan0
 iface wlan0 inet static
     address 10.42.0.1/24
