@@ -100,7 +100,7 @@ Wiring rules:
 
 1. **Flash** Raspberry Pi OS **Lite (64-bit, Bookworm)** onto the industrial SD with the official Imager (enable SSH only if you plan the ALLOW_SSH=1 variant; the node does not need it).
 2. **Bench-wire** the system per §4 with the Pi DISCONNECTED. Power from the battery alone and verify: controller recognizes 4S LiFePO4 profile, buck output 5.1 V ± 0.1 V.
-3. **Bench-boot the Pi** (from its buck or a bench USB supply) with keyboard + monitor or a serial console. Do not run `provision.sh` over NetworkManager Wi-Fi — the script disables and masks NetworkManager by design (`DEVELOPMENT_PLAN.md` §1.6).
+3. **Bench-boot the Pi** (from its buck or a bench USB supply) with keyboard + monitor or a serial console. Do not run `provision.sh` over NetworkManager Wi-Fi — the script disables and masks NetworkManager by design (`docs/DEVELOPMENT_PLAN.md` §1.6).
 4. Copy the cross-compiled binary and the `raspberry/` tree to the Pi and run, as root, from the local console (details in `docs/BUILD.md` §5):
 
    ```bash

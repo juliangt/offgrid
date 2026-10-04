@@ -100,7 +100,7 @@ Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `no
 
 ## 5. Deploy to a Raspberry Pi Zero 2 W
 
-The provisioning is idempotent and never starts services mid-run: **the reboot is the activation step**. Run it from a LOCAL console (keyboard + monitor or serial), not over an SSH session on NetworkManager-managed Wi-Fi — the script disables and masks NetworkManager (binding decision, `DEVELOPMENT_PLAN.md` §1.6).
+The provisioning is idempotent and never starts services mid-run: **the reboot is the activation step**. Run it from a LOCAL console (keyboard + monitor or serial), not over an SSH session on NetworkManager-managed Wi-Fi — the script disables and masks NetworkManager (binding decision, `docs/DEVELOPMENT_PLAN.md` §1.6).
 
 1. **Build the deployment binary** (on any machine, from step 2):
 

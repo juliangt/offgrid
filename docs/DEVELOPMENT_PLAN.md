@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Source document** | `MASTER_DEVELOPMENT_PROMPT.md` |
+| **Source document** | `docs/MASTER_DEVELOPMENT_PROMPT.md` |
 | **Plan version** | 1.0 |
 | **Date** | 2026-10-03 |
 | **Status** | Pending approval |
@@ -206,10 +206,10 @@ Cleanup worker: goroutine + `time.Ticker` every 15 min: `DELETE FROM envelopes W
 
 ```
 offgrid/
-├── MASTER_DEVELOPMENT_PROMPT.md         # source (do not modify)
-├── DEVELOPMENT_PLAN.md                  # this document
 ├── README.md                            # overview + quick guide
 ├── docs/
+│   ├── MASTER_DEVELOPMENT_PROMPT.md     # source (do not modify)
+│   ├── DEVELOPMENT_PLAN.md              # this document
 │   ├── protocol.md                      # normative Envelope spec (Sprint 0)
 │   ├── BUILD.md                         # step-by-step build/run/test (Sprint 4)
 │   └── hardware.md                      # solar/LiFePO4 assembly + provisioning
