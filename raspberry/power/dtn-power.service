@@ -1,0 +1,35 @@
+# dtn-power.service — power trim for the off-grid DTN dead-drop node (Module A)
+# Install path: /etc/systemd/system/dtn-power.service
+# Enabled by provision.sh. Runs once after boot; RemainAfterExit keeps it
+# "active (exited)" so systemd reports its result until shutdown.
+#
+# Energy context: the node targets a ~1 W continuous draw so a small solar
+# panel + LiFePO4 battery can run it indefinitely; the sizing note lives in
+# docs/hardware.md (Sprint 4). This unit removes the two biggest leftover
+# consumers after boot: the HDMI display pipeline and aggressive CPU clocks.
+
+[Unit]
+# After=multi-user.target: run once the system is fully up, so the HDMI power
+# off does not race with boot-time console activity and the cpufreq sysfs
+# entries exist for every CPU.
+Description=DTN node power optimization (HDMI off, CPU governor powersave)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Power the HDMI display pipeline off entirely. config.txt hdmi_blanking=2
+# only blanks the signal; this removes the output for good. The leading "-"
+# tolerates boards/situations where vcgencmd is unavailable (e.g. running the
+# unit outside a Pi for testing) instead of failing the unit.
+ExecStart=-/usr/bin/vcgencmd display_power 0 off
+
+# Pin every present CPU to the powersave governor. A Zero 2 W portal serves a
+# handful of light requests; clocking down keeps the SoC cool, silent and
+# inside the energy budget. The glob loop covers big.LITTLE and single-core
+# layouts alike; a missing file just skips that CPU.
+ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo powersave > "$g" 2>/dev/null; done; exit 0'
+
+[Install]
+WantedBy=multi-user.target
