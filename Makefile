@@ -6,7 +6,8 @@
 #   make build       host dev binary (node/dtn-node-dev, the go:embeded SPA inside)
 #   make build-all   the full cross-compile matrix of node/build.sh (arm64/armv7/armv6 + dev)
 #   make test        the full suite: go test, the 9 headless SPA tests, the
-#                    curl E2E and the Pi hardening structure test
+#                    curl E2E, the node upgrade/rollback E2E (issue #22) and
+#                    the Pi hardening structure test
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
 #                    purpose, assert degrade + auto-recover; see
@@ -16,7 +17,8 @@
 #                    to retune)
 #
 # No root is needed for any target. The test targets start and stop their
-# own daemons on 127.0.0.1 ports 18091-18099 and clean up after themselves.
+# own daemons on 127.0.0.1 ports 18091-18099 (sync E2E + chaos) and 18101
+# (upgrade E2E) and clean up after themselves.
 
 .PHONY: build build-all test lint chaos fuzz
 
@@ -46,6 +48,7 @@ test:
 	node tests/acks.mjs
 	node tests/qr_identity.mjs
 	bash tests/sync_e2e.sh
+	bash tests/upgrade_e2e.sh
 	bash tests/hardening_structure.sh
 
 # Lint gates (docs/BUILD.md §4): gofmt must report nothing, vet nothing.
