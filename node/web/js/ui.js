@@ -34,6 +34,19 @@ var uiState = {
   sending: false
 };
 
+/* §6.1 epoch observation: the highest hint epoch this session has seen
+ * from NODE data (capabilities hint_epoch_current, directory entry
+ * epochs) — the shared reference for the recipient's rotating-hint
+ * candidate set. The device clock is the offline-cold fallback only
+ * (nodes have no NTP; the NODE's clock is the shared reference, §6.1). */
+var observedHintEpoch = null;
+
+function noteObservedEpoch(epoch) {
+  if (typeof epoch !== "number" || !isFinite(epoch) ||
+      Math.floor(epoch) !== epoch || epoch < 0) return;
+  if (observedHintEpoch === null || epoch > observedHintEpoch) observedHintEpoch = epoch;
+}
+
 /* ----- tiny network helpers (XHR works on every WebView; fetch may not) -- */
 
 function xhrJSON(method, path, body) {
@@ -162,6 +175,11 @@ function refreshDirectory() {
   if (!select) return Promise.resolve([]);
   return getJson("/api/v1/directory").then(function (entries) {
     uiState.directory = Array.isArray(entries) ? entries : [];
+    /* §6.1: every entry carries the server-set epoch of its upsert —
+     * each one is a node-clock observation feeding the candidate set. */
+    for (var i = 0; i < uiState.directory.length; i++) {
+      if (uiState.directory[i]) noteObservedEpoch(uiState.directory[i].epoch);
+    }
     renderDirectory();
     return uiState.directory;
   }, function () {
@@ -316,6 +334,14 @@ function onSend() {
     showStatus(statusEl, "error", "The recipient key is not valid.");
     return;
   }
+  /* §6.1: address with the recipient's rotating hint for the epoch the
+   * NODE stamped on the directory entry — the freshest server-side truth
+   * about that recipient, and never the (clockless-skew) device clock. A
+   * pre-1.6 node that publishes no epoch degrades to the legacy static
+   * hint (hintEpoch null → buildEnvelope keeps the pre-1.6 behavior). */
+  var hintEpoch = (typeof entry.epoch === "number" && isFinite(entry.epoch) &&
+                   Math.floor(entry.epoch) === entry.epoch && entry.epoch >= 0)
+    ? entry.epoch : null;
 
   uiState.sending = true;
   updateSendEnabled();
@@ -334,7 +360,8 @@ function onSend() {
       alias: identity.alias,
       signSecret: identity.signSecret,
       signPublic: identity.signPublic,
-      createdAt: createdAt
+      createdAt: createdAt,
+      hintEpoch: hintEpoch
     });
   } catch (e) {
     uiState.sending = false;
@@ -786,9 +813,12 @@ function chunkArray(arr, size) {
  * older node, a transport error, a malformed body — resolves null, the
  * documented fallback: the batch then goes out in its original,
  * unconverted form (§15.5, §15.6). Syncing is NEVER blocked by a
- * capabilities failure. */
+ * capabilities failure. §6.1: the document's additive
+ * hint_epoch_current member (when present) is also an epoch observation
+ * feeding the recipient's candidate set; its absence changes nothing. */
 function fetchMaxEnvelopeVersion() {
   return getJson(CAPABILITIES_PATH).then(function (caps) {
+    noteObservedEpoch(DTN.observedEpochFromCapabilities(caps));
     return DTN.maxAdvertisedEnvelopeVersion(caps);
   }, function () {
     return null;
@@ -989,6 +1019,12 @@ function buildAckEnvelopes(tasks, identity, directory) {
     var entry = byPubkey[task.sender_key];
     var senderBox = entry ? DTN.b64decode(entry.x25519) : null;
     if (!entry || !senderBox || senderBox.length !== 32) continue;
+    /* §6.1: address the ack with the sender's rotating hint for the epoch
+     * the node stamped on their directory entry (legacy static hint when
+     * the entry predates 1.6 — still recognized inside the window). */
+    var hintEpoch = (typeof entry.epoch === "number" && isFinite(entry.epoch) &&
+                     Math.floor(entry.epoch) === entry.epoch && entry.epoch >= 0)
+      ? entry.epoch : null;
     out.push(DTN.buildEnvelope({
       recipientBoxPublic: senderBox,     /* addressed BACK to the sender's dest_hint */
       message: "",                       /* acks carry no text (§4.5, m = "") */
@@ -997,6 +1033,7 @@ function buildAckEnvelopes(tasks, identity, directory) {
       signPublic: identity.signPublic,   /* signed by the RECIPIENT's Ed25519 key */
       createdAt: now,                    /* ack time, NOT the original's (§4.5) */
       ttl: DTN.ackTtlFor(task.created_at, task.ttl, now),
+      hintEpoch: hintEpoch,              /* §6.1 rotating addressing */
       ack: { r: task.r, y: task.type }
     }));
   }
@@ -1023,7 +1060,12 @@ function processPulled(pulled, known, identity) {
     if (known[env.id]) continue; /* replay of an envelope we already have */
     fresh.push(env);
   }
-  var cls = DTN.classifyPullEnvelopes(fresh, identity.hint);
+  /* §6.1 recipient candidate set: static legacy hint (pre-deadline),
+   * hint(E) and hint(E-1), where E is the highest epoch observed from
+   * node data this session (capabilities hint_epoch_current, directory
+   * entry epochs) — or the device clock when offline-cold. */
+  var candidates = DTN.hintCandidates(identity.boxPublic, observedHintEpoch, nowSec());
+  var cls = DTN.classifyPullEnvelopes(fresh, candidates);
   var inboxRecords = [];
   var chunkArrivals = [];
   var ackTasks = [];      /* §4.5: one per received message, acks to emit */
@@ -1031,7 +1073,7 @@ function processPulled(pulled, known, identity) {
   var rejected = 0;
   var now = nowSec();
   for (var j = 0; j < cls.mine.length; j++) {
-    var res = DTN.decryptEnvelope(cls.mine[j], identity, now);
+    var res = DTN.decryptEnvelope(cls.mine[j], identity, now, candidates);
     if (res.ok) {
       if (res.ack) {
         /* §4.5 termination rule: an ack is recorded, never answered. */

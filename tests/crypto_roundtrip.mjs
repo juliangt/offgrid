@@ -51,7 +51,7 @@ ok(DTN.hexEncode(DTN.sha256(bytesFromHex(rfc7748AlicePub))) ===
 ok(DTN.deriveDestHint(bytesFromHex(rfc7748AlicePub)) === "300c9c9603b92a4b",
    "dest_hint = first 8 bytes as 16 lowercase hex chars (§6.1)");
 
-console.log("== (b) envelope id — spec §6.2 test vector 2 over the §5.2 string ==");
+console.log("== (b) envelope id — spec §6.2 test vector 3 over the §5.2 string ==");
 const vectorPayload = "f46MqdLy8TaHj3lnjcYvHnOuAU8lrXD/nDHUzwGAW/5rQERh00/2ez0ZkfsZz6yc2FpGq2ukrJYxb/P0OQPt6vbAt4I3TKcA21aBVxCxjX4ZZZA23cub/SQusRHDZzjPDmI3HQj6ZpTbEntNfCKagXtQY/MCjvusFuP24DZVGxRhZ0K6l1KKsV0fZ5MOgg+QfFheegNat7plIFMf1Y0TuQrii+JffAfgGh1vAWRr3OvAxWyRbH04Ofw/UBrKZLdevwAcCUcn7mgYcCrXZvSFlHavFH84Pyk2egL0mnPXubm9iMVQOraXcklUzgYVbGlme8w+0yZrDNE=";
 const vectorEnvelopeString = `{"v":1,"dest_hint":"9f3ab02c1d77e4c1","created_at":1759500000,"ttl":604800,"payload":"${vectorPayload}"}`;
 ok(DTN.canonicalEnvelopeString(1, "9f3ab02c1d77e4c1", 1759500000, 604800, vectorPayload) === vectorEnvelopeString,
