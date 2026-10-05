@@ -36,8 +36,9 @@ import (
 	"offgrid/dtn-node/internal/storage"
 )
 
-// webFS embeds the portal UI sources: index.html, the stylesheet and the
-// plain ES5 scripts under css/ and js/. They travel inside the single
+// webFS embeds the portal UI sources: index.html, the stylesheet, the plain
+// ES5 scripts under css/ and js/, the §12.1 web app manifest and the PNG
+// icons under icons/. They travel inside the single
 // static binary (see build.sh) and are served same-origin by the api
 // package; a node is still deployed by copying one file.
 //

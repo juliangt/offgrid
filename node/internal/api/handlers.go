@@ -79,8 +79,8 @@ type server struct {
 	healthCachedAt time.Time
 }
 
-// staticAsset is one embedded same-origin web file (stylesheet or script)
-// held in memory, ready to serve.
+// staticAsset is one embedded same-origin web file (stylesheet, script,
+// §12.1 manifest or PNG icon) held in memory, ready to serve.
 type staticAsset struct {
 	body        []byte
 	contentType string
@@ -88,18 +88,27 @@ type staticAsset struct {
 
 // staticContentTypes lists the only file extensions the portal ever serves,
 // with their exact §10.1 content types. Anything else found in the embedded
-// css/ or js/ trees fails startup (fail closed: a half-shipped UI must not
-// serve stale assets).
+// css/, js/ or icons/ trees fails startup (fail closed: a half-shipped UI
+// must not serve stale assets).
 var staticContentTypes = map[string]string{
 	".css": "text/css; charset=utf-8",
 	".js":  "text/javascript; charset=utf-8",
+	".png": "image/png",
 }
+
+// manifestContentType is the §12.1 web app manifest's media type. Chrome
+// matches the bare media type (parameters are fine), and the W3C manifest
+// spec prescribes application/manifest+json — preferred here over plain
+// application/json so the document is unambiguous to every conforming UA.
+const manifestContentType = "application/manifest+json; charset=utf-8"
 
 // New wires the exact endpoint surface of §10.3 (plus the §15.5 capabilities
 // document and the §10.7 diagnostics surface) into a single handler:
 //
 //	GET  /                      embedded index.html (text/html; charset=utf-8)
 //	GET  /css/…, GET /js/…      embedded same-origin static assets
+//	GET  /manifest.json         embedded web app manifest (§12.1)
+//	GET  /icons/…               embedded PNG icons (§12.1)
 //	GET  /generate_204          302 → canonical portal (Android probe; never 204)
 //	GET  /hotspot-detect.html   302 → canonical portal (iOS probe)
 //	GET  /api/v1/directory      JSON array of directory entries
@@ -115,8 +124,9 @@ var staticContentTypes = map[string]string{
 // ldflags-stamped value through. An empty build falls back to "dev" so the
 // §15.5 non-empty invariant holds even for a mis-stamped binary. webAssets is
 // the embedded web root supplied by the main package (go:embed cannot cross
-// package directories); its index.html and every .css/.js file under css/ and
-// js/ are read once at startup. Unknown paths yield a JSON 404 and wrong
+// package directories); its index.html, manifest.json and every .css/.js
+// file under css/ and js/ plus every .png under icons/ are read once at
+// startup. Unknown paths yield a JSON 404 and wrong
 // methods a JSON 405 with an Allow header (§10.1). The whole mux is wrapped
 // with the canonical-host redirect and the body-size limiter; the two POST
 // endpoints additionally sit behind the per-IP admission-control budgets of
@@ -173,6 +183,8 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /css/", s.handleStatic)
 	mux.HandleFunc("GET /js/", s.handleStatic)
+	mux.HandleFunc("GET /manifest.json", s.handleStatic)
+	mux.HandleFunc("GET /icons/", s.handleStatic)
 	mux.HandleFunc("GET /generate_204", s.handleProbe)
 	mux.HandleFunc("GET /hotspot-detect.html", s.handleProbe)
 	mux.HandleFunc("GET /api/v1/directory", s.handleGetDirectory)
@@ -191,6 +203,8 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	mux.HandleFunc("/{$}", methodNotAllowed("GET"))
 	mux.HandleFunc("/css/", methodNotAllowed("GET"))
 	mux.HandleFunc("/js/", methodNotAllowed("GET"))
+	mux.HandleFunc("/manifest.json", methodNotAllowed("GET"))
+	mux.HandleFunc("/icons/", methodNotAllowed("GET"))
 	mux.HandleFunc("/generate_204", methodNotAllowed("GET"))
 	mux.HandleFunc("/hotspot-detect.html", methodNotAllowed("GET"))
 	mux.HandleFunc("/api/v1/directory", methodNotAllowed("GET, POST"))
@@ -204,14 +218,18 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	return canonicalHost(limitBody(mux)), nil
 }
 
-// loadStaticAssets reads every .css/.js file under css/ and js/ of the
-// embedded web root into memory, keyed by its exact URL path ("/js/ui.js").
-// The allow-list is derived from the embed itself: nothing outside those
-// trees is ever served (no directory listing, no traversal — requests are
-// matched by exact path after the mux's path cleaning).
+// loadStaticAssets reads every .css/.js file under css/ and js/ plus every
+// .png icon under icons/ of the embedded web root into memory, keyed by its
+// exact URL path ("/js/ui.js", "/icons/icon-192.png"). The allow-list is
+// derived from the embed itself: nothing outside those trees is ever served
+// (no directory listing, no traversal — requests are matched by exact path
+// after the mux's path cleaning). The §12.1 web app manifest lives at the
+// web root (outside every walked tree) and is read explicitly; a missing
+// manifest or icons tree fails startup — a manifest the browser cannot
+// resolve is a half-shipped UI.
 func loadStaticAssets(webRoot fs.FS) (map[string]staticAsset, error) {
 	assets := make(map[string]staticAsset)
-	for _, dir := range []string{"css", "js"} {
+	for _, dir := range []string{"css", "js", "icons"} {
 		err := fs.WalkDir(webRoot, dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -234,6 +252,11 @@ func loadStaticAssets(webRoot fs.FS) (map[string]staticAsset, error) {
 			return nil, fmt.Errorf("scan embedded web/%s assets: %w", dir, err)
 		}
 	}
+	manifest, err := fs.ReadFile(webRoot, "manifest.json")
+	if err != nil {
+		return nil, fmt.Errorf("embedded web/manifest.json is missing: %w", err)
+	}
+	assets["/manifest.json"] = staticAsset{body: manifest, contentType: manifestContentType}
 	return assets, nil
 }
 
@@ -294,10 +317,10 @@ func (s *server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(s.indexHTML)
 }
 
-// handleStatic serves one embedded same-origin asset (css/js) by its exact
-// URL path (§10.1: no SPA fallback, no directory listing). Responses are
-// revalidated on every load (no-cache): a node is updated as a whole binary,
-// and captive clients must pick up the new UI immediately.
+// handleStatic serves one embedded same-origin asset (css/js/manifest/icons)
+// by its exact URL path (§10.1: no SPA fallback, no directory listing).
+// Responses are revalidated on every load (no-cache): a node is updated as a
+// whole binary, and captive clients must pick up the new UI immediately.
 func (s *server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	asset, ok := s.assets[r.URL.Path]
 	if !ok {

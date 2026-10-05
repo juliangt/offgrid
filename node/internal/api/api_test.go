@@ -23,12 +23,41 @@ const testIndexHTML = `<!DOCTYPE html><html><head><title>DTN Node</title>` +
 	`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'">` +
 	`</head><body><script src="/js/app.js"></script></body></html>`
 
+// testManifest is the §12.1 manifest fixture served at /manifest.json; the
+// members are asserted verbatim in TestStaticAssets (content type, body).
+const testManifest = `{"name":"Offgrid Messages","short_name":"Offgrid","start_url":"/","scope":"/","display":"standalone"}`
+
+// testIconPNG is a byte-precise PNG stand-in for the embedded icons: the
+// handler must serve the embedded bytes verbatim (so the E2E's IHDR
+// dimension check on the REAL binary covers the real files; here the byte
+// fidelity is what is pinned). It is a valid 1x1 PNG (magic + IHDR + IDAT +
+// IEND), so even an accidental content-sniffing change cannot hide behind
+// malformed bytes.
+var testIconPNG = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG magic
+	0x00, 0x00, 0x00, 0x0d, // IHDR length
+	0x49, 0x48, 0x44, 0x52, // "IHDR"
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
+	0x08, 0x06, 0x00, 0x00, 0x00, // depth 8, RGBA
+	0x1f, 0x15, 0xc4, 0x89, // IHDR CRC
+	0x00, 0x00, 0x00, 0x0a, // IDAT length
+	0x49, 0x44, 0x41, 0x54, // "IDAT"
+	0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
+	0x0d, 0x0a, 0x2d, 0xb4, // IDAT CRC
+	0x00, 0x00, 0x00, 0x00, // IEND length
+	0x49, 0x45, 0x4e, 0x44, // "IEND"
+	0xae, 0x42, 0x60, 0x82, // IEND CRC
+}
+
 // testWebFS stands in for the go:embed'ed web root of the main package.
 var testWebFS = fstest.MapFS{
-	"web/index.html":     &fstest.MapFile{Data: []byte(testIndexHTML)},
-	"web/css/app.css":    &fstest.MapFile{Data: []byte("body { color: rebeccapurple; }")},
-	"web/js/app.js":      &fstest.MapFile{Data: []byte("var x = 1;")},
-	"web/js/vendor/x.js": &fstest.MapFile{Data: []byte("var y = 2;")},
+	"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+	"web/manifest.json":      &fstest.MapFile{Data: []byte(testManifest)},
+	"web/css/app.css":        &fstest.MapFile{Data: []byte("body { color: rebeccapurple; }")},
+	"web/js/app.js":          &fstest.MapFile{Data: []byte("var x = 1;")},
+	"web/js/vendor/x.js":     &fstest.MapFile{Data: []byte("var y = 2;")},
+	"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
+	"web/icons/icon-512.png": &fstest.MapFile{Data: testIconPNG},
 }
 
 // testBuild is the build identifier threaded through New in every test here;
@@ -131,6 +160,8 @@ func TestCanonicalHostRedirect(t *testing.T) {
 		{"bare host without port redirects", "offgrid.local", "/", http.StatusMovedPermanently, "http://offgrid.local:8080/"},
 		{"canonical host passes", "offgrid.local:8080", "/", http.StatusOK, ""},
 		{"canonical host is case-insensitive", "OFFGRID.LOCAL:8080", "/", http.StatusOK, ""},
+		{"§12.1 manifest redirects onto the canonical origin", "10.42.0.1:8080", "/manifest.json", http.StatusMovedPermanently, "http://offgrid.local:8080/manifest.json"},
+		{"§12.1 icon redirects onto the canonical origin", "offgrid.local", "/icons/icon-192.png", http.StatusMovedPermanently, "http://offgrid.local:8080/icons/icon-192.png"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,6 +242,9 @@ func TestStaticAssets(t *testing.T) {
 		{"/css/app.css", "body { color: rebeccapurple; }", "text/css; charset=utf-8"},
 		{"/js/app.js", "var x = 1;", "text/javascript; charset=utf-8"},
 		{"/js/vendor/x.js", "var y = 2;", "text/javascript; charset=utf-8"},
+		{"/manifest.json", testManifest, "application/manifest+json; charset=utf-8"},
+		{"/icons/icon-192.png", string(testIconPNG), "image/png"},
+		{"/icons/icon-512.png", string(testIconPNG), "image/png"},
 	}
 	for _, tc := range cases {
 		t.Run("GET "+tc.path, func(t *testing.T) {
@@ -227,6 +261,9 @@ func TestStaticAssets(t *testing.T) {
 			if rec.Body.String() != tc.wantBody {
 				t.Fatalf("body: got %q, want %q", rec.Body.String(), tc.wantBody)
 			}
+			if got := rec.Body.Len(); got != len(tc.wantBody) {
+				t.Fatalf("body length: got %d, want %d (icons/manifest ship byte-exact)", got, len(tc.wantBody))
+			}
 		})
 	}
 
@@ -239,15 +276,21 @@ func TestStaticAssets(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil || errBody["error"] != "not_found" {
 		t.Fatalf("unknown asset must carry the JSON 404 body, got %q", rec.Body.String())
 	}
+	// Unknown icon path: same JSON 404 (exact-path serving inside icons/ too).
+	rec = do(t, h, http.MethodGet, "/icons/icon-64.png", CanonicalHost, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown icon: got %d, want 404", rec.Code)
+	}
 
-	// Nothing outside css/ and js/ is ever exposed (only index.html is HTML).
+	// Nothing outside css/, js/, icons/ and manifest.json is ever exposed
+	// (only index.html is HTML).
 	rec = do(t, h, http.MethodGet, "/index.html", CanonicalHost, nil, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("/index.html must not be served directly, got %d", rec.Code)
 	}
 
 	// Wrong method: JSON 405 with Allow: GET.
-	for _, path := range []string{"/css/app.css", "/js/app.js"} {
+	for _, path := range []string{"/css/app.css", "/js/app.js", "/manifest.json", "/icons/icon-192.png"} {
 		rec := do(t, h, http.MethodPost, path, CanonicalHost, nil, "application/json")
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("POST %s: got %d, want 405", path, rec.Code)
@@ -271,13 +314,36 @@ func TestNewFailsClosed(t *testing.T) {
 	if _, err := New(s, testBuild, fstest.MapFS{}); err == nil {
 		t.Fatalf("missing web/index.html must fail startup")
 	}
+	// (manifest + icons present so the walk reaches the unsupported file)
 	broken := fstest.MapFS{
-		"web/index.html":  &fstest.MapFile{Data: []byte(testIndexHTML)},
-		"web/css/app.css": &fstest.MapFile{Data: []byte("/* ok */")},
-		"web/js/evil.exe": &fstest.MapFile{Data: []byte("MZ")},
+		"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/manifest.json":      &fstest.MapFile{Data: []byte(testManifest)},
+		"web/css/app.css":        &fstest.MapFile{Data: []byte("/* ok */")},
+		"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
+		"web/js/evil.exe":        &fstest.MapFile{Data: []byte("MZ")},
 	}
 	if _, err := New(s, testBuild, broken); err == nil || !strings.Contains(err.Error(), "unsupported extension") {
 		t.Fatalf("unsupported asset extension must fail startup, got: %v", err)
+	}
+	// A missing §12.1 manifest or icons tree is a half-shipped UI too: the
+	// browser would resolve the manifest link (or an icon entry) into a 404.
+	noManifest := fstest.MapFS{
+		"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/css/app.css":        &fstest.MapFile{Data: []byte("/* ok */")},
+		"web/js/app.js":          &fstest.MapFile{Data: []byte("var x = 1;")},
+		"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
+	}
+	if _, err := New(s, testBuild, noManifest); err == nil || !strings.Contains(err.Error(), "manifest.json is missing") {
+		t.Fatalf("missing web/manifest.json must fail startup, got: %v", err)
+	}
+	noIcons := fstest.MapFS{
+		"web/index.html":    &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/manifest.json": &fstest.MapFile{Data: []byte(testManifest)},
+		"web/css/app.css":   &fstest.MapFile{Data: []byte("/* ok */")},
+		"web/js/app.js":     &fstest.MapFile{Data: []byte("var x = 1;")},
+	}
+	if _, err := New(s, testBuild, noIcons); err == nil || !strings.Contains(err.Error(), "scan embedded web/icons") {
+		t.Fatalf("missing web/icons tree must fail startup, got: %v", err)
 	}
 }
 
