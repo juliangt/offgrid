@@ -1047,10 +1047,25 @@ func TestDirectoryPrekeysPostAndGet(t *testing.T) {
 		{"ts negative", func() map[string]any { b := prekeyTestBundle(3, 4); b["ts"] = -5; return b }()},
 		{"ts string", func() map[string]any { b := prekeyTestBundle(3, 4); b["ts"] = "1791072000"; return b }()},
 		{"opks 7 entries", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = b["opks"].([]string)[:7]; return b }()},
-		{"opks 17 entries", func() map[string]any { b := prekeyTestBundle(3, 4); opks := b["opks"].([]string); opks = append(opks, keyB64(31), keyB64(32), keyB64(33), keyB64(34), keyB64(35), keyB64(36), keyB64(37), keyB64(38), keyB64(39)); b["opks"] = opks; return b }()},
-		{"opk entry 31 bytes", func() map[string]any { b := prekeyTestBundle(3, 4); opks := append([]string{sp31}, b["opks"].([]string)[1:]...); b["opks"] = opks; return b }()},
+		{"opks 17 entries", func() map[string]any {
+			b := prekeyTestBundle(3, 4)
+			opks := b["opks"].([]string)
+			opks = append(opks, keyB64(31), keyB64(32), keyB64(33), keyB64(34), keyB64(35), keyB64(36), keyB64(37), keyB64(38), keyB64(39))
+			b["opks"] = opks
+			return b
+		}()},
+		{"opk entry 31 bytes", func() map[string]any {
+			b := prekeyTestBundle(3, 4)
+			opks := append([]string{sp31}, b["opks"].([]string)[1:]...)
+			b["opks"] = opks
+			return b
+		}()},
 		{"opks not array", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = "opks"; return b }()},
-		{"member not object", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = []any{map[string]string{"nope": "x"}}; return b }()},
+		{"member not object", func() map[string]any {
+			b := prekeyTestBundle(3, 4)
+			b["opks"] = []any{map[string]string{"nope": "x"}}
+			return b
+		}()},
 		{"oversize member", func() map[string]any { b := prekeyTestBundle(3, 4); b["unknown_pad"] = bigOPK; return b }()},
 	}
 	for _, tc := range badCases {
