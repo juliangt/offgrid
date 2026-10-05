@@ -1097,6 +1097,7 @@ function onManualSync() {
 
 function initUi() {
   setupBanner();
+  setupInstallHint();
   wireStaticHandlers();
   DTN.loadIdentity().then(function (identity) {
     if (identity && DTN.validateAlias(identity.alias) && identity.signPublicB64 && identity.boxPublicB64) {
@@ -1643,6 +1644,65 @@ function setupBanner() {
       btn.textContent = ok ? "Copied!" : "Could not copy";
       setTimeout(function () { btn.textContent = "Copy"; }, 1500);
     });
+  });
+}
+
+/* ----- install / pin hint (issue #29, spec §12.1) -----
+ * An honest, dismissible pointer: on a platform that can pin, tell the user
+ * exactly how (browser menu on Android, Share sheet on iOS) so they keep an
+ * "Offgrid" icon instead of typing the canonical URL. Honesty rule (§12.1,
+ * carried verbatim in the banner copy): the icon is a SHORTCUT, not an
+ * offline app — service workers are unavailable on the plain-HTTP canonical
+ * origin, so there is no offline shell to promise. Silent everywhere the
+ * hint cannot be honest: captive mini-browsers (the §13.4 banner covers
+ * those), WebView-ish environments, desktops, and when the portal already
+ * runs as the pinned app (display-mode: standalone / navigator.standalone).
+ * Dismissal persists in the same device-local meta store as the rest of the
+ * UI state; a storage failure shows the hint (best-effort, like everything
+ * else UI-side). */
+
+function detectInstallPlatform() {
+  var ua = navigator.userAgent || "";
+  /* WebView environments (Android CNA mini-browser and embedders) cannot
+   * add to home screen: "other" per §12.1 — silent. */
+  if (/;\s*wv\)/.test(ua)) return null;
+  if (/Android/i.test(ua)) return "android";
+  /* iOS Safari; an iPadOS Safari may present as Macintosh with touches. */
+  if (/iPhone|iPod|iPad/i.test(ua)) return "ios";
+  if (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1) return "ios";
+  return null;
+}
+
+function detectAlreadyStandalone() {
+  if (typeof matchMedia === "function" &&
+      typeof matchMedia("(display-mode: standalone)").matches === "boolean" &&
+      matchMedia("(display-mode: standalone)").matches) {
+    return true;
+  }
+  return navigator.standalone === true; /* iOS pinned-app flag */
+}
+
+function setupInstallHint() {
+  var banner = $("banner-install");
+  if (!banner) return;
+  if (detectAlreadyStandalone()) return;
+  if (detectCaptiveBrowser()) return;
+  var platform = detectInstallPlatform();
+  if (!platform) return;
+  var text = platform === "android"
+    ? "In Chrome, open the browser menu (\u22ee) and choose \u201cAdd to Home screen\u201d to pin an Offgrid icon that opens this portal."
+    : "In Safari, tap the Share button and choose \u201cAdd to Home Screen\u201d to pin an Offgrid icon that opens this portal.";
+  setText("install-text", text);
+  /* Dismissed is forever (meta store, device-local). Show when the key is
+   * absent AND when the store itself fails: the hint is honest either way. */
+  DTN.getMeta("install_hint_dismissed").then(function (dismissed) {
+    if (!dismissed) showEl(banner);
+  }, function () {
+    showEl(banner);
+  });
+  $("install-close").addEventListener("click", function () {
+    hideEl(banner);
+    DTN.setMeta("install_hint_dismissed", nowSec()).then(null, function () {});
   });
 }
 

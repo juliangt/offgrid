@@ -13,6 +13,19 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
   <title>Messages — Community Network</title>
   <link rel="stylesheet" href="/css/app.css">
+  <!-- Add-to-home-screen metadata (issue #29, spec §12.1): the web app
+       manifest plus the iOS equivalents (iOS Safari ignores the manifest).
+       Every referenced file is same-origin and embedded in the node binary
+       (§10.3); start_url and scope are origin-RELATIVE (never a hardcoded
+       host), so the pinned icon opens the one canonical origin of §12 on
+       any node — the same origin that keeps IndexedDB unfragmented. -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#0b6e4f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Offgrid">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
 </head>
 <body>
 <!-- Captive mini-browser banner (plan §1.4, spec §13.4): shown on every
@@ -28,6 +41,23 @@
     </div>
     <button id="banner-copy" type="button" class="small">Copy</button>
     <button id="banner-close" type="button" class="small" aria-label="Dismiss banner">✕</button>
+  </div>
+</div>
+<!-- Install / pin hint (issue #29, spec §12.1): a dismissible, honest
+     pointer shown only in a full browser on a platform that can pin
+     (Android/Chrome or iOS Safari) and only until dismissed (meta store).
+     It never appears in the captive mini-browser (§13.4 banner covers
+     that) and never when already running as the pinned app. The wording
+     carries the §12.1 honesty rule verbatim: the icon is a shortcut, not
+     an offline app — there is no service worker on plain HTTP. -->
+<div id="banner-install" class="banner" role="note" hidden>
+  <div class="banner-row">
+    <div class="banner-text">
+      <strong>Keep an Offgrid icon on your home screen</strong>
+      <span id="install-text"></span>
+      <span class="hint">The icon opens the portal when you are on the node's Wi-Fi — it is a shortcut, not an offline app.</span>
+    </div>
+    <button id="install-close" type="button" class="small" aria-label="Dismiss install hint">✕</button>
   </div>
 </div>
 <main id="dtn-app">

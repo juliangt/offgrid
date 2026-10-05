@@ -93,29 +93,34 @@ node tests/hint_rotation.mjs
 # 5. SPA layout contract: referenced assets, CSP, load order, DTN API surface
 node tests/spa_structure.mjs
 
-# 6. SPA §15 versioning policy: negotiation guard, blind v1→v2 conversion,
+# 6. PWA-lite assets (issue #29, §12.1): manifest members, relative
+#    start_url/scope, maskable icon dimensions (PNG IHDR parse), iOS meta
+#    tags, zero external URLs anywhere
+node tests/pwa_assets.mjs
+
+# 7. SPA §15 versioning policy: negotiation guard, blind v1→v2 conversion,
 #    pull-path stored versions, store migration chain
 node tests/version_migration.mjs
 
-# 7. §4.4 long-message convention: split, signed chunk metadata, reassembly
+# 8. §4.4 long-message convention: split, signed chunk metadata, reassembly
 node tests/chunking.mjs
 
-# 8. §4.5 delivery-acknowledgment convention: ack construction, TTL formula,
+# 9. §4.5 delivery-acknowledgment convention: ack construction, TTL formula,
 #    sender-side bind
 node tests/acks.mjs
 
-# 9. §4.7 identity QR: worked vector (canonical string, CRC-32, Ed25519
-#    signature), every tamper class with its reason, encoder round-trip
-#    through an independent QR decoder across versions 1-15, recipient
-#    merge (contacts ∪ directory), the §15.6 migration v5 step
+# 10. §4.7 identity QR: worked vector (canonical string, CRC-32, Ed25519
+#     signature), every tamper class with its reason, encoder round-trip
+#     through an independent QR decoder across versions 1-15, recipient
+#     merge (contacts ∪ directory), the §15.6 migration v5 step
 node tests/qr_identity.mjs
 
-# 10. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
+# 11. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
 #     and §4.7 offline contact-exchange legs included (starts/stops its own
 #     servers)
 bash tests/sync_e2e.sh
 
-# 11. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
+# 12. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
 #     assertions on the generated firewall ruleset, tc shaping stream and
 #     shield scripts (no hardware, no root)
 bash tests/hardening_structure.sh
@@ -156,43 +161,49 @@ matters):
 5. The structural test ends with:
 
    ```
-   PASS: 185 structural assertions on the SPA layout
+   PASS: 195 structural assertions on the SPA layout
    ```
 
-6. The versioning test ends with:
+6. The PWA-lite asset test (issue #29, protocol §12.1) ends with:
+
+   ```
+   PASS: 46 assertions on the §12.1 PWA-lite assets
+   ```
+
+7. The versioning test ends with:
 
    ```
    PASS: 78 assertions on the SPA §15 versioning policy (index.html script order)
    ```
 
-7. The chunking test ends with:
+8. The chunking test ends with:
 
    ```
    PASS: 62 assertions on the §4.4 chunking convention (index.html script order)
    ```
 
-8. The acks test ends with:
+9. The acks test ends with:
 
    ```
    PASS: 54 assertions on the §4.5 delivery-acknowledgment convention (index.html script order)
    ```
 
-9. The identity-QR test ends with:
+10. The identity-QR test ends with:
 
-   ```
-   PASS: 72 assertions on the §4.7 identity QR, contacts and offline exchange (index.html script order)
-   ```
+    ```
+    PASS: 72 assertions on the §4.7 identity QR, contacts and offline exchange (index.html script order)
+    ```
 
-10. The E2E script ends with:
+11. The E2E script ends with:
 
-   ```
-   e2e: summary: 321 passed, 0 failed
-   e2e: RESULT: PASS
-   ```
+    ```
+    e2e: summary: 348 passed, 0 failed
+    e2e: RESULT: PASS
+    ```
 
-   It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m), and the §4.7 identity-QR legs: a two-way OFFGRID1 payload exchange into the contacts (the directory endpoints stay EMPTY the whole time), the tampered-payload visible rejection storing nothing, the offline static-hint contact delivery in both directions and both inboxes verified.
+    It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m), the §4.7 identity-QR legs: a two-way OFFGRID1 payload exchange into the contacts (the directory endpoints stay EMPTY the whole time), the tampered-payload visible rejection storing nothing, the offline static-hint contact delivery in both directions and both inboxes verified — and the §12.1 PWA-lite legs (§15.7 o): the manifest's exact members with a relative `start_url`, the icons' PNG magic + IHDR dimensions, the portal HTML's manifest link + iOS meta tags + honest no-offline note, and zero external URLs anywhere.
 
-11. The Pi hardening test ends with 197 assertions and:
+12. The Pi hardening test ends with 197 assertions and:
 
    ```
    hardening: summary: 197 passed, 0 failed
