@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.5.0 |
+| **Version** | 1.6.0 |
 | **Date** | 2026-10-04 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -32,10 +32,10 @@ Binding design principles:
 | **Mule** | A user's mobile browser. On each portal it pushes the envelopes it carries and pulls new ones into its `transit_queue`. |
 | **Envelope** | The atomic unit of transport. One encrypted message plus routing metadata. Immutable once created. |
 | **Sender / recipient** | Two registered users. Each identity consists of an Ed25519 key pair (identity/signature), an X25519 key pair (encryption) and an alias. |
-| **Directory** | Public per-node list of registered identities: alias, Ed25519 public key, X25519 public key, `last_seen`. |
+| **Directory** | Public per-node list of registered identities: alias, Ed25519 public key, X25519 public key, `last_seen`, and the server-set hint `epoch` (§6.1, additive since 1.6.0). |
 | **`transit_queue`** | Mule-side `IndexedDB` store of foreign envelopes being carried. Capacity 100, FIFO eviction by `created_at`. |
 
-Envelope lifecycle: sender constructs → pushes to node A → any mule pulls it from node A → carries it → pushes to node B → recipient pulls it from node B, recognizes its own `dest_hint`, decrypts and verifies. **Nodes never talk to each other**; all transport between nodes is physical (mules walking).
+Envelope lifecycle: sender constructs → pushes to node A → any mule pulls it from node A → carries it → pushes to node B → recipient pulls it from node B, recognizes its own `dest_hint` among its §6.1 candidate set, decrypts and verifies. **Nodes never talk to each other**; all transport between nodes is physical (mules walking).
 
 ## 3. Envelope format (Phase 1, JSON)
 
@@ -47,7 +47,7 @@ The envelope travels as a single JSON object with **exactly** these fields:
 |---|---|---|
 | `v` | integer | MUST be `1` (format version; §15.1 defines version 2 and generalizes admission to a supported version set). |
 | `id` | string | 64 lowercase hex characters, `^[0-9a-f]{64}$`. SHA-256 of the canonical envelope subset (§6.2). Computed by the client. |
-| `dest_hint` | string | 16 lowercase hex characters, `^[0-9a-f]{16}$`. First 8 bytes of `SHA-256(recipient X25519 public key)` (§6.1). |
+| `dest_hint` | string | 16 lowercase hex characters, `^[0-9a-f]{16}$`. The recipient's rotating hint — `first 8 bytes of HKDF-SHA256(X25519 public key, epoch)` (§6.1); during the §6.1 transition window the pre-1.6 static form `first 8 bytes of SHA-256(recipient X25519 public key)` is also valid. |
 | `created_at` | integer | Unix seconds (UTC). MUST be `> 0` and MUST NOT be more than 300 s in the future at ingestion time. |
 | `ttl` | integer | Time-to-live in seconds. MUST be within `[3600, 2592000]` (1 hour to 30 days). Default 604800 (7 days). |
 | `payload` | string | Base64 (RFC 4648 standard alphabet, **with padding**). Decoded bytes: `eph_pub(32) ‖ nonce(24) ‖ box(...)`. Decoded length MUST be within `[248, 400]` bytes (derived in §8.2). |
@@ -115,7 +115,7 @@ Consequences (binding):
 
 ### 4.3 Recipient procedure
 
-1. Compare `dest_hint` with the recipient's own hint: `hex(SHA-256(own X25519 public key)[0:8])`. If different, do not attempt decryption (mule stores the envelope instead).
+1. Compare `dest_hint` with the recipient's §6.1 candidate set: `{static legacy hint, hint(E), hint(E−1)}` (after the §6.1 transition deadline the legacy candidate is dropped, leaving `{hint(E), hint(E−1)}`). If not in the set, do not attempt decryption (mule stores the envelope instead). The comparison is purely LOCAL — the node never learns which candidate (if any) matched.
 2. Split `payload` into `eph_pub(32)`, `nonce(24)`, `box(rest)`.
 3. `inner_bytes = crypto_box.open(box, nonce, eph_pub, own_X25519_secret)`. Any failure → **discard silently** (never surface errors that could leak information).
 4. Parse `inner_json`; validate `m` ≤ 128 bytes, `a` matches the alias regex, `k`/`s` are valid Base64 lengths (44/88 chars). A chunked inner additionally carries `w`, `g`, `i`, `n` and is validated per §4.4 (exact member set, `w` = `"chunk1"`, `g` = Base64 of 16 bytes, `0 ≤ i < n ≤ 16`). An ack inner additionally carries `w`, `r`, `y` and is validated per §4.5 (exact member set, `w` = `"ack1"`, `r` = 64-hex envelope id, `y` = 1, `m` = "").
@@ -271,21 +271,70 @@ Note the order is *not* alphabetical (`created_at` < `dest_hint` lexicographical
 
 ## 6. Key derivations
 
-### 6.1 `dest_hint`
+### 6.1 `dest_hint` — rotating derivation (issue #26, binding since 1.6.0)
+
+Purpose (unchanged): (a) the recipient/mule identifies its own envelopes without decrypting; (b) the node can store and serve envelopes blindly (`WHERE dest_hint = ?`); (c) dedup and cleanup on the node.
+
+**Legacy derivation (pre-1.6, retired at the transition deadline).** Version 1.0–1.5 builds addressed every envelope with a STATIC hint derived from the key alone:
 
 ```
-dest_hint = lowercase_hex( SHA-256( recipient X25519 public key, raw 32 bytes )[0:8] )
+dest_hint_legacy = lowercase_hex( SHA-256( recipient X25519 public key, raw 32 bytes )[0:8] )
 ```
 
-Exactly the **first 8 bytes** of the SHA-256 digest, encoded as 16 lowercase hex characters. Purpose: (a) the recipient/mule identifies its own envelopes without decrypting; (b) the node can store and serve envelopes blindly (`WHERE dest_hint = ?`); (c) dedup and cleanup on the node.
+Because the same node serves the public directory, any directory-holding operator could recompute every user's static hint forever and link stored envelopes to aliases (the §13.3 accepted risk). 1.6.0 replaces addressing with a time-bounded derivation; the legacy form survives only as a recognition candidate during the transition window below.
 
-**Test vector 1** — X25519 public key of RFC 7748 §6.1 ("Alice"):
+**Rotating derivation (binding for senders since 1.6.0).**
+
+```
+E                 = floor( unix_seconds / 86400 )                     — the hint EPOCH (24 h, UTC)
+salt(E)           = E as 8-byte big-endian unsigned integer
+OKM               = HKDF-SHA256( ikm  = recipient X25519 public key, raw 32 bytes
+                                 salt = salt(E)
+                                 info = "offgrid-dest-hint"
+                                 L    = 32 )                          — RFC 5869, extract-then-expand
+dest_hint(E)      = lowercase_hex( OKM[0:8] )                        — 16 lowercase hex chars
+```
+
+HKDF-SHA256 is implemented exactly per RFC 5869 on top of the same embedded SHA-256 as every other §6 derivation (no new vendored library; L = 32 is a single expansion block). `hint(E)` and `hint(E′)` for E ≠ E′ are computationally independent, so an operator who knows a user's key can only derive the hints of epochs it knows — linkability decays with epoch rotation (§13.3). The envelope format is untouched: `dest_hint` keeps its name, encoding and `^[0-9a-f]{16}$` admission regex, and the node NEVER validates a hint against the key it addresses (it cannot — it does not know under which epoch a hint was derived). §14.1 stability rule 5 applies to this derivation as it does to the static one.
+
+**Epoch sources (binding; nodes have no NTP — the NODE's clock is the shared reference).**
+
+- **Sender:** the EPOCH MEMBER OF THE DIRECTORY ENTRY it is sending to (§10.3 — the server sets `epoch = floor(now / 86400)` at every upsert). Per-entry is the freshest server-side truth about that recipient; the sender MUST NOT substitute its own clock. A sender whose directory cannot be read (offline-cold) or whose entry predates 1.6 (`epoch` absent, or the migrated `0`) falls back to the legacy static hint — exactly what pre-1.6 senders emit.
+- **Recipient:** recognizes the candidate set `{static legacy hint, hint(E), hint(E−1)}`, where E = the highest epoch the client has observed from NODE data this session (any directory entry's `epoch`, or the capabilities document's `hint_epoch_current`, §15.5), falling back to the device clock when offline-cold. Recognition is purely local; no node or mule learns which candidate matched. After the transition deadline the legacy candidate is dropped from the set (below).
+- **Consequence (documented honestly):** an envelope is deliverable while it is at most one epoch older than the recipient's freshest observation. Mail in transit across exactly one epoch boundary arrives; mail that sits in a store for more than two epochs without the recipient syncing is silently unrecognizable when they finally do — the privacy/availability trade the rotation buys (residence in that tail is bounded by TTL, §10.6).
+
+**Transition window (legacy compatibility, normative).** Old senders (pre-1.6 SPA builds, e.g. a stale cached copy) still address with the §6.1 static hint, and every 1.6+ recipient therefore keeps the static hint in its candidate set until a fixed spec deadline:
+
+```
+HINT_TRANSITION_DEADLINE = 1795996800   (= 2026-11-30T00:00:00Z, ≈ TTL_MAX after fleet rollout)
+```
+
+The static hint stays in the candidate set exactly while `now < HINT_TRANSITION_DEADLINE`; from that instant on (inclusive) new SPA builds STOP recognizing the static hint: mail from a pre-1.6 sender to a 1.6+ recipient sent at or after the deadline silently fails to arrive. This is the documented, accepted cost — a stale SPA refreshes its code from any node it visits (§15.6: same origin, embedded SPA), so the practical exposure is days, not the window's length. The deadline is a named constant in the client engine and MUST NOT be recomputed from any clock.
+
+**Anti-abuse interplay (unchanged, stated explicitly).** Rotating hints do not change any §8.1/§10.1 cap: a push with an arbitrary `dest_hint` is already bounded by the per-IP request and pushed-envelope budgets and the 5000-envelope store cap; admission still accepts every well-formed `^[0-9a-f]{16}$` hint regardless of any key or epoch relationship (§10.5 — the node stays blind, §13).
+
+**Test vector 1 (legacy static form)** — X25519 public key of RFC 7748 §6.1 ("Alice"); pins the pre-1.6 derivation that remains a recognition candidate during the window:
 
 | Item | Value |
 |---|---|
 | X25519 public key (raw 32 B, hex) | `8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a` |
 | SHA-256 (full digest) | `300c9c9603b92a4b39ed3958bf9240114804db4fd373012c0ca47432d63425ae` |
-| `dest_hint` (first 8 bytes) | `300c9c9603b92a4b` |
+| `dest_hint_legacy` (first 8 bytes) | `300c9c9603b92a4b` |
+
+**Test vector 2 (rotating, worked end to end)** — same key, epoch `20730` (the epoch containing 2026-10-04, the date of this revision):
+
+| Item | Value |
+|---|---|
+| X25519 public key (raw 32 B, hex) — the HKDF `ikm` | `8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a` |
+| Epoch `E` | `20730` |
+| `salt` (E as 8-byte big-endian, hex) | `00000000000050fa` |
+| `info` (UTF-8 bytes) | `"offgrid-dest-hint"` |
+| PRK = HMAC-SHA256(salt, ikm) | `0800cfc9f40483614fa9b330f76bbd9ce148db549d46ffe62a01ef6fb7e491d3` |
+| OKM (L = 32) | `cdfbc410643a67f1bec3c873d4deb87e9b314e8a76136285bde522eb7ff4925e` |
+| `dest_hint(E = 20730)` (OKM[0:8]) | `cdfbc410643a67f1` |
+| `dest_hint(E − 1 = 20729)` (same recipe, salt `00000000000050f9`) | `5459d1d4328608b5` |
+
+Conformance implementations MUST reproduce both vectors. The RFC 5869 §Appendix A test cases (at minimum Case 1: `ikm` = 0x0b×22) additionally pin the HKDF primitive itself in the test suite (tests/hint_rotation.mjs).
 
 ### 6.2 Envelope `id`
 
@@ -295,7 +344,7 @@ id = lowercase_hex( SHA-256( hashed byte string of §5.2 ) )   → 64 hex chars
 
 The **client** computes `id`. The **server treats `id` as an opaque deduplication key**: it performs `INSERT OR IGNORE` on it and MUST NOT reject an envelope whose `id` does not match a recomputed hash (recomputation as extra hardening is permitted but MUST NOT be required for interop).
 
-**Test vector 2** — envelope of §3.2:
+**Test vector 3** — envelope of §3.2:
 
 | Item | Value |
 |---|---|
@@ -311,7 +360,8 @@ The **client** computes `id`. The **server treats `id` as an opaque deduplicatio
 | Confidentiality | X25519 ECDH + XSalsa20-Poly1305 AEAD | `nacl.box` / `nacl.box.open` |
 | Ephemeral key pair (one per message) | X25519 | `nacl.box.keyPair()` |
 | Identity / signature | Ed25519 | `nacl.sign.keyPair()`, `nacl.sign.detached`, `nacl.sign.detached.verify` |
-| Hash derivations (`id`, `dest_hint`) | SHA-256 | any constant-time-independent SHA-256 (WebCrypto `digest` is acceptable for hashing only) |
+| Hash derivations (`id`, legacy `dest_hint`) | SHA-256 | any constant-time-independent SHA-256 (WebCrypto `digest` is acceptable for hashing only) |
+| Rotating `dest_hint` derivation (§6.1, 1.6.0) | HKDF-SHA256 (RFC 5869) over the same embedded SHA-256 | none (tweetnacl has no HKDF): a small client-side construction on the vendored hash — extract then expand, no new vendored library |
 
 **Binding decision (Phase 1): tweetnacl.js is embedded inline in `index.html`** (~25 KB minified), as the single crypto code path. Native `crypto.subtle` is NOT used for X25519/Ed25519 because its availability and behavior are irregular in mobile browsers and worse in captive-portal mini-browsers (Android Captive Portal WebView, iOS CNA). There are no external assets, CDNs, or `eval`.
 
@@ -386,7 +436,8 @@ CREATE TABLE directory (
   pubkey    TEXT PRIMARY KEY,      -- ed25519 public key, Base64 (identity)
   x25519    TEXT NOT NULL,         -- X25519 public key, Base64 (encryption)
   alias     TEXT NOT NULL,
-  last_seen INTEGER NOT NULL       -- unix seconds, set by the node on upsert
+  last_seen INTEGER NOT NULL,      -- unix seconds, set by the node on upsert
+  epoch     INTEGER NOT NULL DEFAULT 0 -- server-set hint epoch, floor(last_seen / 86400) (§6.1)
 );
 ```
 
@@ -396,9 +447,9 @@ Pragmas and connection policy (binding):
 - `PRAGMA busy_timeout = 5000;` — milliseconds.
 - **Single connection** (`SetMaxOpenConns(1)`): serializes all access; trivial load for a Zero 2 W; avoids SQLite write contention entirely.
 
-`directory` rows are never auto-deleted in Phase 1; the 500-entry cap is applied at query time (§10.3).
+`directory` rows are never auto-deleted in Phase 1; the 500-entry cap is applied at query time (§10.3). The `epoch` column is set exclusively by the node at upsert (`floor(now / 86400)`, §6.1) — the POST body shape carries no epoch and clients cannot influence it.
 
-**Storage versioning (§15).** The schema above is storage schema **version 1** (no marker: `PRAGMA user_version` = 0; every row is v1 by definition, because those builds admitted `v == 1` exclusively). §15.3 defines the explicit `user_version` marker, the forward-only migration chain (schema version 2 adds `envelopes.v`) and the downgrade-refusal rollback contract.
+**Storage versioning (§15).** The schema above is storage schema **version 3**. §15.3 defines the explicit `user_version` marker, the forward-only migration chain (schema version 2 adds `envelopes.v`; version 3 adds `directory.epoch` backfilled `0`) and the downgrade-refusal rollback contract.
 
 ## 10. Node HTTP API
 
@@ -433,10 +484,10 @@ This covers direct IP access (`10.42.0.1:8080`), any spoofed domain resolved by 
 | `GET /` | Serve the embedded `index.html` (`embed.FS`). Non-canonical Host → `301` first (§10.2). |
 | `GET /generate_204` | `302 → http://offgrid.local:8080/` (Android probe). Never `204`. |
 | `GET /hotspot-detect.html` | `302 → http://offgrid.local:8080/` (iOS probe). |
-| `GET /api/v1/directory` | `200` with a JSON array of at most 500 objects `{"alias","pubkey","x25519","last_seen"}`, ordered by `last_seen DESC` (deterministic tie-break: `pubkey ASC`). |
-| `POST /api/v1/directory` | Body `{"alias","pubkey","x25519"}`. Validate alias regex and that both keys are Base64 decoding to exactly 32 bytes. Upsert keyed by `pubkey`; set `last_seen = now`. → `200 {"status":"ok"}`. Invalid → `400`. |
+| `GET /api/v1/directory` | `200` with a JSON array of at most 500 objects `{"alias","pubkey","x25519","last_seen","epoch"}`, ordered by `last_seen DESC` (deterministic tie-break: `pubkey ASC`). `epoch` is additive since 1.6.0 (§15.4): the server-set §6.1 hint epoch of the entry's last upsert; older clients ignore it. |
+| `POST /api/v1/directory` | Body `{"alias","pubkey","x25519"}` (unchanged since pre-1.6 — no epoch field: the node sets it server-side, §6.1). Validate alias regex and that both keys are Base64 decoding to exactly 32 bytes. Upsert keyed by `pubkey`; set `last_seen = now` and `epoch = floor(now / 86400)`. → `200 {"status":"ok"}`. Invalid → `400`. |
 | `POST /api/v1/sync` | See §10.4. |
-| `GET /api/v1/capabilities` | `200` with the version-advertisement document (§15.5): API generation, supported envelope-version set, storage schema version, build identifier. |
+| `GET /api/v1/capabilities` | `200` with the version-advertisement document (§15.5): API generation, supported envelope-version set, storage schema version, build identifier, plus the additive §6.1 members `hint_epoch_seconds` and `hint_epoch_current`. |
 | `GET /api/v1/health` | `200` with the health snapshot document (§10.7): build identity, uptime, aggregate store figures and RAM-only counters. Budgeted and cached (§10.1, §10.7). |
 | `GET /status` | The operator status view (§10.7): a server-rendered HTML page built from the same cached snapshot as `/api/v1/health`, requiring no JavaScript. Not linked from the portal (§10.7). |
 
@@ -500,7 +551,7 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
   "api": "v1",
   "build": "<node build identifier>",
   "envelope_versions": [1, 2],
-  "schema_version": 2,
+  "schema_version": 3,
   "uptime_seconds": 1234,
   "envelopes": 87,
   "envelope_capacity": 5000,
@@ -548,9 +599,10 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
 
 - **Registration (once):** alias input (validated client-side against the alias regex) → generate Ed25519 + X25519 key pairs → publish `{"alias","pubkey","x25519"}` to `POST /api/v1/directory`. Private keys stay in `IndexedDB` (`identity` store). Manual seed backup (copyable text) and import MUST be offered to survive browser data wipes.
 - **Composition:** recipient picked from the directory; text area with a visible **128-byte UTF-8 byte counter** (per envelope — a longer text is split into chunk envelopes per §4.4, with the envelope count previewed before sending and a warning when it would occupy a large share of a mule queue); send builds the envelope(s) exactly per §4.2/§4.4/§5/§6 and puts every emitted envelope id in `known_ids`. A per-identity, local-only delivery-feedback opt-in (default ON) gates the §4.5 behavior on both sides: emitting acks for received messages, and the composer's per-send choice to keep a local `sent` record (state `queued` → `sent` → `delivered`, honest wording — only a verified §4.5 ack says *delivered*; the record and the ack mapping live only in this device's store).
-- **Sync:** automatic on page load plus a manual button. Push the whole `transit_queue` and `known_ids` (union of inbox ids ∪ transit ids ∪ previously seen/dismissed ids ∪ ids just pushed), with `limit` = 50. Classify `pull_envelopes`:
-  - `dest_hint == own hint` → attempt decrypt + verify (§4.3); success → `inbox` — for a chunked inner (§4.4), merge into the reassembly state keyed by `g`: the message renders when all `n` chunks arrived, partials render as "message i+1/N — still traveling" and expire with the chunks' shared TTL (passive sweep on sync/load); for an ack inner (§4.5), bind it against the local `sent` record (signature key = the recorded recipient key, §4.5) and flip the matched message's state to `delivered` — an ack is recorded, never answered, and never lands in the inbox; failure → discard silently.
+- **Sync:** automatic on page load plus a manual button. Push the whole `transit_queue` and `known_ids` (union of inbox ids ∪ transit ids ∪ previously seen/dismissed ids ∪ ids just pushed), with `limit` = 50. Classify `pull_envelopes` against the §6.1 candidate set `{static legacy hint (before the transition deadline), hint(E), hint(E−1)}` — E = the highest epoch observed from node data this session (capabilities `hint_epoch_current`, directory entry epochs), device clock when offline-cold:
+  - `dest_hint` in the candidate set → attempt decrypt + verify (§4.3); success → `inbox` — for a chunked inner (§4.4), merge into the reassembly state keyed by `g`: the message renders when all `n` chunks arrived, partials render as "message i+1/N — still traveling" and expire with the chunks' shared TTL (passive sweep on sync/load); for an ack inner (§4.5), bind it against the local `sent` record (signature key = the recorded recipient key, §4.5) and flip the matched message's state to `delivered` — an ack is recorded, never answered, and never lands in the inbox; failure → discard silently.
   - otherwise → `transit_queue`; if it would exceed **100** envelopes, evict oldest by `created_at` (FIFO).
+- **Addressing (§6.1, since 1.6.0):** the composer derives the recipient's hint from the directory ENTRY's server-set `epoch` — `dest_hint(E)` with E = `entry.epoch` — never from the device clock; an entry without an epoch (pre-1.6 node, or a migrated `0`) falls back to the legacy static hint. Acks (§4.5) are addressed the same way, from the sender's entry in the directory being read.
 - **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, sent list with the per-message §4.5 delivery states, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL) — see §13.4.
 - **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number. Store upgrades MUST be implemented as the explicit, ordered, additive-only, idempotent migrations chain formalized in §15.6 (the `onupgradeneeded` scaffold of `node/web/js/store.js`; chain: v2 adds `inbox_parts` for §4.4 partials, v3 adds `sent` for §4.5 sent-state records keyed by the ack reference id).
 
@@ -575,19 +627,28 @@ Zero-trust intermediaries: **nodes and mules are blind, untrusted channels.** Th
 | Party | Can see | Cannot see |
 |---|---|---|
 | **Node** | `v`, `meta` (§15.2, when present), `id`, `dest_hint`, `created_at`, `ttl`, opaque `payload`, source IP, timing/volume metadata, full directory (aliases + public keys) | Message content; sender alias and Ed25519 key (inside ciphertext); recipient identity beyond the 8-byte hint; cannot alter envelopes (Poly1305 MAC); cannot forge signatures |
-| **Mule** | Same envelope metadata as the node; can identify **its own** envelopes by comparing `dest_hint` with its own hint | Content of foreign envelopes; who else is a mule for the same envelope |
+| **Mule** | Same envelope metadata as the node; can identify **its own** envelopes by comparing `dest_hint` with its §6.1 candidate set (§11) | Content of foreign envelopes; who else is a mule for the same envelope |
 | **Network observer (open Wi-Fi)** | Same metadata as the node (plaintext HTTP) | Anything inside `payload` |
 | **Recipient** | Everything, after decryption + signature verification | — |
 
 The sender is anonymous to nodes and mules because the Ed25519 signature and alias travel **inside** the ciphertext (sign-then-encrypt, §4.2).
 
-### 13.3 Documented limitation: `dest_hint` linkability — ACCEPTED RISK (Phase 1)
+### 13.3 `dest_hint` linkability — MITIGATED by rotation since 1.6.0 (issue #26), residual within one epoch
 
-Because the same node serves the **public directory** (aliases + public keys), a malicious node operator **can recompute every registered user's `dest_hint`** (`first 8 bytes of SHA-256(X25519 pubkey)`) and thereby link stored/served envelopes to aliases, and observe who picks up whom.
+**The hole (pre-1.6, historical record).** Because the same node serves the **public directory** (aliases + public keys) and the pre-1.6 `dest_hint` was STATIC (`first 8 bytes of SHA-256(X25519 pubkey)`, former §6.1), a malicious node operator could recompute every registered user's hint once and forever, link every stored or served envelope to its alias, and observe who picks up whom. That was documented as an ACCEPTED RISK for Phase 1 (operators assumed passive-curious); this subsection records its closure.
 
-This is an explicitly **ACCEPTED RISK for Phase 1**: node operators are assumed *passive-curious* (they may look), not *active adversaries* (they do not attack users). Hiding this limitation would be an engineering error; it is documented here as the normative record.
+**The fix (normative since 1.6.0).** Envelope addressing now uses the rotating derivation of §6.1: `hint(E) = first 8 bytes of HKDF-SHA256(ikm = X25519 public key, salt = epoch, info = "offgrid-dest-hint", L = 32)`, with E the server-set epoch of the directory entry on send. Senders derive the hint from directory data (the directory publishes the current epoch alongside the keys, §10.3) and recipients recognize a two-epoch candidate set {hint(E), hint(E−1)} locally (§11) — fully compatible with blindness: the node never learns anything new, hints still look random, admission still accepts any well-formed 16-hex hint, and the node cannot tell which epoch (or derivation) a given hint came from.
 
-**Phase 2 roadmap mitigation (design anchor, non-normative in Phase 1):** rotating hints — `hint_epoch = first 8 bytes of HKDF-SHA256(ikm = X25519 public key, salt = epoch_number, info = "offgrid-dest-hint")`. Senders embed the hint for the current epoch; nodes accept a bounded window of epochs; hint↔alias linkability then decays with epoch rotation. This changes only the hint derivation, not the envelope structure (§14.1).
+**What the mitigation buys (binding statement).** A node operator who recomputes hint(E) for every directory user can match stored envelopes to aliases ONLY for the CURRENT epoch E. At every epoch boundary the operator's precomputed table goes stale: envelopes deposited in earlier epochs (still within their TTL) can no longer be attributed to an alias by recomputation. Linkability now DECAYS with epoch rotation instead of being permanent.
+
+**Residual risks, stated honestly (accepted):**
+
+1. **Within-epoch linking.** For any envelope deposited during the current epoch, the operator's fresh recomputation from directory data still links it to the alias — exactly as before, but now the linkage expires at the next boundary instead of persisting. A user who registers and receives within one epoch, and whose operator keeps records, gains nothing from rotation for that epoch's mail.
+2. **The operator sees the directory epochs.** `epoch` is public per entry (it must be, that is the mechanism). The operator can therefore derive each user's hint(E) and hint(E−1) — the same set the recipient itself tries. Rotation does not hide WHICH epochs are live; it only bounds how long a precomputed hint table stays valid.
+3. **The transition window re-introduces the static hint.** Until HINT_TRANSITION_DEADLINE (§6.1, 2026-11-30T00:00:00Z) the legacy static hint remains a recognition candidate, so envelopes addressed by pre-1.6 senders remain permanently linkable for their TTL, as before. After the deadline the static candidate is dropped and pre-1.6 senders' mail no longer arrives (§6.1) — their SPA refreshes from any visited node, so the practical exposure is days.
+4. **Timing/volume correlation is untouched.** An operator watching pickups live (pull source, timing, volume per hint) can correlate across epochs by observation rather than derivation; §13.5's traffic-analysis acceptance covers that side and rotation does not change it.
+
+Reference: the mitigation THIS section describes is normative — §6.1 (derivation, epochs, window), §10.3 (directory epoch), §10.5/§8.1 (unchanged blind admission and caps), §11 (candidate-set recognition), §15.5 (capabilities advertisement), §15.7 g–i (conformance coverage).
 
 ### 13.4 Captive-portal mini-browser storage isolation (risk + mitigation)
 
@@ -598,7 +659,7 @@ When Android/iOS detect the captive portal they open a **restricted mini-browser
 ### 13.5 Residual risks (documented, accepted for Phase 1)
 
 - **Replay:** a node can re-serve an old (unexpired) envelope to a mule. Harmless: mules and recipients dedup by `id`, and the MAC prevents modification.
-- **Traffic analysis:** timing and volume correlation by nodes (per-alias linkability is §13.3). Accepted.
+- **Traffic analysis:** timing and volume correlation by nodes (per-alias linkability is §13.3 — mitigated by §6.1 rotation, residual within one epoch). Accepted.
 - **Directory spam / flooding:** the open AP allows anonymous directory writes; mitigated by the 500-entry GET cap, alias sanitization, per-request limits (§8.1), the 15-minute cleanup and TTL caps; further hardening in Sprint 4.
 - **Identity loss:** browser data wipe destroys the identity unless the seed was backed up (§11).
 
@@ -614,7 +675,7 @@ When Android/iOS detect the captive portal they open a **restricted mini-browser
 | DNS tunneling / query flooding | Per-source hashlimit + sustained-rate shed of the resolver (`docs/hardening.md` §2) | The resolver has no upstream and its entire answer surface is "portal IP" (§12); every envelope's residence is bounded by `ttl` (§3.1). |
 | Store flooding | Per-IP envelope budget → `429 rate_limited`; 5000-envelope cap → `429 node_full` (`docs/hardening.md` §3) | §8.1 cap with reject-newest/keep-oldest: nothing is ever evicted except by the TTL janitor (§10.6); dedup by `id` (§6.2) absorbs re-pushed floods. |
 | Sync storms / connection floods | Per-IP POST budget with `Retry-After` checked before the body is read; firewall SYN hashlimit + per-source connlimit (`docs/hardening.md` §2–§3) | Fail-closed whole-request validation (§10.4 step 1); per-request byte ceilings (§8.1); the node is blind, so a request's worst-case cost is bounded and known. |
-| Evil twin AP | None at the network level — no deployable network defense exists on an open SSID | Client-side crypto bounds the exposure: payloads are unreadable and unforgeable without the recipient key (§13.1, §4.2); replays are absorbed by `id` dedup (§13.5); `dest_hint` linkability is the accepted risk of §13.3. |
+| Evil twin AP | None at the network level — no deployable network defense exists on an open SSID | Client-side crypto bounds the exposure: payloads are unreadable and unforgeable without the recipient key (§13.1, §4.2); replays are absorbed by `id` dedup (§13.5); `dest_hint` linkability is the mitigated, residual-risk record of §13.3. |
 | Physical / power interference | Component watchdogs, `Restart=always`, the read-only-root option, and the release-kit reflash path (`docs/hardening.md` §4; `docs/RUNBOOK.md` §4) | The storage contract: WAL atomicity (§9); a corrupt database is quarantined or startup refuses loudly — never a half-broken serve (`docs/hardening.md` §7); loss is bounded to un-checkpointed writes. |
 | Station saturation (association exhaustion, airtime hogging) | Association ceiling, CAKE per-host airtime fairness, per-association byte quota (`docs/hardening.md` §2) | §8.1 per-request and per-node limits bound what any single admitted request can cost the node. |
 
@@ -628,7 +689,7 @@ The common thread: the normative guarantees are all *blind* — caps, budgets, d
 2. **Sign-then-encrypt is invariant:** the signature and alias always travel inside the ciphertext on every transport.
 3. **Encodings are transport-tier:** Phase 1 JSON uses hex/Base64 *text*; binary phases (Phase 2/3) use *raw bytes* in CBOR. Conversions are lossless decodings of the text forms.
 4. **`hop_count` is a reserved field:** semantics = times the envelope has been relayed peer-to-peer, `0..7`; a relay drops envelopes at 7. In Phase 1 JSON the field is always **absent** (absent = 0). It never appears in Phase 1 code paths.
-5. **`dest_hint` derivation is stable** through Phase 3; the rotating-hint scheme (§13.3) is a Phase 2 privacy upgrade that only swaps the derivation function.
+5. **`dest_hint` derivation is stable** through Phase 3. The rotating-hint scheme (§6.1) — originally sketched as a Phase 2 privacy upgrade — shipped as the normative Phase 1 derivation in 1.6.0; only the derivation function changed (the envelope format did not, §14.1 rule 1), and the rotating derivation is now itself frozen: later phases swap it only via a new breaking-bump generation per §15.2.
 
 ### 14.2 Phase 2 — BLE L2CAP CoC (bitchat alignment)
 
@@ -767,6 +828,7 @@ A release that introduces envelope version N MUST state explicitly (a) whether t
 |---|---|
 | 1 | The §9 schema as originally deployed. No marker (`user_version` = 0); all rows are v1 by definition, because those builds admitted `v == 1` exclusively. |
 | 2 | The §9 schema plus column `envelopes.v INTEGER NOT NULL DEFAULT 1`, backfilled to `1` at migration (historically correct: every pre-existing row predates v2). The column is the **authoritative stored version** of each envelope from then on. |
+| 3 | The §9 schema plus column `directory.epoch INTEGER NOT NULL DEFAULT 0` (§6.1, issue #26) — the server-set hint epoch the directory publishes, backfilled to `0` at migration. `0` (epoch-zero, 1970) is deliberately stale: an unrefreshed entry makes senders fall back to the legacy static hint until its owner re-publishes (§6.1). Purely additive: no envelope column, row or payload byte is touched. |
 
 **Migration rules (binding).** On open, if `user_version` is lower than the build's supported schema version, the daemon MUST apply the migration chain **sequentially**, each step inside a **single transaction**, and then set `user_version` to the build's schema version. Migrations MUST be transactional (idempotent-safe under crash: a crash mid-chain leaves the database at a consistent prefix of the chain, and a re-run resumes from `user_version`) and MUST NOT rewrite or re-encode stored envelope `payload` bytes. The chain is **forward-only**: schema version N+1 is defined as a delta from N only. (This mirrors the SPA's IndexedDB `onupgradeneeded` chain, §15.6.)
 
@@ -788,8 +850,10 @@ New read-only endpoint (§10.3): `GET /api/v1/capabilities` → `200` with the v
   "envelope_versions": [1, 2],
   "min_envelope_version": 1,
   "max_envelope_version": 2,
-  "schema_version": 2,
-  "build": "<node build identifier>"
+  "schema_version": 3,
+  "build": "<node build identifier>",
+  "hint_epoch_seconds": 86400,
+  "hint_epoch_current": 20730
 }
 ```
 
@@ -801,8 +865,10 @@ New read-only endpoint (§10.3): `GET /api/v1/capabilities` → `200` with the v
 | `max_envelope_version` | integer | Last element of `envelope_versions`; the **negotiation ceiling** clients act on (§15.6). |
 | `schema_version` | integer | The node storage schema version (§15.3). |
 | `build` | string | Node build identifier; non-empty, free-form (version or VCS string). |
+| `hint_epoch_seconds` | integer | **Additive since 1.6.0 (§15.4, issue #26).** The §6.1 epoch length in seconds (86400). A pre-1.6 node omits it; clients MUST treat absence as "this node does not publish hint epochs" and fall back to the legacy static hint (§6.1). |
+| `hint_epoch_current` | integer | **Additive since 1.6.0 (§15.4, issue #26).** The node's current hint epoch, `floor(node now / hint_epoch_seconds)` — the same server clock that stamps directory entries (§10.3). Recipients use it (with directory entry epochs) as the freshest observation for the §6.1 candidate set; senders prefer the per-entry epoch. |
 
-The exact member set on builds implementing this section is the six above; new members MAY be added additively (§15.4) and MUST be ignored by clients. The three derived members MUST stay consistent with `envelope_versions` (min = first, max = last).
+The exact member set on builds implementing this section is the eight above; new members MAY be added additively (§15.4) and MUST be ignored by clients. The three derived members MUST stay consistent with `envelope_versions` (min = first, max = last). The two §6.1 members MUST stay consistent with the directory's server-set epochs by construction (both derive from the node clock).
 
 **Negotiation policy (binding).** A client MUST NOT push an envelope whose `v` is greater than the node's advertised `max_envelope_version`. If capabilities cannot be obtained (endpoint absent on an older node → `404`, or any transport failure), the client MUST fall back to pushing the original, unconverted form (§15.6).
 
@@ -830,14 +896,19 @@ A build claiming conformance to this section MUST be covered by tests for each o
 | d | **Conversion fidelity:** v1→v2 conversion preserves `id`, `ttl`, `created_at`, `dest_hint` and `payload` bit-for-bit and sets `meta.orig_v = 1` (§15.1). |
 | e | **TTL is not refreshed by conversion:** an envelope keeps its original `created_at`/`ttl` deadline after conversion (§15.1). |
 | f | **Negotiation guard:** when the node advertises `max_envelope_version < 2` (or capabilities are unobtainable), the mule MUST NOT convert and pushes the original, unconverted form (§15.5, §15.6). |
+| g | **Hint rotation at the epoch boundary with in-flight delivery (§6.1):** an envelope addressed with `dest_hint(E)` is still classified as the recipient's own and delivered after the recipient's observed epoch advances to E+1 (the candidate set covers exactly one boundary crossing); HKDF-SHA256 is pinned against the RFC 5869 test cases and the §6.1 worked vectors. |
+| h | **Legacy candidate recognition (§6.1 transition window):** before `HINT_TRANSITION_DEADLINE` the recipient's candidate set includes the static legacy hint, so a pre-1.6-addressed envelope is delivered like any other; the directory GET exposes `epoch` and the capabilities document the two additive members. |
+| i | **Candidate-set drop after the transition deadline (§6.1):** at any clock past `HINT_TRANSITION_DEADLINE` the static legacy hint leaves the candidate set — a legacy-addressed envelope is no longer recognized (stored as foreign cargo, never decrypted); the rotating candidates are unaffected. |
 
 ## 16. Conformance checklist
 
-**Module B (node daemon) MUST:** implement the schema and pragmas of §9; the nine endpoints with the exact status codes, limits and redirect/exemption behavior of §10 (including the diagnostics surface of §10.7: the health snapshot and the operator status view, aggregate-only, with RAM-only counters, the 1-second snapshot cache and the per-IP diagnostics budget); envelope validation of §10.5; the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
+**Module B (node daemon) MUST:** implement the schema and pragmas of §9 (storage schema version 3, including the §6.1 `directory.epoch` column set server-side at upsert); the nine endpoints with the exact status codes, limits and redirect/exemption behavior of §10 (including the diagnostics surface of §10.7: the health snapshot and the operator status view, aggregate-only, with RAM-only counters, the 1-second snapshot cache and the per-IP diagnostics budget); envelope validation of §10.5 (blind: no hint-vs-key or hint-vs-epoch validation, ever); the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement including the additive §6.1 members); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
 
-**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the §4.4 long-message convention (split long texts on code-point boundaries within the per-sender budget, sign the `w`/`g`/`i`/`n` metadata, enforce the n ≤ 16 cap with a pre-send envelope-count preview, reassemble by group id `g` out-of-order and duplicate-tolerantly, render partials as "still traveling" and expire them with the chunks' shared TTL via passive sweeps, additive store migrations for the partial state); implement the §4.5 delivery-acknowledgment convention (emit at most one signed `"ack1"` ack per delivered message — flat on verified receipt, chunked exactly at reassembly completion, referencing the agreed envelope id; never ack an ack; apply the TTL formula with the ack's own `created_at`; bind every received ack to the recorded recipient key before flipping a sent record's state, silently ignoring mismatches; keep the sent history and the opt-in local-only); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
+**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6 — the §6.1 rotating derivation for the EPOCH OF THE DIRECTORY ENTRY on send, the static legacy form only as a pre-1.6/degraded fallback, and HKDF-SHA256 exactly per RFC 5869 on the vendored SHA-256; recognize its own mail by the §6.1 candidate set {legacy (before the deadline), hint(E), hint(E−1)} with E the highest server-observed epoch, dropping the legacy candidate from clock `HINT_TRANSITION_DEADLINE` on; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the §4.4 long-message convention (split long texts on code-point boundaries within the per-sender budget, sign the `w`/`g`/`i`/`n` metadata, enforce the n ≤ 16 cap with a pre-send envelope-count preview, reassemble by group id `g` out-of-order and duplicate-tolerantly, render partials as "still traveling" and expire them with the chunks' shared TTL via passive sweeps, additive store migrations for the partial state); implement the §4.5 delivery-acknowledgment convention (emit at most one signed `"ack1"` ack per delivered message — flat on verified receipt, chunked exactly at reassembly completion, referencing the agreed envelope id; never ack an ack; apply the TTL formula with the ack's own `created_at`; bind every received ack to the recorded recipient key before flipping a sent record's state, silently ignoring mismatches; keep the sent history and the opt-in local-only); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
 
 ## Changelog
+
+- **1.6.0 (2026-10-04, issue #26 — rotating `dest_hint`):** replaced the static `dest_hint` addressing (first 8 bytes of `SHA-256(X25519 pubkey)` — permanently linkable by any directory-holding node operator, the former §13.3 accepted risk) with a time-bounded derivation: `dest_hint(E) = lowercase_hex(HKDF-SHA256(ikm = X25519 public key (raw 32 B), salt = E as 8-byte big-endian, info = "offgrid-dest-hint", L = 32)[0:8])`, with E = `floor(unix_seconds / 86400)` a 24-hour UTC epoch defined on the NODE's clock (nodes have no NTP; the node is the shared reference). Senders derive the hint from the directory ENTRY's server-set `epoch` (per-entry = freshest truth); recipients recognize the candidate set {static legacy hint, hint(E), hint(E−1)} locally — E the highest epoch observed from node data (capabilities/directory), device clock offline-cold — so exactly one epoch boundary is crossed without message loss. Transition window: the legacy static hint stays a recognition candidate until the fixed spec deadline `HINT_TRANSITION_DEADLINE = 1795996800` (2026-11-30T00:00:00Z, ≈ TTL_MAX after rollout), after which new builds stop recognizing it and pre-1.6 senders' mail no longer arrives (documented honestly; their SPA refreshes from any visited node, so the practical exposure is days). Node changes are additive and blindness-preserving: storage schema VERSION 3 (`PRAGMA user_version`, forward-only migration step 2→3 adds `directory.epoch INTEGER NOT NULL DEFAULT 0` — backfilled 0 is deliberately stale, meaning "legacy addressing" until re-publication; the §15.3 chain, downgrade refusal and the no-payload-rewrite rule unchanged), the directory upsert stamps `last_seen = now` AND `epoch = floor(now / 86400)` server-side (POST body shape unchanged — clients cannot influence the epoch), `GET /api/v1/directory` returns the additive `epoch` member (§15.4: unknown members ignored by old clients), and `GET /api/v1/capabilities` gains the additive members `hint_epoch_seconds` (86400) and `hint_epoch_current`. HKDF-SHA256 is implemented exactly per RFC 5869 on the already-vendored SHA-256 (HMAC-SHA256 built on it; no new vendored library — tweetnacl has no HKDF); §6.1 pins a full worked vector (key, epoch, PRK, OKM, hint) plus the previous-epoch hint, and the RFC 5869 Appendix A cases pin the primitive. §13.3 is rewritten from "ACCEPTED RISK" to the post-fix residual record: an operator recomputing hints from directory data can match envelopes of the CURRENT epoch only, never older ones — linkability decays with epoch rotation; residuals stated honestly (within-epoch linking, public directory epochs, transition-window legacy hints, untouched timing analysis). §8 limits, the envelope format (§3/§14.1 frozen fields), the canonical forms (§5) and every chunking/ack convention (§4.4/§4.5 strings byte-identical) are unchanged; admission still accepts any `^[0-9a-f]{16}$` hint with no hint-vs-key validation (the node cannot know a hint's epoch), and rotating hints change NO §8.1/§10.1 cap. §15.7 gains rows g (rotation across a boundary with in-flight delivery + RFC 5869/§6.1 vector pinning), h (legacy candidate recognition before the deadline) and i (candidate-set drop after the deadline); §16 Module B/C conformance extended. Old envelopes remain valid until TTL expiry sweeps them; old clients keep working during the transition window per the §18/§15 compatibility policy.
 
 - **1.5.0 (2026-10-04, issue #25 — delivery acknowledgments):** added §4.5 "Delivery acknowledgments": optional, private delivery feedback in which the recipient's client emits ONE small signed ack envelope addressed back to the sender's `dest_hint`, and the sender's UI shows the message as delivered — with nodes and mules remaining fully blind and ZERO node changes, because an ack is an ordinary §3.1 v1 envelope whose signed-then-encrypted inner follows a new client convention. The ack inner carries exactly `w` (`"ack1"`, the §15-style versioned tag; unknown tags are corrupt), `r` (the reference id: ALWAYS a 64-hex envelope id — the single envelope's id for a flat message, the LAST chunk's (n−1) envelope id for a chunked message; the §4.4 group id is deliberately not referenced, so flat inners need no id and the sender maps `r` through its local `sent` record), `y` (type, MUST be 1 = received) plus the five §4.1 members with `m = ""`, the ack AUTHOR's `a`/`k` (the original recipient's alias and Ed25519 key) and `t` = the ack time. The signature COVERS the metadata: the §4.5 signed byte string is the §5.1 string with `w`, `r`, `y` appended in fixed order — the flat and §4.4 strings stay byte-identical. Binding rules: one ack per message (flat on verified receipt; chunked exactly once at reassembly completion, the reference being the agreed last-chunk id), termination (acks are never acked — the loop-prevention rule for symmetric acking), TTL alignment (`ack_ttl = min(TTL_MAX, max(orig_deadline − ack_time, TTL_MIN))`, ack `created_at` = ack time, the original's lifetime never mutated — no refresh), opt-in per identity, local-only, default ON (the documented tradeoff: the sender learns the recipient's device pulled the message before the original's deadline; nodes and mules learn nothing beyond an ordinary envelope), best-effort addressing (the sender's X25519 key is resolved from the node directory by the signed original's Ed25519 key; unresolvable senders get no ack; acks may themselves expire or be evicted — silence means unknown, never "not delivered"), and forgery resistance (the sender binds every verified ack to the recipient key recorded at send time before flipping its sent state — the box key is public, so the signature alone proves nothing). Overhead bounded and documented: ≤ 1 ack envelope per delivered message; ack metadata ≤ 88 inner bytes so every ack payload stays within §8.2 `[248, 400]` (max 336 + |alias| ≤ 360). Sender UI: local `sent` records (additive-only, idempotent schema-version-3 migration of §15.6, keyed by the ack reference id) with the honest state machine queued → sent ("carried by a mule") → delivered ("the recipient's device confirmed receipt"). §4.1/§4.3/§5.1/§8.2/§11 pointers added; §16 Module C conformance extended. Additive only: no frozen field, limit, canonical flat/chunked form, envelope-format or node behavior changed.
 

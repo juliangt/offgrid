@@ -31,7 +31,7 @@ All cryptography happens on the client: X25519 + XSalsa20-Poly1305 for confident
 Key design decisions:
 
 - **Same-origin trick** — every node serves the portal at the same URL, `http://offgrid.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
-- **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Nodes and mules see only random bytes and a truncated key hash — never content, sender identity or the full recipient key.
+- **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Since spec 1.6.0 the hint ROTATES per 24-hour epoch (HKDF of the key with the node's epoch), so a directory-holding operator can only link envelopes to aliases within the current epoch. Nodes and mules see only random bytes and an opaque hint — never content, sender identity or the full recipient key.
 - **Self-contained nodes** — a single static Go binary serves the API and the whole SPA (embedded via `go:embed`). No CDNs, no cloud calls, nothing external; everything is served from the Pi.
 - **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext per envelope — longer texts are split client-side into several ordinary envelopes and reassembled transparently, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
 
@@ -39,10 +39,10 @@ Key design decisions:
 
 1. Alice registers once on the portal: alias + key pairs generated on her device; private keys never leave her browser's `IndexedDB`.
 2. She picks Bob from the node's public directory and writes a message (up to 128 bytes per envelope; her client splits longer texts into several envelopes — 16 at most — and Bob's reassembles them into one message). Her client signs, encrypts, addresses each envelope with a blind `dest_hint` and computes its `id`.
-3. The envelope enters a node via `POST /api/v1/sync` — the node only sees random bytes and a truncated key hash.
+3. The envelope enters a node via `POST /api/v1/sync` — the node only sees random bytes and an opaque (rotating, per-epoch) hint.
 4. Any syncing user becomes a mule: unknown envelopes ride along in their `transit_queue`.
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
-6. Bob syncs, recognizes his own `dest_hint`, decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox. If delivery confirmations are on, his device answers with one small signed, encrypted acknowledgment that travels back the same way — and Alice sees her message as *delivered*.
+6. Bob syncs, recognizes his own `dest_hint` (his client tries the legacy static hint, the current epoch's hint and the previous one), decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox. If delivery confirmations are on, his device answers with one small signed, encrypted acknowledgment that travels back the same way — and Alice sees her message as *delivered*.
 
 ## Installation
 
