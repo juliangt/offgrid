@@ -18,6 +18,11 @@
  *      sent          sender-side sent-message records keyed by the §4.5
  *                    ack reference id (created by migration v3); tracks
  *                    queued → sent → delivered (§4.5)
+ *      prekeys       the §4.6 prekey stock under the fixed key "stock"
+ *                    (created by migration v4): spk {pubB64, secret,
+ *                    published_at}, unconsumed opks [{pubB64, secret}]
+ *                    and tombstones [pubB64] — the SECRETS never leave
+ *                    the device and are wiped on use/replenish (§4.6)
  *      transit_queue foreign envelopes being carried, keyed by envelope id
  *      seen_ids      dedup memory of every envelope id ever pulled or
  *                    pushed, so known_ids = inbox ∪ transit ∪ seen (§11)
@@ -31,11 +36,13 @@
  *    call them).
  * ------------------------------------------------------------------- */
 var DB_NAME = "dtn_local_store";
-var DB_VERSION = 3;
+var DB_VERSION = 4;
 var STORE_IDENTITY = "identity";
 var STORE_INBOX = "inbox";
 var STORE_PARTS = "inbox_parts";
 var STORE_SENT = "sent";
+var STORE_PREKEYS = "prekeys";
+var PREKEY_STOCK_KEY = "stock";
 var STORE_TRANSIT = "transit_queue";
 var STORE_SEEN = "seen_ids";
 var STORE_META = "meta";
@@ -89,9 +96,24 @@ var IDB_MIGRATIONS = [
     migrate: function (db) {
       db.createObjectStore(STORE_SENT, { keyPath: "id" });
     }
+  },
+  {
+    version: 4,
+    /* v4 (§4.6 prekey bundles, issue #27): the prekeys store holding the
+     * ONE device-local stock record (key "stock"): the signed medium-term
+     * prekey secret, the unconsumed one-time prekey secrets and the
+     * tombstones of wiped pubs. Strictly additive: one new store, no
+     * existing store or record is touched (§15.6); a database without
+     * prekeys keeps working unchanged (the first sync publishes the first
+     * bundle — prekeyNeedsReplenish treats a missing stock as "needed").
+     * Prekey secrets are fresh random pairs, never derived from the
+     * identity seed, so the seed backup opens no prekey-addressed mail. */
+    migrate: function (db) {
+      db.createObjectStore(STORE_PREKEYS);                      /* out-of-line keys */
+    }
   }
   /* Future versions append here, e.g. (never added speculatively):
-   * { version: 4, migrate: function (db) { db.createObjectStore(...) } }
+   * { version: 5, migrate: function (db) { db.createObjectStore(...) } }
    */
 ];
 
@@ -478,6 +500,44 @@ function applyAckToSent(dec, nowSec) {
   });
 }
 
+/* ----- prekeys: the §4.6 device-local stock ----- */
+
+function loadPrekeyState() {
+  return storeGet(STORE_PREKEYS, PREKEY_STOCK_KEY);
+}
+
+function savePrekeyState(state) {
+  return storePut(STORE_PREKEYS, state, PREKEY_STOCK_KEY);
+}
+
+/* Wipe-on-use (§4.6 recipient rule 2 — the forward-secrecy event): remove
+ * the OPK secret for pubB64 from the stock and tombstone its public, in
+ * ONE readwrite transaction (atomic; a crash leaves either the old or the
+ * new stock, never a half-wiped mix). The mutation is the PURE
+ * prekeyStateWithoutOpk — unknown pubs are a no-op, so a duplicate
+ * delivery of the same-OPK envelope cannot double-tombstone. Resolves
+ * true when a wipe happened, false when there was nothing to wipe. */
+function wipeOpkSecret(pubB64) {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE_PREKEYS, "readwrite");
+      var store = tx.objectStore(STORE_PREKEYS);
+      var wiped = false;
+      var req = store.get(PREKEY_STOCK_KEY);
+      req.onsuccess = function () {
+        var next = prekeyStateWithoutOpk(req.result, pubB64);
+        if (next !== req.result) {
+          wiped = true;
+          store.put(next, PREKEY_STOCK_KEY);
+        }
+      };
+      tx.oncomplete = function () { resolve(wiped); };
+      tx.onerror = function () { reject(tx.error || new Error("could not wipe the one-time prekey")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
 /* ----- transit_queue (mule cargo, §2/§11) ----- */
 
 /* Keep exactly the six §3.1 wire fields when pushing a carried record. */
@@ -618,6 +678,11 @@ DTN.listSent = listSent;
 DTN.markSentPushed = markSentPushed;
 DTN.applyAckToSent = applyAckToSent;
 DTN.STORE_SENT = STORE_SENT;
+DTN.STORE_PREKEYS = STORE_PREKEYS;
+DTN.PREKEY_STOCK_KEY = PREKEY_STOCK_KEY;
+DTN.loadPrekeyState = loadPrekeyState;
+DTN.savePrekeyState = savePrekeyState;
+DTN.wipeOpkSecret = wipeOpkSecret;
 DTN.addTransitEnvelopes = addTransitEnvelopes;
 DTN.listTransit = listTransit;
 DTN.removeTransitIds = removeTransitIds;

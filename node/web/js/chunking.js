@@ -153,6 +153,7 @@ function buildMessageEnvelopes(opts) {
       createdAt: opts.createdAt,
       ttl: opts.ttl,
       hintEpoch: opts.hintEpoch, /* §6.1: every chunk of the message is addressed with the SAME epoch's hint */
+      hintIdentityBoxPublic: opts.hintIdentityBoxPublic, /* §4.6: every chunk's hint comes from the STABLE identity key even when the box targets a prekey */
       chunk: { g: g, i: i, n: chunks.length }
     }));
   }

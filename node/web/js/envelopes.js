@@ -181,6 +181,16 @@ function computeEnvelopeId(v, destHint, createdAt, ttl, payload) {
  * null hintEpoch keeps the LEGACY static §6.1 derivation byte-for-byte
  * (the pre-1.6 construction; still produced during the transition window
  * and pinned by the §6.1 static test vector).
+ *
+ * §4.6 prekey addressing (issue #27, spec 1.7.0): `recipientBoxPublic` is
+ * the BOX target — a §4.6 prekey public when the sender picked one from
+ * the recipient's published bundle (see prekeys.js), else the identity
+ * X25519 key (legacy fallback). `opts.hintIdentityBoxPublic` (32 raw
+ * bytes) is the recipient's STABLE identity X25519 public key: when
+ * present, dest_hint is derived from IT instead of from the box target —
+ * the §6.1 derivation always runs on the identity key, never on a prekey
+ * (a prekey-derived hint would rotate with replenishment). Absent → the
+ * pre-1.7 behavior (hint from recipientBoxPublic) byte-for-byte.
  */
 /*
  * Module D — Phase 2/3 evolution mapping (normative source: spec §14).
@@ -322,10 +332,14 @@ function buildEnvelope(opts) {
   /* 6: payload, dest_hint, id. */
   var payload = b64encode(concatBytes(eph.publicKey, nonce, boxed));
   /* §6.1: with hintEpoch the hint rotates per epoch; without it the
-   * legacy static derivation stays byte-identical to pre-1.6 builds. */
+   * legacy static derivation stays byte-identical to pre-1.6 builds.
+   * §4.6: the hint source is the recipient's STABLE identity X25519 key
+   * (hintIdentityBoxPublic) even when the box targets a prekey. */
+  var hintSource = (opts.hintIdentityBoxPublic instanceof Uint8Array) ? opts.hintIdentityBoxPublic : recipientPub;
+  if (hintSource.length !== 32) throw new Error("hint source must be a 32-byte X25519 public key");
   var destHint = (opts.hintEpoch === undefined || opts.hintEpoch === null)
-    ? deriveDestHint(recipientPub)
-    : deriveRotatingHint(recipientPub, assertInt(opts.hintEpoch, "hintEpoch"));
+    ? deriveDestHint(hintSource)
+    : deriveRotatingHint(hintSource, assertInt(opts.hintEpoch, "hintEpoch"));
   return {
     v: 1,
     id: computeEnvelopeId(1, destHint, createdAt, ttl, payload),
@@ -362,8 +376,8 @@ function validEnvelopeShape(env) {
 }
 
 /*
- * Recipient procedure §4.3 + §11: classify by dest_hint, open the box,
- * validate the inner fields, verify the detached signature. ANY failure
+ * Recipient procedure §4.3 + §11 (+ §4.6): classify by dest_hint, open the
+ * box, validate the inner fields, verify the detached signature. ANY failure
  * returns {ok:false} — never an error that could leak information — and
  * the caller only counts it in telemetry.
  *
@@ -375,8 +389,20 @@ function validEnvelopeShape(env) {
  * used — byte-for-byte the pre-1.6 behavior for callers that have not
  * migrated. Node blindness is untouched: this comparison is LOCAL, the
  * node never learns which candidate matched.
+ *
+ * §4.6 trial decrypt (issue #27): `prekeySecrets` (optional array of
+ * { tag: "spk"|"opk", pub: <pubB64>, secret: Uint8Array } — built by
+ * prekeyTrialKeys in the FIXED order SPK then unconsumed OPKs) extends
+ * the box-open step: the identity secret is tried FIRST (the permanent
+ * legacy candidate — envelopes it opens keep no forward secrecy, the
+ * documented transition tradeoff), then each prekey secret in order,
+ * first success winning. On success the result carries
+ * `opened_with: { tag, pub }` — the CALLER wipes the OPK secret
+ * synchronously (the §4.6 forward-secrecy event; this function never
+ * mutates its arguments). Absent or empty prekeySecrets is byte-for-byte
+ * the pre-1.7 behavior.
  */
-function decryptEnvelope(env, identity, now, ownHints) {
+function decryptEnvelope(env, identity, now, ownHints, prekeySecrets) {
   try {
     var nacl = requireNacl();
     if (!validEnvelopeShape(env)) return { ok: false, reason: "bad_envelope" };
@@ -395,7 +421,23 @@ function decryptEnvelope(env, identity, now, ownHints) {
     var nonce = raw.subarray(32, 56);
     var boxed = raw.subarray(56);
 
+    /* §4.3 step 3 (extended by §4.6): identity secret first, then each
+     * prekey secret; first success wins and records which key opened. */
     var innerBytes = nacl.box.open(boxed, nonce, ephPub, identity.boxSecret);
+    var openedWith = null;
+    if (innerBytes) {
+      openedWith = { tag: "identity", pub: null };
+    } else if (prekeySecrets && prekeySecrets.length) {
+      for (var k = 0; k < prekeySecrets.length; k++) {
+        var candidate = prekeySecrets[k];
+        if (!candidate || !(candidate.secret instanceof Uint8Array) || candidate.secret.length !== 32) continue;
+        innerBytes = nacl.box.open(boxed, nonce, ephPub, candidate.secret);
+        if (innerBytes) {
+          openedWith = { tag: candidate.tag, pub: candidate.pub || null };
+          break;
+        }
+      }
+    }
     if (!innerBytes) return { ok: false, reason: "crypto" };
 
     var inner;
@@ -483,11 +525,11 @@ function decryptEnvelope(env, identity, now, ownHints) {
        * sender binds them against the recipient it sent to before trusting
        * the delivery signal (ackMatchesSent, §4.5). Acks are never acked:
        * the receive path records them and emits nothing (termination rule). */
-      return { ok: true, m: "", a: inner.a, t: inner.t, k: inner.k, ack: ackMeta };
+      return { ok: true, m: "", a: inner.a, t: inner.t, k: inner.k, ack: ackMeta, opened_with: openedWith };
     }
     return chunkMeta
-      ? { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k, chunk: chunkMeta }
-      : { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k };
+      ? { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k, chunk: chunkMeta, opened_with: openedWith }
+      : { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k, opened_with: openedWith };
   } catch (e) {
     return { ok: false, reason: "crypto" };
   }
