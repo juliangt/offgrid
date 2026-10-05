@@ -67,6 +67,7 @@ const expectedOrder = [
   "/js/envelopes.js",
   "/js/mule.js",
   "/js/chunking.js",
+  "/js/acks.js",
   "/js/engine.js",
   "/js/store.js",
   "/js/ui.js",
@@ -95,10 +96,16 @@ const expectedApi = [
   "chunkTextBudget", "chunkSplitText", "chunkPlannedCount", "chunkComposerLimit",
   "buildMessageEnvelopes", "chunkNewState", "chunkStateWithPart", "chunkStateHave",
   "chunkStateComplete", "chunkStateText", "chunkStateExpired", "chunkInboxRecord",
+  // §4.5 delivery acknowledgments (issue #25)
+  "ACK_TAG", "ACK_TYPE_RECEIVED", "ACK_META_MAX_BYTES", "SENT_HISTORY_MAX",
+  "canonicalAckSignedString", "canonicalAckInnerJson",
+  "ackTtlFor", "ackReferenceIdFor", "ackTaskForArrival",
+  "sentNewRecord", "ackMatchesSent", "sentDeliveredRecord", "sentStatusLabel",
   // local store API (section 8)
   "loadIdentity", "saveIdentity", "addInboxMessages", "listInbox",
   "addInboxChunkPart", "listChunkPartials", "removeChunkPartial",
   "purgeExpiredChunkPartials",
+  "addSentRecord", "listSent", "markSentPushed", "applyAckToSent", "STORE_SENT",
   "addTransitEnvelopes", "listTransit", "removeTransitIds",
   "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire",
   // §15.6 store migrations chain
