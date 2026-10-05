@@ -6,9 +6,10 @@
   <meta name="referrer" content="no-referrer">
   <!-- Every asset is a same-origin file embedded in the node binary
        (go:embed): one stylesheet, plain ES5 scripts loaded in dependency
-       order (constants → bytes → sha256 → hkdf → canonical → envelopes →
-       mule → chunking → engine → store → ui). The CSP therefore only needs
-       'self' — no inline script or style anywhere (hardening, §1.3 plan). -->
+       order (vendor libs → constants → bytes → sha256 → hkdf → canonical →
+       envelopes → prekeys → qr → mule → chunking → engine → store → ui).
+       The CSP therefore only needs 'self' — no inline script or style
+       anywhere (hardening, §1.3 plan). -->
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
   <title>Messages — Community Network</title>
   <link rel="stylesheet" href="/css/app.css">
@@ -83,6 +84,7 @@
     <nav class="tabs">
       <button id="tab-btn-compose" class="tab active" type="button">New message</button>
       <button id="tab-btn-inbox" class="tab" type="button">Inbox</button>
+      <button id="tab-btn-contacts" class="tab" type="button">Contacts</button>
       <button id="tab-btn-identity" class="tab" type="button">Identity</button>
     </nav>
 
@@ -93,6 +95,7 @@
           <option value="">Loading directory…</option>
         </select>
         <button id="btn-refresh-dir" type="button" class="linkish">Refresh directory</button>
+        <p id="picker-note" class="hint" hidden></p>
         <label for="compose-text">Message</label>
         <textarea id="compose-text" rows="4" placeholder="Write your message…"></textarea>
         <div class="counter-row"><span id="byte-counter">0/128</span> <span id="chunk-note"></span></div>
@@ -113,6 +116,46 @@
     <section id="tab-inbox" hidden>
       <ul id="inbox-list" class="inbox"></ul>
       <p id="inbox-empty" class="muted">No messages yet. When someone writes to you, messages will appear here.</p>
+    </section>
+
+    <!-- Contacts tab (§4.7 identity QR, issue #28): show my QR, add a
+         contact (scan or paste), and the local contact list. The composer
+         picker merges these contacts with the directory (§4.7). -->
+    <section id="tab-contacts" hidden>
+      <div class="card">
+        <h2>Show my QR</h2>
+        <p class="hint">Meet in person: the other person scans this with their full browser (or copies the payload text below). The payload carries your alias and public keys, signed by your Ed25519 key.</p>
+        <canvas id="qr-canvas" width="10" height="10" hidden></canvas>
+        <p id="qr-error" class="error" hidden></p>
+        <label for="qr-payload">Identity payload</label>
+        <textarea id="qr-payload" readonly rows="4"></textarea>
+        <div class="actions">
+          <button id="btn-copy-qr" type="button" data-copy-target="qr-payload">Copy payload</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Add a contact</h2>
+        <p id="scan-notice" class="hint" hidden></p>
+        <div class="actions">
+          <button id="btn-scan-qr" type="button" class="primary" hidden>Scan a QR code</button>
+        </div>
+        <div id="scan-box" hidden>
+          <video id="scan-video" playsinline muted></video>
+          <p class="hint">Point the camera at the other person's QR code.</p>
+        </div>
+        <label for="contact-paste">…or paste their identity payload</label>
+        <textarea id="contact-paste" rows="4" placeholder="OFFGRID1:…"></textarea>
+        <div class="actions">
+          <button id="btn-add-contact" type="button">Add contact from pasted payload</button>
+        </div>
+        <p id="contact-status" hidden></p>
+      </div>
+      <div class="card">
+        <h2>Your contacts</h2>
+        <p class="hint">Saved on this device only. Contacts appear in the composer even when the node's directory is unreachable; when the directory does list them, its fresh key data is used for sending. Identity is the key — an alias is only a label.</p>
+        <ul id="contacts-list" class="inbox"></ul>
+        <p id="contacts-empty" class="muted">No contacts yet.</p>
+      </div>
     </section>
 
     <section id="tab-identity" hidden>
@@ -153,6 +196,7 @@
 </main>
 <noscript><p>This application requires JavaScript.</p></noscript>
 <script src="/js/vendor/nacl.min.js"></script>
+<script src="/js/vendor/qrcode.js"></script>
 <script src="/js/constants.js"></script>
 <script src="/js/bytes.js"></script>
 <script src="/js/sha256.js"></script>
@@ -160,6 +204,7 @@
 <script src="/js/canonical.js"></script>
 <script src="/js/envelopes.js"></script>
 <script src="/js/prekeys.js"></script>
+<script src="/js/qr.js"></script>
 <script src="/js/mule.js"></script>
 <script src="/js/chunking.js"></script>
 <script src="/js/acks.js"></script>

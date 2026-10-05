@@ -291,8 +291,8 @@ console.log("== (f) store migrations chain — §15.6 ==");
   DTN.runIdbMigrations(fakeDb(fresh), 0);
   ok(fresh.every((e) => e.op === "create"),
      "the chain only creates — no other database member is ever touched (additive-only, §15.6)");
-  ok(fresh.map((e) => e.name).join(",") === "identity,inbox,transit_queue,seen_ids,meta,inbox_parts,sent,prekeys",
-     "the v1 step creates the five §11 stores; v2 adds only inbox_parts (§4.4); v3 adds only sent (§4.5); v4 adds only prekeys (§4.6)");
+  ok(fresh.map((e) => e.name).join(",") === "identity,inbox,transit_queue,seen_ids,meta,inbox_parts,sent,prekeys,contacts",
+     "the v1 step creates the five §11 stores; v2 adds only inbox_parts (§4.4); v3 adds only sent (§4.5); v4 adds only prekeys (§4.6); v5 adds only contacts (§4.7)");
   ok(fresh.find((e) => e.name === "inbox")?.options?.keyPath === "id" &&
      fresh.find((e) => e.name === "transit_queue")?.options?.keyPath === "id" &&
      fresh.find((e) => e.name === "inbox_parts")?.options?.keyPath === "g" &&
@@ -304,18 +304,25 @@ console.log("== (f) store migrations chain — §15.6 ==");
   ok(atCurrent.length === 0, "a database already at DB_VERSION runs no step (idempotent, §15.6)");
   const atV1 = [];
   DTN.runIdbMigrations(fakeDb(atV1), chain[0].version);
-  ok(atV1.length === 3 && atV1.every((e) => e.op === "create") &&
-     atV1[0].name === "inbox_parts" && atV1[1].name === "sent" && atV1[2].name === "prekeys",
-     "a database at version 1 runs exactly the v2+v3+v4 deltas, in order — each step applied once (§15.3 analogue)");
+  ok(atV1.length === 4 && atV1.every((e) => e.op === "create") &&
+     atV1[0].name === "inbox_parts" && atV1[1].name === "sent" && atV1[2].name === "prekeys" &&
+     atV1[3].name === "contacts",
+     "a database at version 1 runs exactly the v2+v3+v4+v5 deltas, in order — each step applied once (§15.3 analogue)");
   const atV2 = [];
   DTN.runIdbMigrations(fakeDb(atV2), chain[1].version);
-  ok(atV2.length === 2 && atV2[0].op === "create" && atV2[0].name === "sent" &&
-     atV2[1].op === "create" && atV2[1].name === "prekeys",
-     "a database at version 2 runs exactly the v3+v4 deltas — the chain is forward-only (§15.3 analogue)");
+  ok(atV2.length === 3 && atV2[0].op === "create" && atV2[0].name === "sent" &&
+     atV2[1].op === "create" && atV2[1].name === "prekeys" &&
+     atV2[2].op === "create" && atV2[2].name === "contacts",
+     "a database at version 2 runs exactly the v3+v4+v5 deltas — the chain is forward-only (§15.3 analogue)");
   const atV3 = [];
   DTN.runIdbMigrations(fakeDb(atV3), chain[2].version);
-  ok(atV3.length === 1 && atV3[0].op === "create" && atV3[0].name === "prekeys",
-     "a database at version 3 runs exactly the v4 delta (§4.6 prekeys store, §15.3 analogue)");
+  ok(atV3.length === 2 && atV3[0].op === "create" && atV3[0].name === "prekeys" &&
+     atV3[1].op === "create" && atV3[1].name === "contacts",
+     "a database at version 3 runs exactly the v4+v5 deltas (§4.6 prekeys, §4.7 contacts, §15.3 analogue)");
+  const atV4 = [];
+  DTN.runIdbMigrations(fakeDb(atV4), chain[3].version);
+  ok(atV4.length === 1 && atV4[0].op === "create" && atV4[0].name === "contacts",
+     "a database at version 4 runs exactly the v5 delta (§4.7 contacts store, §15.3 analogue)");
 
   const again = [];
   DTN.runIdbMigrations(fakeDb(again), 0);

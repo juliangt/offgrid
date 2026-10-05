@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.7.0 |
+| **Version** | 1.8.0 |
 | **Date** | 2026-10-04 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -364,6 +364,181 @@ race "bundle published, then the recipient's client downgraded" is accepted
 and documented: prekey-addressed mail to the downgraded client is silently
 lost until re-addressing (a window of one publish cycle).
 
+### 4.7 Identity QR — in-person contact exchange (issue #28)
+
+Two people who meet in person exchange identities by showing and scanning a
+QR code (alias + Ed25519 signing key + X25519 encryption key + a checksum)
+instead of relying solely on the node directory or typing 44/88-character
+strings. This section defines a **client-side payload convention with ZERO
+wire change**: no envelope field, canonical form, §8 limit or node behavior
+is touched — the payload is ordinary UTF-8 text that happens to travel as a
+QR image, and the recipient's client verifies it before storing anything.
+Zero external assets is binding: the QR encoder is VENDORED like tweetnacl
+(`qrcode-generator` 1.4.4, MIT, embedded in `node/web/js/vendor/qrcode.js`
+with a provenance header), rendering goes to a same-origin `<canvas>`, and
+nothing is ever fetched from a CDN.
+
+**Payload format (normative).** The QR text is a UTF-8 (in practice ASCII)
+string:
+
+```
+OFFGRID1:<Base64(JSON)>
+```
+
+with `<Base64(JSON)>` in the §3.3 encoding (RFC 4648 standard alphabet,
+with padding). The decoded JSON object has **exactly** these members, in
+this fixed order:
+
+| Member | Type | Binding constraint |
+|---|---|---|
+| `v` | integer | MUST be `1` (payload schema version; a §15-style versioned convention — an unknown `v` is a different spec, rejected with a visible error). |
+| `alias` | string | The publisher's alias; MUST match `^[A-Za-z0-9_.-]{1,24}$` (the §8.1 alias regex). Cosmetic only (trust model below). |
+| `ed` | string | The publisher's **Ed25519 public key** (identity/signature), Base64 of exactly 32 bytes (44 characters). This is the contact's IDENTITY (§4). |
+| `x` | string | The publisher's **X25519 public key** (encryption), Base64 of exactly 32 bytes (44 characters). |
+| `ts` | integer | Unix seconds (UTC), the payload's creation time. MUST be `> 0` and MUST NOT be more than 300 s in the importer's future (the §4.3 step 6 skew allowance). |
+| `sig` | string | **Ed25519 detached signature** by the publisher's `ed` key over the canonical signed string below, Base64 of exactly 64 bytes (88 characters). |
+| `crc` | string | CRC-32 of the canonical signed string, exactly 8 lowercase hex characters. Sits **outside the signature** (below). |
+
+**Canonical signed string (binding).** The signature and the CRC both cover
+the canonical JSON of the payload WITHOUT `sig` and `crc` — fixed member
+order `v`, `alias`, `ed`, `x`, `ts`, serialized per §5 (UTF-8, no
+whitespace, minimal escaping; the members are §8.1-ASCII and Base64, so no
+escaping ever fires):
+
+```
+{"v":1,"alias":<alias>,"ed":<ed>,"x":<x>,"ts":<ts>}
+```
+
+The complete payload object serializes in the fixed order `v`, `alias`,
+`ed`, `x`, `ts`, `sig`, `crc` under the same §5 rules (deterministic bytes:
+rebuilding a payload from the same identity and `ts` is byte-identical).
+The §5.1 flat, §4.4 chunked and §4.5 ack forms are untouched — this string
+signs a CONTACT-EXCHANGE payload, never an inner payload.
+
+**CRC-32 (binding definition).** The `crc` member is the standard CRC-32 of
+IEEE 802.3 / ITU-T V.42 / zlib (reflected polynomial `0xEDB88320`, initial
+value `0xFFFFFFFF`, final XOR `0xFFFFFFFF` — ISO 3309 as implemented by
+zlib) computed over the UTF-8 bytes of the canonical signed string, written
+as 8 lowercase hex characters. It sits OUTSIDE the signature on purpose:
+it catches scan/paste corruption **instantly without cryptography**, while
+a payload tampered by an adversary (who can recompute the CRC) still fails
+the Ed25519 verification. Consequence, binding: a bit flip anywhere in the
+canonical-covered members surfaces as a CRC mismatch; a flip in `sig`
+(which the CRC does not cover) surfaces as a signature failure.
+
+**Worked test vector** (pinned by tests/qr_identity.mjs; identity = the RFC
+8032 §7.1 test key whose public is the §4.1 example `k` — the same
+identity the §4.6 vector pins; X25519 key = the §11 deterministic
+seed-derivation of that identity; `sig` is produced by the engine's own
+vendored tweetnacl, while the CRC below was **independently cross-checked
+with Python's `zlib.crc32`**):
+
+| Item | Value |
+|---|---|
+| `alias` / `ts` | `alice_77` / `1791072000` |
+| `ed` | `11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=` |
+| `x` | `/R7hH59JUnnBjDLCUFTQ46F9eKg0kK8Chze1mEQpqVg=` |
+| Canonical string (145 bytes) | `{"v":1,"alias":"alice_77","ed":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","x":"/R7hH59JUnnBjDLCUFTQ46F9eKg0kK8Chze1mEQpqVg=","ts":1791072000}` |
+| `crc` | `d76a4d73` |
+| `sig` | `g3XAqS73T9xjotQqF3ojXed6E0E1QZHXZESdGrq1ZfHy25VNrUed1+HMaAukFPwA4sHWahn7Ag6c3XsWl4SYAA==` |
+| Complete payload (357 chars) | `OFFGRID1:eyJ2IjoxLCJhbGlhcyI6ImFsaWNlXzc3IiwiZWQiOiIxMXFZQVlLeENyZlZTLzdUeVdRSE9nN2hjdlBhcGlNbHJ3SWFhUGNIVVJvPSIsIngiOiIvUjdoSDU5SlVubkJqRExDVUZUUTQ2RjllS2cwa0s4Q2h6ZTFtRVFwcVZnPSIsInRzIjoxNzkxMDcyMDAwLCJzaWciOiJnM1hBcVM3M1Q5eGpvdFFxRjNvalhlZDZFMEUxUVpIWFpFU2RHcnExWmZIeTI1Vk5yVWVkMStITWFBdWtGUHdBNHNIV2FobjdBZzZjM1hzV2w0U1lBQT09IiwiY3JjIjoiZDc2YTRkNzMifQ==` |
+
+**Importer procedure (normative) — verify in THIS order, stopping at the
+first failure:** (1) the payload starts with `OFFGRID1:` (leading/trailing
+ASCII whitespace from a paste is stripped first) → `bad_prefix`; (2) the
+remainder is strict §3.3 Base64 → `bad_base64`; (3) it decodes to UTF-8
+JSON holding a single object → `bad_json`; (4) the member set is exactly
+the seven above → `bad_members`; (5) `v == 1` → `bad_version`; (6) `alias`
+matches the §8.1 regex → `bad_alias`; (7) `ed` and `x` are 44-character
+Base64 decoding to exactly 32 bytes → `bad_key`; (8) `ts` is an integer
+`> 0` and `≤ now + 300` → `bad_ts`; (9) `crc` is 8 lowercase hex matching
+the computed CRC-32 → `bad_crc`; (10) `sig` is 88-character Base64 of 64
+bytes and verifies over the canonical string with the embedded `ed` key →
+`bad_signature`. On ANY failure the payload is rejected with a **VISIBLE
+error naming the reason** and **NOTHING is stored**. On success the
+importer holds the contact `{ed, x, alias, ts}` and persists it
+(below).
+
+**Visible rejection is a deliberate UX difference (normative).** Envelope
+damage on the wire is discarded SILENTLY (§4.3) because surfacing errors
+would leak information to a hostile network. The QR exchange is the exact
+opposite situation: two people are standing together looking at one
+screen, the payload arrives over no adversary-controlled channel, and the
+user can simply show the code again. A rejection therefore names its
+reason (corrupted checksum, failed signature, malformed key, …) so the
+exchange can be retried on the spot.
+
+**QR rendering (binding).** The payload is rendered with the vendored
+encoder in **byte mode, ECC level M, versions 1..15** (the version-15-M
+byte capacity is 412 characters; the complete payload is 345 characters at
+a 1-character alias, 357 at a typical one and 377 at the 24-character
+maximum — always within the cap), onto a `<canvas>` with a 4-module quiet
+zone and maximum-contrast modules. The SAME payload text is always shown
+next to the QR as a copyable block: the text is the universal fallback and
+the paste path feeds the identical parser. NO prekeys travel in the QR:
+they would roughly triple its size and hurt scan reliability — prekeys are
+merged from the directory at send time instead (below).
+
+**Contacts (device-local).** An accepted payload is stored in the SPA
+`IndexedDB` store `contacts` (the §15.6 additive-only, idempotent
+migration v5; DB_VERSION 5) keyed by the contact's Ed25519 public key:
+
+```
+{ ed, x, alias, added_at, source }   // source ∈ { "qr" (camera scan), "paste" }
+```
+
+Re-adding an existing contact refreshes `alias`/`x`/`source` and keeps the
+original `added_at`. The recipient picker merges **local contacts ∪
+directory entries, deduped by the Ed25519 key** — offline-first: contacts
+are offered even when the directory fetch fails. When BOTH exist for a
+key, the directory entry supplies the fresh key material (`x25519`, `epoch`,
+`prekeys`) while the contact's local alias wins as the display label
+(cosmetic, trust model below).
+
+**Interplay with the directory at send time (normative).** The QR carries
+identity ONLY — no §4.6 prekeys and no §6.1 epoch. At send time the sender
+resolves the recipient through the merged list:
+
+- **Directory entry available** → the entry supplies the bundle (§4.6
+  sender rules: verified OPK, else SPK, else identity fallback) and the
+  server-set epoch (§6.1: `dest_hint(E)` from the entry) — byte-identical
+  to the pre-§4.7 send path.
+- **Contact only (offline / absent from the directory)** → the box targets
+  the identity X25519 key from the contact record (the §4.6 bundle-less
+  fallback) and `dest_hint` is the §6.1 offline-cold STATIC hint (no
+  server epoch available). The recipient recognizes the static candidate
+  inside the §6.1 transition window; after `HINT_TRANSITION_DEADLINE`
+  offline contact mail stops arriving until a directory is reachable —
+  the documented §6.1 tradeoff, unchanged by this section.
+
+§4.5 acks resolve the sender's X25519 key through the same merged list, so
+a contact exchange completes (both directions of mail, acks included)
+without any directory.
+
+**Scanning and degradation matrix (normative).** The primary flow is: the
+publisher shows the QR from the SPA on one phone; the importer scans it
+from the FULL browser on the other phone. Camera scanning is feature-
+detected — `BarcodeDetector` (native, Android Chrome) AND `getUserMedia` —
+and needs NO vendored decoder:
+
+| Environment | Behavior |
+|---|---|
+| Full browser with `BarcodeDetector` + camera (Android Chrome) | Camera scan: frames run through the native detector; a decoded payload enters the same import path as a paste. |
+| iOS Safari, desktop without the API, any browser lacking either API | The scan button is hidden and an honest notice directs to the paste fallback (the payload text shown beside every QR). |
+| Captive-portal mini-browsers (no `getUserMedia`, no `BarcodeDetector`) | Same notice. The feature-detect fails by construction; nothing degrades silently. |
+
+**Trust model (normative, stated honestly).** An in-person scan is
+**trust-on-sight of the person showing the code**: the importer verifies
+that the payload is intact and self-signed (the signature verifies against
+the embedded Ed25519 key), which detects tampering and corruption — but a
+MALICIOUS publisher is not detected: scanning a stranger's QR stores
+exactly the keys that QR shows, bound to nothing else. Aliases are
+cosmetic and NOT unique (identity = the Ed25519 key, §4); nothing
+authenticates an alias, and two people may share one. There is no
+revocation in Phase 1: a contact is removed only by deleting it from the
+device store, and a key swap means a different identity (a re-scan creates
+a new contact record under the new key).
+
 ## 5. Canonical serialization (binding)
 
 All hashing and signing operate on **canonical JSON**: UTF-8, no BOM, no insignificant whitespace, integers in minimal decimal form (no leading zeros, no `+` sign, no fractions), no trailing newline. String escaping is minimal: `\"`, `\\`, and control characters U+0000–U+001F (short escapes `\b \f \n \r \t` where applicable, otherwise `\u00xx` with lowercase hex digits). The solidus `/` MUST NOT be escaped, and non-ASCII characters MUST be emitted as raw UTF-8 bytes (never `\uXXXX` surrogates).
@@ -386,7 +561,7 @@ The verifier reconstructs this exact byte string from the decrypted fields. Exam
 {"m":"Hola Bob","a":"alice_77","k":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","t":1759500001}
 ```
 
-**Chunked messages** (§4.4) use a NEW canonical form: this string with `,"w":<w>,"g":<g>,"i":<i>,"n":<n>` appended (fixed order). **Ack messages** (§4.5) likewise use this string with `,"w":<w>,"r":<r>,"y":<y>` appended (fixed order, `m` = ""). The flat form above is never altered by those extensions — plain messages sign exactly the bytes shown here. The §4.6 prekey bundle signature (`spk_sig`) uses its own canonical string — fixed order `b`, `k`, `spk`, `ts`, `opk`, defined and pinned in §4.6; it signs a directory-entry member rather than an inner payload, and none of the forms above changes.
+**Chunked messages** (§4.4) use a NEW canonical form: this string with `,"w":<w>,"g":<g>,"i":<i>,"n":<n>` appended (fixed order). **Ack messages** (§4.5) likewise use this string with `,"w":<w>,"r":<r>,"y":<y>` appended (fixed order, `m` = ""). The flat form above is never altered by those extensions — plain messages sign exactly the bytes shown here. The §4.6 prekey bundle signature (`spk_sig`) uses its own canonical string — fixed order `b`, `k`, `spk`, `ts`, `opk`, defined and pinned in §4.6; it signs a directory-entry member rather than an inner payload. The §4.7 identity-QR signature and CRC-32 likewise use their own canonical string — fixed order `v`, `alias`, `ed`, `x`, `ts`, defined and pinned in §4.7; none of the forms above changes.
 
 ### 5.2 Hashed byte string (for the envelope `id`)
 
@@ -728,14 +903,15 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
 ## 11. Client (mule) behavior — Module C normative summary
 
 - **Registration (once):** alias input (validated client-side against the alias regex) → generate Ed25519 + X25519 key pairs → generate the initial §4.6 prekey stock (1 SPK + a target-12 OPK batch, fresh `crypto.getRandomValues` pairs) → publish `{"alias","pubkey","x25519","prekeys"}` to `POST /api/v1/directory` (the bundle is omitted only if its generation fails — a bundle-less registration stays conforming). Private keys stay in `IndexedDB` (`identity` store; prekey secrets in the `prekeys` store, §15.6 migration v4). Manual seed backup (copyable text) and import MUST be offered to survive browser data wipes; import re-publishes a fresh bundle (the old stock is unrecoverable and its OPKs are tombstoned by the fresh publication).
-- **Composition:** recipient picked from the directory; text area with a visible **128-byte UTF-8 byte counter** (per envelope — a longer text is split into chunk envelopes per §4.4, with the envelope count previewed before sending and a warning when it would occupy a large share of a mule queue); send builds the envelope(s) exactly per §4.2/§4.4/§4.5/§4.6/§5/§6 — the box targets the recipient's §4.6 prekey (random OPK, else SPK) when their entry carries a valid, signature-verified bundle, else the identity X25519 key (legacy fallback; an invalid bundle surfaces a warning in the contact view) — and puts every emitted envelope id in `known_ids`. A per-identity, local-only delivery-feedback opt-in (default ON) gates the §4.5 behavior on both sides: emitting acks for received messages, and the composer's per-send choice to keep a local `sent` record (state `queued` → `sent` → `delivered`, honest wording — only a verified §4.5 ack says *delivered*; the record and the ack mapping live only in this device's store).
+- **Composition:** recipient picked from the merged recipient list — the node directory ∪ the device-local contacts of §4.7, deduped by the Ed25519 key (offline-first: a contact remains sendable with the §6.1 offline-cold static hint when the directory is unreachable); text area with a visible **128-byte UTF-8 byte counter** (per envelope — a longer text is split into chunk envelopes per §4.4, with the envelope count previewed before sending and a warning when it would occupy a large share of a mule queue); send builds the envelope(s) exactly per §4.2/§4.4/§4.5/§4.6/§5/§6 — the box targets the recipient's §4.6 prekey (random OPK, else SPK) when their entry carries a valid, signature-verified bundle, else the identity X25519 key (legacy fallback; an invalid bundle surfaces a warning in the contact view) — and puts every emitted envelope id in `known_ids`. A per-identity, local-only delivery-feedback opt-in (default ON) gates the §4.5 behavior on both sides: emitting acks for received messages, and the composer's per-send choice to keep a local `sent` record (state `queued` → `sent` → `delivered`, honest wording — only a verified §4.5 ack says *delivered*; the record and the ack mapping live only in this device's store).
+- **In-person contact exchange (§4.7, since 1.8.0):** the Contacts tab renders the owner's signed OFFGRID1 payload as a QR code on a `<canvas>` (vendored encoder, zero external assets) with the same payload as copyable text; the add-contact flow accepts a camera scan (native `BarcodeDetector`, feature-detected) or a pasted payload through the SAME parser — every rejection is VISIBLE with its reason and stores nothing — and saved contacts merge with the directory at send time per §4.7.
 - **Sync:** automatic on page load plus a manual button. Push the whole `transit_queue` and `known_ids` (union of inbox ids ∪ transit ids ∪ previously seen/dismissed ids ∪ ids just pushed), with `limit` = 50. Classify `pull_envelopes` against the §6.1 candidate set `{static legacy hint (before the transition deadline), hint(E), hint(E−1)}` — E = the highest epoch observed from node data this session (capabilities `hint_epoch_current`, directory entry epochs), device clock when offline-cold:
   - `dest_hint` in the candidate set → attempt decrypt + verify (§4.3) with the §4.6 trial order (identity secret, then SPK secret, then each unconsumed OPK secret — first success wins; the OPK secret that opened an envelope is wiped synchronously, §4.6); success → `inbox` — for a chunked inner (§4.4), merge into the reassembly state keyed by `g`: the message renders when all `n` chunks arrived, partials render as "message i+1/N — still traveling" and expire with the chunks' shared TTL (passive sweep on sync/load); for an ack inner (§4.5), bind it against the local `sent` record (signature key = the recorded recipient key, §4.5) and flip the matched message's state to `delivered` — an ack is recorded, never answered, and never lands in the inbox; failure → discard silently.
   - otherwise → `transit_queue`; if it would exceed **100** envelopes, evict oldest by `created_at` (FIFO).
   - AFTER pulls: §4.6 replenish — if the SPK is stale (> 30 days on the bundle `ts` anchor) or the unconsumed OPK stock is at/below the low-water mark (≤ 4), generate the fresh batch, re-POST the own directory entry with the new `prekeys` bundle, and swap the local stock (old batch secrets wiped); best-effort — a failed replenish keeps the old stock and retries on the next sync.
 - **Addressing (§6.1, since 1.6.0):** the composer derives the recipient's hint from the directory ENTRY's server-set `epoch` — `dest_hint(E)` with E = `entry.epoch` — never from the device clock; an entry without an epoch (pre-1.6 node, or a migrated `0`) falls back to the legacy static hint. Acks (§4.5) are addressed the same way, from the sender's entry in the directory being read.
 - **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, sent list with the per-message §4.5 delivery states, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL) — see §13.4.
-- **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number. Store upgrades MUST be implemented as the explicit, ordered, additive-only, idempotent migrations chain formalized in §15.6 (the `onupgradeneeded` scaffold of `node/web/js/store.js`; chain: v2 adds `inbox_parts` for §4.4 partials, v3 adds `sent` for §4.5 sent-state records keyed by the ack reference id, v4 adds `prekeys` for the §4.6 stock record — SPK secret, unconsumed OPK secrets, tombstones).
+- **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number. Store upgrades MUST be implemented as the explicit, ordered, additive-only, idempotent migrations chain formalized in §15.6 (the `onupgradeneeded` scaffold of `node/web/js/store.js`; chain: v2 adds `inbox_parts` for §4.4 partials, v3 adds `sent` for §4.5 sent-state records keyed by the ack reference id, v4 adds `prekeys` for the §4.6 stock record — SPK secret, unconsumed OPK secrets, tombstones, v5 adds `contacts` for the §4.7 in-person identities keyed by the Ed25519 key).
 
 ## 12. Same-origin policy and the deliberate absence of TLS
 
@@ -1009,7 +1185,7 @@ The exact member set on builds implementing this section is the eight above; new
 
 ### 15.6 Mule batch conversion at upgraded nodes
 
-**SPA storage chain (normative; formalizes §11).** The mule's `IndexedDB` database `dtn_local_store` (§11) carries its own integer version — the `DB_VERSION` / `onupgradeneeded` scaffold of `node/web/js/store.js`. That scaffold is normative: store upgrades MUST be expressed as an explicit, **ordered migrations table**; each migration MUST be **additive-only** (create stores/indexes; never mutate or delete existing records) and **idempotent**. This is the client-side analogue of the node's forward-only chain (§15.3).
+**SPA storage chain (normative; formalizes §11).** The mule's `IndexedDB` database `dtn_local_store` (§11) carries its own integer version — the `DB_VERSION` / `onupgradeneeded` scaffold of `node/web/js/store.js`. That scaffold is normative: store upgrades MUST be expressed as an explicit, **ordered migrations table**; each migration MUST be **additive-only** (create stores/indexes; never mutate or delete existing records) and **idempotent**. This is the client-side analogue of the node's forward-only chain (§15.3). Chain: v2 adds `inbox_parts` (§4.4), v3 adds `sent` (§4.5), v4 adds `prekeys` (§4.6), v5 adds `contacts` (§4.7, keyPath `ed`).
 
 **Conversion vehicle.** Every node serves the SPA same-origin at the portal origin (§12), so a mule visiting an upgraded node automatically receives upgraded client code. The updated SPA MAY convert its carried `transit_queue` envelopes from v1 to v2 before pushing — the blind transform of §15.1 (`v = 2`, `meta.orig_v = 1`, everything else preserved) — but ONLY after confirming via `GET /api/v1/capabilities` that the node advertises `max_envelope_version` ≥ 2 (§15.5). The SPA uses `max_envelope_version` to decide whether to convert.
 
@@ -1038,14 +1214,17 @@ A build claiming conformance to this section MUST be covered by tests for each o
 | k | **Replenish keeps the stock healthy (§4.6):** a stock at/below the low-water mark (or a stale SPK) triggers regeneration on sync — a fresh signed bundle is published via the ordinary directory upsert, the local stock is swapped, the old batch's secrets are wiped, and mail already addressed to a wiped OPK no longer decrypts; a failed replenish keeps the old stock. |
 | l | **Tampered bundle falls back (§4.6):** an entry whose `spk_sig` does not verify (or whose shape is invalid) is treated as bundle-less — the sender addresses the identity key (mail still delivered) and the UI surfaces a warning; the node itself never verifies signatures (§1) and rejects blind-shape violations with `400 invalid_prekeys`. |
 | m | **Prekey migration both directions (§4.6):** an old-client envelope addressed to the identity key of a prekey-published recipient is delivered through the permanent identity trial path (no forward secrecy — documented); a new-client sender facing an entry WITHOUT `prekeys` falls back to identity addressing and delivers; a storage schema 3→4 migration preserves every directory row (prekeys backfilled NULL). |
+| n | **In-person contact exchange without a directory (§4.7):** two clients import each other's OFFGRID1 payloads into their contacts, the directory endpoints stay EMPTY throughout, and a message exchange completes BOTH ways on the §6.1 offline-cold static hint with the §4.6 identity fallback; a tampered payload (byte damage inside the CRC-covered region) is rejected with the visible `bad_crc` reason and stores nothing; the canonical string, CRC-32 and Ed25519 signature match the §4.7 worked vector; and the shipped encoder's matrix round-trips through an independent QR decoder across versions 1-15 (byte mode, ECC M). |
 
 ## 16. Conformance checklist
 
 **Module B (node daemon) MUST:** implement the schema and pragmas of §9 (storage schema version 4, including the §6.1 `directory.epoch` column set server-side at upsert and the §4.6 nullable `directory.prekeys` column with the §15.3 migration chain — 3→4 purely additive); the nine endpoints with the exact status codes, limits and redirect/exemption behavior of §10 (including the diagnostics surface of §10.7: the health snapshot and the operator status view, aggregate-only, with RAM-only counters, the 1-second snapshot cache and the per-IP diagnostics budget); envelope validation of §10.5 (blind: no hint-vs-key or hint-vs-epoch validation, ever); the §10.3 blind `prekeys` admission (shape only — v, Base64 lengths, opks count 8..16, ts > 0, ≤ 2048 bytes; NO signature verification ever; absent member clears the column); the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement including the additive §6.1 members); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
 
-**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6 — the §6.1 rotating derivation for the EPOCH OF THE DIRECTORY ENTRY on send, the static legacy form only as a pre-1.6/degraded fallback, and HKDF-SHA256 exactly per RFC 5869 on the vendored SHA-256 — always from the STABLE identity key, never from a prekey (§4.6); recognize its own mail by the §6.1 candidate set {legacy (before the deadline), hint(E), hint(E−1)} with E the highest server-observed epoch, dropping the legacy candidate from clock `HINT_TRANSITION_DEADLINE` on; implement the §4.6 prekey lifecycle: generate and publish the bundle at registration (canonical string, `spk_sig` with the identity Ed25519 key), verify a peer's bundle shape AND signature before prekey-addressing (random OPK, else SPK, else identity fallback with a UI warning on a failed signature), keep `dest_hint` identity-derived, trial-decrypt in the fixed order identity → SPK → unconsumed OPKs, wipe the OPK secret synchronously on use (tombstoning its public), replenish below the low-water mark / on stale SPK during sync (best-effort re-POST, atomic stock swap, old-batch wipe), and keep prekey secrets device-local in the additive v4 `prekeys` store (never derived from the identity seed); enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the §4.4 long-message convention (split long texts on code-point boundaries within the per-sender budget, sign the `w`/`g`/`i`/`n` metadata, enforce the n ≤ 16 cap with a pre-send envelope-count preview, reassemble by group id `g` out-of-order and duplicate-tolerantly, render partials as "still traveling" and expire them with the chunks' shared TTL via passive sweeps, additive store migrations for the partial state); implement the §4.5 delivery-acknowledgment convention (emit at most one signed `"ack1"` ack per delivered message — flat on verified receipt, chunked exactly at reassembly completion, referencing the agreed envelope id; never ack an ack; apply the TTL formula with the ack's own `created_at`; bind every received ack to the recorded recipient key before flipping a sent record's state, silently ignoring mismatches; keep the sent history and the opt-in local-only); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
+**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6 — the §6.1 rotating derivation for the EPOCH OF THE DIRECTORY ENTRY on send, the static legacy form only as a pre-1.6/degraded fallback, and HKDF-SHA256 exactly per RFC 5869 on the vendored SHA-256 — always from the STABLE identity key, never from a prekey (§4.6); recognize its own mail by the §6.1 candidate set {legacy (before the deadline), hint(E), hint(E−1)} with E the highest server-observed epoch, dropping the legacy candidate from clock `HINT_TRANSITION_DEADLINE` on; implement the §4.6 prekey lifecycle: generate and publish the bundle at registration (canonical string, `spk_sig` with the identity Ed25519 key), verify a peer's bundle shape AND signature before prekey-addressing (random OPK, else SPK, else identity fallback with a UI warning on a failed signature), keep `dest_hint` identity-derived, trial-decrypt in the fixed order identity → SPK → unconsumed OPKs, wipe the OPK secret synchronously on use (tombstoning its public), replenish below the low-water mark / on stale SPK during sync (best-effort re-POST, atomic stock swap, old-batch wipe), and keep prekey secrets device-local in the additive v4 `prekeys` store (never derived from the identity seed); enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the §4.4 long-message convention (split long texts on code-point boundaries within the per-sender budget, sign the `w`/`g`/`i`/`n` metadata, enforce the n ≤ 16 cap with a pre-send envelope-count preview, reassemble by group id `g` out-of-order and duplicate-tolerantly, render partials as "still traveling" and expire them with the chunks' shared TTL via passive sweeps, additive store migrations for the partial state); implement the §4.5 delivery-acknowledgment convention (emit at most one signed `"ack1"` ack per delivered message — flat on verified receipt, chunked exactly at reassembly completion, referencing the agreed envelope id; never ack an ack; apply the TTL formula with the ack's own `created_at`; bind every received ack to the recorded recipient key before flipping a sent record's state, silently ignoring mismatches; keep the sent history and the opt-in local-only); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); implement the §4.7 identity-QR exchange (build the signed OFFGRID1 payload with the §4.7 canonical string, CRC-32 and Ed25519 signature, render it to a `<canvas>` via the vendored encoder at versions 1-15 ECC M with the payload also shown as copyable text, verify an incoming payload in the exact §4.7 order rejecting VISIBLELY with the reason and storing NOTHING on any failure, keep contacts in the additive v5 `contacts` store keyed by the Ed25519 key with source "qr"/"paste", merge contacts ∪ directory at send time deduped by key with the directory supplying fresh key material, feature-detect `BarcodeDetector` + `getUserMedia` for scanning and direct every unsupported environment to the paste fallback); display the canonical URL and the full-browser banner (§12, §13.4).
 
 ## Changelog
+
+- **1.8.0 (2026-10-04, issue #28 — identity QR, in-person contact exchange):** added §4.7 "Identity QR — in-person contact exchange": two people who meet exchange identities by showing and scanning a QR code (alias + Ed25519 signing key + X25519 encryption key + a checksum) instead of relying solely on the node directory or typing key strings — a CLIENT-SIDE payload convention with ZERO wire change (no envelope field, canonical form, §8 limit or node behavior touched). The QR text is `OFFGRID1:<Base64(JSON)>` (§3.3 Base64) where the JSON object carries exactly `v` (1), `alias` (§8.1 regex), `ed` (the publisher's Ed25519 identity key — the contact's identity), `x` (the X25519 encryption key), `ts` (unix seconds, ≤ 300 s in the future per the §4.3 skew), `sig` (Ed25519 detached signature by the publisher's `ed` key) and `crc` (8 lowercase hex). The signature AND the CRC-32 cover the NEW canonical signed string `{"v":1,"alias":<alias>,"ed":<ed>,"x":<x>,"ts":<ts>}` (fixed member order, §5 rules; §5.1 pointer added); the CRC is the standard IEEE 802.3/zlib CRC-32 and sits OUTSIDE the signature deliberately — scan/paste corruption surfaces instantly as a CRC mismatch while tampering still fails the Ed25519 check. Worked vector pinned (identity = the RFC 8032 §7.1 key, 145-byte canonical string, crc `d76a4d73` INDEPENDENTLY cross-checked with Python's zlib.crc32, 357-character payload). Importer procedure normative in ten ordered steps (prefix → Base64 → JSON → member set → version → alias regex → key lengths → ts → CRC → signature); every failure is rejected with a VISIBLE error naming the reason and NOTHING is stored — the documented, deliberate opposite of the §4.3 silent discard (an in-person exchange has the user looking at the screen; envelope damage stays silent). Rendering: the vendored `qrcode-generator` 1.4.4 (MIT, `node/web/js/vendor/qrcode.js` with provenance header — zero external assets, same vendor discipline as tweetnacl) renders byte mode, versions 1..15, ECC level M to a `<canvas>` with a 4-module quiet zone; the maximum identity payload (377 chars at a 24-char alias) fits version 15 and NO prekeys travel in the QR (they would triple its size). Contacts are device-local: the additive-only, idempotent IndexedDB migration v5 adds the `contacts` store (§15.6 chain, DB_VERSION 5) keyed by the contact's Ed25519 key — `{ed, x, alias, added_at, source ("qr"|"paste")}` — and the recipient picker merges contacts ∪ directory DEDUPED by the Ed25519 key, offline-first (contacts are offered even when the directory fetch fails; the directory supplies the fresh key material — §4.6 bundle and §6.1 epoch — when an entry exists, while a contact-only recipient is addressed with the §4.6 identity fallback and the §6.1 offline-cold static hint). Scanning feature-detects the native `BarcodeDetector` + `getUserMedia` (Android Chrome — the realistic full-browser side; NO vendored decoder) and every unsupported environment (iOS Safari, desktop, captive mini-browsers) shows an honest notice directing to the paste fallback, which feeds the identical parser. Trust model normative: an in-person scan is trust-on-sight of the person showing the code (tampering and corruption are detectable; a malicious publisher is not — scanning a stranger's QR stores exactly the keys it shows); aliases are cosmetic and not unique (identity = the Ed25519 key); no revocation in Phase 1. §11 client summary extended (merged recipient picker, Contacts tab, camera/paste import), §15.6 chain extended to v5, §15.7 row n (the directory-free two-way exchange, the visible tamper rejection and the encoder's round-trip through an independent QR decoder across versions 1-15), §16 Module C conformance extended. Additive only: no frozen field, limit, canonical inner form, envelope-format or hint-derivation change; tests/qr_identity.mjs added to the suite (Makefile `test`, docs/BUILD.md §4).
 
 - **1.7.0 (2026-10-04, issue #27 — prekey bundles, forward secrecy):** added §4.6 "Prekey bundles — bounded forward secrecy": a later compromise of a user's long-term X25519 key no longer decrypts envelopes that were captured earlier and addressed to a CONSUMED one-time prekey. The envelope format is untouched (zero wire change — the §3.1 payload stays `eph_pub ‖ nonce ‖ box`): each client publishes an additive `prekeys` member in its directory entry — `v` (1), `spk` (signed medium-term X25519 prekey, rotated every 30 days on the `ts` anchor), `spk_sig` (Ed25519 detached signature by the entry's identity key over the NEW canonical bundle string `{"b":1,"k":<k>,"spk":<spk>,"ts":<ts>,"opk":<count>}`, fixed member order, worked vector pinned with the RFC 8032/RFC 7748 test keys), and `opks` (8..16 one-time prekey publics, target stock 12). Senders verify shape AND signature client-side (the node never verifies, §1) and target a random OPK, else the SPK, else the identity X25519 key (legacy fallback — also the behavior for missing or tampered bundles, the latter surfacing a UI warning; the signature closes the malicious-node doctored-bundle attack); `dest_hint` stays derived from the STABLE identity key (§6.1 note). Recipients trial-decrypt in fixed order identity → SPK → unconsumed OPKs (first success wins; identity remains a PERMANENT candidate, so old-sender mail keeps arriving without forward secrecy — the documented transition tradeoff) and WIPE the OPK secret synchronously on use — the forward-secrecy event, with a tombstone list preventing re-seeding; the second envelope to a consumed OPK is silently lost (bounded by the 8..16 stock). Lifecycle: prekey secrets are fresh random pairs (never derived from the identity seed), device-local in the additive idempotent IndexedDB migration v4 (`prekeys` store: SPK secret, unconsumed OPK secrets, tombstones); replenish runs inside the sync flow below the low-water mark (≤ 4 remaining) or on stale SPK — fresh batch, best-effort re-POST of the own entry, atomic stock swap, old-batch secrets wiped (in-flight mail to a replenished batch is silently lost, bounded by the low-water policy). Node changes are additive and blindness-preserving: storage schema VERSION 4 (forward-only migration 3→4 adds nullable `directory.prekeys TEXT` — pre-existing rows read NULL, nothing rewritten; downgrade refusal unchanged), POST /api/v1/directory accepts the OPTIONAL `prekeys` member with BLIND shape validation (`v == 1`, Base64 32/64-byte `spk`/`spk_sig`, ts > 0, 8..16 OPKs of 32 bytes, whole member ≤ 2048 bytes → else `400 invalid_prekeys`; NO signature verification), a POST without `prekeys` clears the column (the downgrade self-heal), and GET /api/v1/directory returns the bundle verbatim when present (§8.1 NOTE: ≤ 2 KiB per entry, worst-case 500-entry response ≈ 1 MiB). tweetnacl fit: `crypto_box`'s internal `X25519(eph, target)` alone provides the FS property once the target prekey secret is wiped — no new KDF, no new primitives (design record: `docs/forward-secrecy.md`). §5.1 pointer, §8.1 note, §9/§10.3/§11 client summary, §13.2/§13.5 residual risks (identity-key mail stays FS-free; OPK loss windows; doctored bundles), §15.3 row 4, §15.5/§10.7 examples at schema_version 4, §15.7 rows j–m, §16 Module B/C conformance extended. Additive only: no frozen field, §8 limit (beyond the documented GET-size NOTE), canonical inner form, envelope-format or hint-derivation change.
 

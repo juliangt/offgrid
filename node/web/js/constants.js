@@ -99,3 +99,21 @@ var PREKEY_OPK_MAX = 16;                       // node admission ceiling (§10.3
 var PREKEY_BUNDLE_MAX_BYTES = 2048;            // node admission cap for the serialized member
 var PREKEY_PUBLIC_B64_LEN = 44;                // Base64 of a 32-byte X25519 public
 var PREKEY_SIG_B64_LEN = 88;                   // Base64 of a 64-byte Ed25519 signature
+
+/* Identity QR — in-person contact exchange (§4.7 — issue #28, spec 1.8.0).
+ * A versioned, self-authenticating UTF-8 payload ("OFFGRID1:" + Base64 of a
+ * canonical JSON object) carries the alias, the Ed25519 identity key and the
+ * X25519 encryption key, signed by the publisher's Ed25519 key plus a CRC-32
+ * OUTSIDE the signature for fast accidental-corruption detection. The
+ * signature covers the canonical string
+ *   {"v":1,"alias":<alias>,"ed":<ed>,"x":<x>,"ts":<ts>}
+ * (fixed member order, §5 canonical rules; §4.7). NO prekeys travel in the
+ * QR (they would triple its size); contacts merge with the directory at
+ * send time (§4.7). The QR text is rendered to a <canvas> by the vendored
+ * qrcode-generator (js/vendor/qrcode.js — zero external assets). */
+var QR_PAYLOAD_PREFIX = "OFFGRID1:"            // scanner-recognizable header (§4.7)
+var QR_PAYLOAD_VERSION = 1                     // payload schema version (§15-style)
+var QR_MAX_VERSION = 15;                       // encoder cap: QR versions 1..15, byte mode
+var QR_ECC_LEVEL = "M";                        // encoder ECC level (§4.7)
+var QR_TS_SKEW_SECONDS = 300;                  // future-ts allowance, same 300 s as §4.3 step 6
+var QR_QUIET_ZONE_MODULES = 4;                 // canvas quiet zone (ISO/IEC 18004)

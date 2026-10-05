@@ -38,7 +38,7 @@ Key design decisions:
 ### How a message travels
 
 1. Alice registers once on the portal: alias + key pairs generated on her device; private keys never leave her browser's `IndexedDB`.
-2. She picks Bob from the node's public directory and writes a message (up to 128 bytes per envelope; her client splits longer texts into several envelopes — 16 at most — and Bob's reassembles them into one message). Her client signs, encrypts, addresses each envelope with a blind `dest_hint` and computes its `id`.
+2. She picks Bob from the node's public directory (or from her saved in-person contacts — see the QR exchange in Usage) and writes a message (up to 128 bytes per envelope; her client splits longer texts into several envelopes — 16 at most — and Bob's reassembles them into one message). Her client signs, encrypts, addresses each envelope with a blind `dest_hint` and computes its `id`.
 3. The envelope enters a node via `POST /api/v1/sync` — the node only sees random bytes and an opaque (rotating, per-epoch) hint.
 4. Any syncing user becomes a mule: unknown envelopes ride along in their `transit_queue`.
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
@@ -75,8 +75,9 @@ Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
 1. **Joins the network** — the captive portal opens automatically (or browse to `http://offgrid.local:8080`).
 2. **Registers once** — picks an alias; key pairs are generated on the device and stay there (with an optional seed backup).
-3. **Writes messages** — picks a recipient from the public directory (alias + public key) and writes UTF-8 text: up to 128 bytes per envelope, and the composer splits anything longer into at most 16 envelopes (with the envelope count shown before sending).
-4. **Syncs automatically on page load** — pushes what it carries, pulls what's addressed to it into the inbox, and keeps unknown envelopes (up to 100) in the transit queue for the next node. A telemetry panel shows what the phone is carrying: *"Foreign envelopes in transit: X / Capacity: Y"*.
+3. **Exchanges contacts in person (optional)** — two people who meet can flash their identity QR codes at each other (Contacts tab): scanning the other person's code — or pasting the payload text it displays — saves their alias and public keys as a contact, with the payload signed by their Ed25519 key and checksummed so a tampered or damaged code is visibly rejected. Contacts appear in the composer even when the node's directory is unreachable; when both are available the fresh directory data is used for sending.
+4. **Writes messages** — picks a recipient from the merged directory + contacts list and writes UTF-8 text: up to 128 bytes per envelope, and the composer splits anything longer into at most 16 envelopes (with the envelope count shown before sending).
+5. **Syncs automatically on page load** — pushes what it carries, pulls what's addressed to it into the inbox, and keeps unknown envelopes (up to 100) in the transit queue for the next node. A telemetry panel shows what the phone is carrying: *"Foreign envelopes in transit: X / Capacity: Y"*.
 
 That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.
 
@@ -92,8 +93,9 @@ Requirements: Go 1.26+ and Node.js (tests only). From the repository root:
 cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev binary
 cd node && go test ./... -count=1 && cd ..
 node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
-node tests/spa_structure.mjs       # 91 assertions on the SPA layout, CSP and API surface
-bash tests/sync_e2e.sh             # 192 assertions: two real daemons + full mule walk (curl only)
+node tests/qr_identity.mjs         # 72 assertions on the §4.7 identity QR (payload vectors, tamper rejection, QR encoder round-trips)
+node tests/spa_structure.mjs       # 185 assertions on the SPA layout, CSP and API surface
+bash tests/sync_e2e.sh             # 321 assertions: five real daemons + full mule walk (curl only)
 ```
 
 `tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.

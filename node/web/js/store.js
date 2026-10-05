@@ -23,6 +23,11 @@
  *                    published_at}, unconsumed opks [{pubB64, secret}]
  *                    and tombstones [pubB64] — the SECRETS never leave
  *                    the device and are wiped on use/replenish (§4.6)
+ *      contacts      identities exchanged in person via the §4.7 QR
+ *                    payload (created by migration v5), keyed by the
+ *                    contact's Ed25519 public key: {ed, x, alias,
+ *                    added_at, source ("qr" | "paste")} — identity = key,
+ *                    the alias is cosmetic (§4.7)
  *      transit_queue foreign envelopes being carried, keyed by envelope id
  *      seen_ids      dedup memory of every envelope id ever pulled or
  *                    pushed, so known_ids = inbox ∪ transit ∪ seen (§11)
@@ -36,12 +41,13 @@
  *    call them).
  * ------------------------------------------------------------------- */
 var DB_NAME = "dtn_local_store";
-var DB_VERSION = 4;
+var DB_VERSION = 5;
 var STORE_IDENTITY = "identity";
 var STORE_INBOX = "inbox";
 var STORE_PARTS = "inbox_parts";
 var STORE_SENT = "sent";
 var STORE_PREKEYS = "prekeys";
+var STORE_CONTACTS = "contacts";
 var PREKEY_STOCK_KEY = "stock";
 var STORE_TRANSIT = "transit_queue";
 var STORE_SEEN = "seen_ids";
@@ -111,9 +117,23 @@ var IDB_MIGRATIONS = [
     migrate: function (db) {
       db.createObjectStore(STORE_PREKEYS);                      /* out-of-line keys */
     }
+  },
+  {
+    version: 5,
+    /* v5 (§4.7 identity QR, issue #28): the contacts store for identities
+     * exchanged IN PERSON via the OFFGRID1 payload, keyed by the contact's
+     * Ed25519 public key (keyPath "ed" — identity = key, the §4.7 trust
+     * model). Records: {ed, x, alias, added_at, source} with source "qr"
+     * (camera scan) or "paste" (the universal fallback). Strictly
+     * additive: one new store, no existing store or record is touched
+     * (§15.6); a database without contacts keeps working unchanged — the
+     * recipient picker simply falls back to the directory alone. */
+    migrate: function (db) {
+      db.createObjectStore(STORE_CONTACTS, { keyPath: "ed" });
+    }
   }
   /* Future versions append here, e.g. (never added speculatively):
-   * { version: 5, migrate: function (db) { db.createObjectStore(...) } }
+   * { version: 6, migrate: function (db) { db.createObjectStore(...) } }
    */
 ];
 
@@ -538,6 +558,59 @@ function wipeOpkSecret(pubB64) {
   });
 }
 
+/* ----- contacts: identities exchanged via the §4.7 QR payload ----- */
+
+/*
+ * Upsert one contact keyed by its Ed25519 public key (the §4.7 trust
+ * model: identity = key). Re-adding an existing contact (a second scan or
+ * a fresh paste) refreshes alias/x/source inside ONE readwrite
+ * transaction while keeping the ORIGINAL added_at (first contact wins the
+ * timeline). The record shape is validated by qrContactRecord upstream;
+ * a malformed record is rejected here defensively.
+ */
+function saveContact(record) {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      if (!record || typeof record.ed !== "string" || !record.ed ||
+          typeof record.x !== "string" || !record.x ||
+          typeof record.alias !== "string" || !record.alias) {
+        reject(new Error("invalid contact record"));
+        return;
+      }
+      var tx = db.transaction(STORE_CONTACTS, "readwrite");
+      var store = tx.objectStore(STORE_CONTACTS);
+      var req = store.get(record.ed);
+      req.onsuccess = function () {
+        var existing = req.result;
+        var next = {
+          ed: record.ed,
+          x: record.x,
+          alias: record.alias,
+          added_at: (existing && typeof existing.added_at === "number") ? existing.added_at : record.added_at,
+          source: record.source
+        };
+        store.put(next);
+      };
+      tx.oncomplete = function () { resolve(record); };
+      tx.onerror = function () { reject(tx.error || new Error("could not save the contact")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
+/* Contacts, sorted by alias then ed (the deterministic picker order of
+ * qrMergeRecipients, §4.7). */
+function listContacts() {
+  return storeGetAll(STORE_CONTACTS).then(function (rows) {
+    rows.sort(function (x, y) {
+      if (x.alias !== y.alias) return x.alias < y.alias ? -1 : 1;
+      if (x.ed !== y.ed) return x.ed < y.ed ? -1 : 1;
+      return 0;
+    });
+    return rows;
+  });
+}
+
 /* ----- transit_queue (mule cargo, §2/§11) ----- */
 
 /* Keep exactly the six §3.1 wire fields when pushing a carried record. */
@@ -683,6 +756,9 @@ DTN.PREKEY_STOCK_KEY = PREKEY_STOCK_KEY;
 DTN.loadPrekeyState = loadPrekeyState;
 DTN.savePrekeyState = savePrekeyState;
 DTN.wipeOpkSecret = wipeOpkSecret;
+DTN.STORE_CONTACTS = STORE_CONTACTS;
+DTN.saveContact = saveContact;
+DTN.listContacts = listContacts;
 DTN.addTransitEnvelopes = addTransitEnvelopes;
 DTN.listTransit = listTransit;
 DTN.removeTransitIds = removeTransitIds;
