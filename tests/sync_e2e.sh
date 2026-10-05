@@ -121,6 +121,16 @@
 #       her contact with the §6.1 offline-cold STATIC hint and the §4.6
 #       identity fallback, Bob receives and REPLIES the same way, and both
 #       inboxes show both messages.
+#   18. §12.1 PWA-lite installability (issue #29): /manifest.json serves
+#       with the application/manifest+json content type and the exact
+#       §12.1 members (relative start_url/scope "/", standalone, 192+512
+#       "any maskable" icons, NO service-worker member), the three PNG
+#       icons serve as image/png with the exact advertised pixel dimensions
+#       (PNG magic + IHDR parsed), the portal HTML carries the manifest
+#       link, theme-color, the iOS meta tags and the honest no-offline
+#       note, NO external URL appears in any of them (zero external
+#       assets), unknown icons 404, POST 405, and the canonical-host 301
+#       covers the new paths.
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -866,6 +876,105 @@ for secret in "$ENV_ID" "$ENV_HINT" "$ENV_PAYLOAD" "alice" "bob" \
     if grep -qF "$secret" "$WORK/status_body" 2>/dev/null; then PRIVACY=leak; fi
 done
 check "no envelope id, hint, payload, alias or key appears in health or status (§13)" "clean" "$PRIVACY"
+
+# ---------------------------------------------------------------------------
+# 12b. §12.1 PWA-lite installability (issue #29): the web app manifest and
+#      its icons serve same-origin from the embedded assets, with the exact
+#      advertised members and pixel dimensions, the portal HTML carries the
+#      manifest link + iOS meta tags, NOTHING references an external URL
+#      (zero external assets; CSP img-src 'self' intact), the honest
+#      no-offline wording ships in the page, and the canonical-host 301 plus
+#      the JSON 404/405 conventions cover the new paths (§10.2, §10.1).
+# ---------------------------------------------------------------------------
+code="$(http GET "http://127.0.0.1:$PORT_A/manifest.json")"
+check "GET /manifest.json -> 200 (§12.1)" "200" "$code"
+curl -sS -o /dev/null -D "$WORK/hdr_manifest" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/manifest.json"
+if tr -d '\r' < "$WORK/hdr_manifest" | grep -qi '^Content-Type: application/manifest+json'; then CT=ok; else CT=bad; fi
+check "manifest Content-Type is application/manifest+json" "ok" "$CT"
+if tr -d '\r' < "$WORK/hdr_manifest" | grep -qi '^Cache-Control: no-cache'; then CC=ok; else CC=bad; fi
+check "manifest Cache-Control is no-cache (revalidated on every load)" "ok" "$CC"
+cp "$WORK/last_body" "$WORK/manifest_body"
+
+node -e '
+const fs = require("fs");
+const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const checks = [
+  ["name", m.name === "Offgrid Messages"],
+  ["short_name", m.short_name === "Offgrid"],
+  ["start_url is RELATIVE \"/\"", m.start_url === "/"],
+  ["scope is \"/\"", m.scope === "/"],
+  ["display standalone", m.display === "standalone"],
+  ["no serviceworker member", !("serviceworker" in m)],
+  ["icons carry 192+512 maskable", Array.isArray(m.icons) && m.icons.length === 2 &&
+    m.icons.some(i => i.sizes === "192x192" && i.purpose === "any maskable" && i.type === "image/png") &&
+    m.icons.some(i => i.sizes === "512x512" && i.purpose === "any maskable" && i.type === "image/png")],
+  ["no absolute URL in the manifest", !/https?:\/\//i.test(JSON.stringify(m))],
+];
+let bad = null;
+for (const [label, pass] of checks) { if (!pass) { bad = label; break; } }
+if (bad) { console.error("manifest check failed: " + bad); process.exit(1); }
+' "$WORK/manifest_body" || MANIFEST_RC=$?
+check "manifest members: name/short_name/relative start_url+scope/standalone/192+512 maskable/no SW/no URL" "0" "${MANIFEST_RC:-0}"
+
+# Icons: PNG magic + IHDR dimension parse (independent of any image tooling),
+# exact sizes, image/png content type.
+ICON_SPECS="icon-192.png:192 icon-512.png:512 icon-180.png:180"
+for spec in $ICON_SPECS; do
+    ICON_FILE="${spec%%:*}"; ICON_SIZE="${spec##*:}"
+    code="$(http GET "http://127.0.0.1:$PORT_A/icons/$ICON_FILE")"
+    check "GET /icons/$ICON_FILE -> 200" "200" "$code"
+    cp "$WORK/last_body" "$WORK/icon_body"
+    curl -sS -o /dev/null -D "$WORK/hdr_icon" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/icons/$ICON_FILE"
+    if tr -d '\r' < "$WORK/hdr_icon" | grep -qi '^Content-Type: image/png'; then CT=ok; else CT=bad; fi
+    check "icon $ICON_FILE Content-Type is image/png" "ok" "$CT"
+    node -e '
+const fs = require("fs");
+const b = fs.readFileSync(process.argv[1]);
+const magic = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+if (!b.subarray(0,8).equals(magic)) process.exit(1);
+if (b.toString("ascii",12,16) !== "IHDR") process.exit(1);
+const w = b.readUInt32BE(16), h = b.readUInt32BE(20);
+const want = Number(process.argv[2]);
+process.exit(w === want && h === want ? 0 : 1);
+' "$WORK/icon_body" "$ICON_SIZE" || ICON_RC=$?
+    check "icon $ICON_FILE is a PNG of exactly ${ICON_SIZE}x${ICON_SIZE} (magic + IHDR)" "0" "${ICON_RC:-0}"
+done
+code="$(http GET "http://127.0.0.1:$PORT_A/icons/icon-64.png")"
+check "GET /icons/icon-64.png (unknown icon) -> JSON 404" "404" "$code"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST -H 'Content-Type: application/json' --data '{}' "http://127.0.0.1:$PORT_A/manifest.json")"
+check "POST /manifest.json -> 405 (wrong method, §10.1)" "405" "$code"
+
+# The portal HTML must carry the manifest link, theme-color and the iOS
+# metadata, the honesty note, and NO external URL beyond the canonical §12
+# origin reference the §13.4 banner already displays.
+code="$(http GET "http://127.0.0.1:$PORT_A/")"
+cp "$WORK/last_body" "$WORK/index_pwa"
+for marker in '<link rel="manifest" href="/manifest.json">' '<meta name="theme-color"' \
+    'apple-mobile-web-app-capable' 'apple-mobile-web-app-status-bar-style' \
+    '<link rel="apple-touch-icon" href="/icons/icon-180.png">' \
+    'it is a shortcut, not an offline app'; do
+    if grep -qF "$marker" "$WORK/index_pwa"; then FOUND=yes; else FOUND=no; fi
+    check "portal HTML carries: $marker" "yes" "$FOUND"
+done
+EXTERNALS="$({ grep -oE 'https?://[^"<[:space:]]+' "$WORK/index_pwa" || true; } | { grep -v '^http://offgrid\.local:8080' || true; } | sort -u | tr '\n' ' ')"
+check "no external URL in the portal HTML beyond the canonical origin" "" "$EXTERNALS"
+check "no external URL in the manifest" "" "$({ grep -oE 'https?://[^"<[:space:]]+' "$WORK/manifest_body" || true; } | tr '\n' ' ')"
+# The icons are binary: audit the SERVED bytes for any URL fragment too
+# (grep -a treats them as text; zero matches is the pass).
+ICON_URLS=clean
+for ICON_FILE in icon-192.png icon-512.png icon-180.png; do
+    curl -sS -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/icons/$ICON_FILE" -o "$WORK/icon_urlcheck" 2>/dev/null
+    if LC_ALL=C grep -qa 'http' "$WORK/icon_urlcheck"; then ICON_URLS=dirty; fi
+done
+check "no URL fragment in any served icon (zero external assets)" "clean" "$ICON_URLS"
+
+# Canonical-host middleware covers the new paths (§10.2).
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_m301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/manifest.json")"
+check "raw-IP GET /manifest.json redirects with 301" "301" "$code"
+if tr -d '\r' < "$WORK/hdr_m301" | grep -qi '^Location: http://offgrid\.local:8080/manifest\.json$'; then LOC=canonical; else LOC=missing; fi
+check "manifest 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/icons/icon-192.png")"
+check "raw-IP GET /icons/icon-192.png redirects with 301" "301" "$code"
 
 # ---------------------------------------------------------------------------
 # 13. §4.4 long-message chunking (issue #24): a 1 KiB message survives the

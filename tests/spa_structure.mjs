@@ -45,7 +45,13 @@ const onDisk = new Set(
 for (const file of onDisk) {
   ok(referenced.has(file), `source file ${file} is referenced by index.html`);
 }
-ok(referenced.size === onDisk.size, "no referenced asset missing and no orphaned source file");
+// The page may also reference non-code assets (§12.1: the manifest and the
+// apple-touch icon); every css/js file on disk must still be referenced and
+// no code file may be orphaned.
+const referencedCode = [...referenced.keys()].filter((u) => /\.(css|js)$/.test(u));
+ok(referencedCode.length === onDisk.size, "no referenced asset missing and no orphaned source file");
+ok(referenced.has("/manifest.json") && referenced.has("/icons/icon-180.png"),
+   "the §12.1 metadata assets referenced by the page exist on disk");
 
 console.log("== 2. CSP: 'self' only, no inline scripts or styles ==");
 const csp = html.match(/Content-Security-Policy[^>]*content="([^"]+)"/)?.[1] ?? "";
@@ -141,6 +147,21 @@ for (const { url, source } of pageScripts()) {
 const ui = fs.readFileSync(path.join(webRoot, "js", "ui.js"), "utf8");
 ok(/if \(typeof document !== "undefined" && document\.getElementById\("dtn-app"\)\) \{\s*\n\s*initUi\(\);\s*\n\s*\}\s*$/.test(ui.trimEnd()),
    "ui.js wires the DOM only via the guarded initUi() boot");
+
+console.log("== 5. add-to-home-screen wiring (§12.1, issue #29) ==");
+// The manifest/apple-touch-icon hrefs are already existence-checked in
+// section 1 via referencedAssets(); here the §12.1 metadata contract and
+// the honest hint UI are pinned. Deep manifest/icon assertions live in
+// tests/pwa_assets.mjs.
+ok(html.includes('<link rel="manifest" href="/manifest.json">'), "the page links the web app manifest (same-origin, §12.1)");
+ok(/<meta name="apple-mobile-web-app-capable" content="yes">/.test(html), "iOS standalone metadata present");
+ok(html.includes('<link rel="apple-touch-icon" href="/icons/icon-180.png">'), "iOS apple-touch-icon linked (iOS ignores the manifest)");
+ok(html.includes('id="banner-install"'), "the install hint banner exists in the page");
+ok(html.includes("it is a shortcut, not an offline app"), "the §12.1 honesty note ships verbatim in the hint");
+ok(!/<link[^>]*rel="manifest"[^>]*href="https?:/.test(html) && !/<link[^>]*href="https?:[^"]*"[^>]*rel="manifest"/.test(html),
+   "the manifest link is never an external URL");
+ok(/detectInstallPlatform\(\)/.test(ui) && /install_hint_dismissed/.test(ui),
+   "ui.js platform-gates the hint and persists its dismissal in the meta store");
 
 console.log(`\nPASS: ${passed} structural assertions on the SPA layout`);
 
