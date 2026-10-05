@@ -81,6 +81,15 @@ Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
 That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.
 
+### Keep an Offgrid icon on your home screen
+
+Instead of typing `http://offgrid.local:8080` every time, pin the portal — the node ships a web app manifest and an icon (all self-hosted, no internet needed). While on the node's Wi-Fi in your **full browser**:
+
+- **Android (Chrome):** tap the browser menu (⋮) → **Add to Home screen** → confirm. Chrome may also show a banner offering it.
+- **iOS (Safari):** tap the **Share** button → **Add to Home Screen** → confirm.
+
+The portal then shows the "Offgrid" icon with the standalone (app-like) look, opens straight to your inbox, and always lands on the canonical origin — the same one across every node, so your identity and messages carry over as usual. Honest boundary: **the icon is a shortcut, not an offline app** — it opens the portal when you are on the node's Wi-Fi; without it there is nothing to load (there is deliberately no offline mode — see protocol §12.1).
+
 ### Delivery feedback (best-effort)
 
 The composer can track each sent message locally: **queued** (waiting for the next sync) → **sent** (a node holds it; a mule may be carrying it) → **delivered** (the recipient's device confirmed receipt). The confirmation is one small signed, encrypted acknowledgment envelope that travels back exactly like any other mail — nodes and mules stay blind, it costs at most one envelope per message, and acknowledgments are never acknowledged (no storms). Honesty notes: it is **best-effort**, not a read receipt — the ack itself travels by mule, can arrive late, and can expire or be evicted like any envelope, so silence means *unknown*; it can only be emitted when the recipient's device can resolve your public key from a node directory. Delivery confirmations can be turned off in the Identity tab, and you choose per message whether to track delivery (the sent list lives only on your device).
@@ -94,8 +103,9 @@ cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev bina
 cd node && go test ./... -count=1 && cd ..
 node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
 node tests/qr_identity.mjs         # 72 assertions on the §4.7 identity QR (payload vectors, tamper rejection, QR encoder round-trips)
-node tests/spa_structure.mjs       # 185 assertions on the SPA layout, CSP and API surface
-bash tests/sync_e2e.sh             # 321 assertions: five real daemons + full mule walk (curl only)
+node tests/spa_structure.mjs       # 195 assertions on the SPA layout, CSP and API surface
+node tests/pwa_assets.mjs          # 46 assertions on the §12.1 PWA-lite assets (manifest, icons, zero external URLs)
+bash tests/sync_e2e.sh             # 348 assertions: five real daemons + full mule walk (curl only)
 ```
 
 `tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.
@@ -108,7 +118,8 @@ offgrid/
 ├── docs/            # protocol spec, build/hardware docs, per-model matrix
 ├── node/            # Go daemon (internal: storage, api, cleanup, envelope; web/: SPA)
 ├── raspberry/       # install.sh, provision.sh, hostapd, dnsmasq, firewall, power, systemd
-└── tests/           # crypto round-trip (Node), SPA structure, E2E sync (bash/curl)
+├── tests/           # crypto round-trip (Node), SPA structure, E2E sync (bash/curl)
+└── tools/           # gen_icons.mjs — deterministic regeneration of the §12.1 PWA icons
 ```
 
 ## Documentation
