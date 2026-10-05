@@ -1,0 +1,149 @@
+/*
+ * Guide page stylesheet (issue #23) — serves GET /guide (node/web/guide.html).
+ *
+ * Kept separate from app.css on purpose: this page has its own print layout
+ * (@page, two-column core flow) that must never leak into the portal SPA.
+ * The palette mirrors the portal's :root variables (app.css) so the page
+ * looks like the portal; zero external assets, same-origin only — the page
+ * CSP stays closed (style-src 'self', img-src 'self', no JavaScript at all).
+ */
+
+:root {
+  color-scheme: light;
+  --bg: #f4f6f8;
+  --card: #ffffff;
+  --ink: #16232e;
+  --muted: #5b6b78;
+  --accent: #0b6e4f;
+  --accent-ink: #ffffff;
+  --warn-bg: #fff7e0;
+  --warn-ink: #5c4400;
+  --line: #d7dee5;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* Large font on purpose: the guide is read on phones and by first-time
+     smartphone users, often outdoors. */
+  font-size: 18px;
+  line-height: 1.5;
+  -webkit-text-size-adjust: 100%;
+}
+main { max-width: 640px; margin: 0 auto; padding: 12px 12px 28px; }
+h1 { font-size: 1.45rem; margin: 8px 0 12px; }
+h2 { font-size: 1.1rem; margin: 0 0 6px; }
+p { margin: 6px 0; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  word-break: break-all;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 0 0 14px;
+}
+
+/* The "what to expect" box: the honest-expectations panel. */
+.expectations { background: var(--warn-bg); color: var(--warn-ink); border-color: var(--warn-bg); }
+.expectations h2 { color: inherit; }
+
+/* Steps: one card each, numbered by the CSS counter so the numbering in the
+   served page always matches the master text (docs/quick-start.md). */
+.steps { counter-reset: step; padding: 0; margin: 0; list-style: none; }
+.step { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin: 0 0 14px; }
+.step::before {
+  counter-increment: step;
+  content: counter(step);
+  display: inline-block;
+  width: 1.6em; height: 1.6em;
+  line-height: 1.6em;
+  text-align: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  margin-right: 8px;
+}
+.step h2 { display: inline-block; }
+.step figure { margin: 10px 0 0; }
+.step figure img {
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+figcaption { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 4px; }
+
+/* Glossary: compact definition list. */
+.glossary dt { font-weight: 700; margin-top: 8px; }
+.glossary dd { margin: 0 0 4px 0; }
+
+/* Troubleshooting: plain ordered list cards. */
+.trouble li { margin: 0 0 10px 0; }
+
+/* Screen-only meta notes (master-text pointer, translators' pairing). */
+.meta { color: var(--muted); font-size: 0.85rem; }
+.no-print { }
+
+/* Footer of the guide page: back to the portal (same origin). */
+.guide-footer { text-align: center; margin: 18px 0 8px; }
+.guide-footer a { color: var(--accent); }
+
+/* ---------------------------------------------------------------------
+ * Print: the core flow (steps 1-10) must fit ONE A4/Letter sheet; the
+ * troubleshooting and glossary may spill onto a second sheet (2 max).
+ * Paper printing is text-first: the screenshots become small inline
+ * thumbnails so each step keeps its visual anchor without eating the
+ * sheet, and the screen-only meta notes disappear.
+ * ------------------------------------------------------------------- */
+@page { margin: 9mm; }   /* size: auto — follows the printer (A4 or Letter) */
+
+@media print {
+  body { font-size: 8.5pt; line-height: 1.28; background: #fff; color: #000; }
+  main { max-width: none; padding: 0; }
+  h1 { font-size: 12.5pt; margin: 0 0 3px; }
+  h2 { font-size: 9pt; }
+  p { margin: 2px 0; }
+  code { word-break: normal; overflow-wrap: break-word; }
+
+  .card, .step {
+    border: 0.5pt solid #bbb;
+    border-radius: 4px;
+    padding: 3px 5px;
+    margin: 0 0 4px;
+    break-inside: avoid;
+    page-break-inside: avoid; /* legacy engines */
+  }
+
+  /* Two-column core flow: the ten steps share the first sheet (A4 AND Letter). */
+  .steps { column-count: 2; column-gap: 6mm; }
+  .step { display: inline-block; width: 100%; margin: 0 0 4px; }
+  .step::before { width: 1.4em; height: 1.4em; line-height: 1.4em; font-size: 7.5pt; }
+
+  .step figure { margin: 2px 0 0; }
+  .step figure img { max-width: 20mm; max-height: 20mm; width: auto; border: 0.5pt solid #ccc; float: right; margin: 0 0 2px 4px; }
+  figcaption { display: none; }
+
+  /* Glossary prints as a compact two-column block (it fits beside the intro). */
+  .glossary { column-count: 2; column-gap: 6mm; }
+  .glossary dt { margin-top: 2px; font-size: 8.5pt; }
+  .glossary dd { margin: 0; font-size: 8.5pt; }
+
+  /* Sheet 2: expectations + troubleshooting print after the core flow. */
+  .expectations { margin-top: 4px; }
+
+  /* Screen-only furniture: the back link and the meta notes. */
+  .no-print { display: none; }
+}

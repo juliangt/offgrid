@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <!-- GET /guide (issue #23): the printable end-user quick-start, served by
+       the node itself so a phone on the portal can read it without internet
+       and a field pilot can print it. Same text as docs/quick-start.md (the
+       translatable master); screenshots are the REAL SPA screens under
+       /img/guide/, embedded in the node binary (§10.3). No JavaScript at
+       all — the closed CSP (§1.3 discipline) needs no script-src. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Guide — Off-Grid Messages</title>
+  <link rel="stylesheet" href="/css/guide.css">
+</head>
+<body>
+<main>
+  <h1>Off-Grid Messages — Quick-Start Guide</h1>
+  <div class="card">
+    <p>You can send messages with <strong>no internet and no phone signal</strong>. Messages travel inside the phones of people who walk past. Nobody can read them — not the Wi-Fi box (“node”), not the people carrying them. Only the recipient's phone can open them.</p>
+  </div>
+
+  <ol class="steps">
+    <li class="step">
+      <h2>Join the Wi-Fi</h2>
+      <p>Open the Wi-Fi settings and join the network <code>offgrid-messages</code>. It has no password.</p>
+    </li>
+    <li class="step">
+      <h2>Open your full browser</h2>
+      <p>The Wi-Fi may open a page by itself — that small window forgets everything. Instead, open <strong>Chrome</strong> (Android) or <strong>Safari</strong> (iPhone) yourself and type this address: <code>http://offgrid.local:8080</code></p>
+      <figure><img src="/img/guide/register.png" alt="The portal page with the “Open this in your full browser” banner"></figure>
+    </li>
+    <li class="step">
+      <h2>Keep the icon (do once)</h2>
+      <p>Ask the browser to put an <strong>Offgrid</strong> icon on your home screen: Android — browser menu (⋮) → “Add to Home screen”; iPhone — Share button → “Add to Home Screen”. The icon is a shortcut that opens the page when you are on the node's Wi-Fi.</p>
+    </li>
+    <li class="step">
+      <h2>Register once</h2>
+      <p>Type a name under “Your alias” and tap “Create identity”. Your secret keys are made on your phone and never leave it.</p>
+    </li>
+    <li class="step">
+      <h2>Save your seed — the most important step</h2>
+      <p>The app shows a long code under “Save your backup seed”: write it on paper, keep it safe, then tick “I have saved my seed” and tap “Continue to messages”. If the phone loses the app's data, only this seed brings your identity back.</p>
+      <figure><img src="/img/guide/seed.png" alt="The “Save your backup seed” screen"></figure>
+    </li>
+    <li class="step">
+      <h2>Add a person to write to</h2>
+      <p>Easiest is to meet in person: both open the “Contacts” tab, you tap “Show my QR”, and the other person scans it (or pastes the payload text and taps “Add contact from pasted payload”). Or simply pick a name from the list when writing — the “New message” tab shows everyone registered at this node.</p>
+      <figure><img src="/img/guide/qr.png" alt="The “Show my QR” card in the Contacts tab"></figure>
+    </li>
+    <li class="step">
+      <h2>Write a message</h2>
+      <p>In the “New message” tab, pick the person under “To”, write your text, and tap “Sign and send”. One envelope carries a short text; a longer message costs several envelopes — the app shows the count (“will send 2 envelopes”) before you send, and 16 envelopes are the most a message can cost.</p>
+      <figure><img src="/img/guide/composer.png" alt="The composer with the envelope counter"></figure>
+    </li>
+    <li class="step">
+      <h2>Watch the delivery states</h2>
+      <p>Under “Sent messages” your message starts as “queued — waiting for the next sync”, becomes “sent — carried by a mule”, and shows “delivered — the recipient's device confirmed receipt” when their phone got it. This feedback is best-effort: no “delivered” does not always mean lost.</p>
+      <figure><img src="/img/guide/sent.png" alt="The sent list showing “delivered”"></figure>
+    </li>
+    <li class="step">
+      <h2>Check your inbox</h2>
+      <p>Tap “Inbox”, or “Sync now” at the top to fetch mail again. If a long message shows “Partial message — still traveling”, wait: the rest of it is still walking.</p>
+      <figure><img src="/img/guide/inbox.png" alt="The inbox with a received message"></figure>
+    </li>
+    <li class="step">
+      <h2>Be a mule</h2>
+      <p>The top of the page shows “Foreign envelopes in transit”: other people's encrypted messages riding in your phone — <strong>that is the system working, not a bug</strong>. Walk to the next node's Wi-Fi and sync: your phone drops their mail and picks up yours.</p>
+      <figure><img src="/img/guide/mule.png" alt="The telemetry panel carrying foreign envelopes"></figure>
+    </li>
+  </ol>
+
+  <div class="card expectations">
+    <h2>What to expect (read this once)</h2>
+    <p><strong>Messages ride with people.</strong> Your message arrives only when someone walks from a node near you to a node near the recipient. Minutes in a small village, days across regions.</p>
+    <p><strong>Longer messages cost more.</strong> Every envelope is space in someone's pocket. A mule carries at most 100 envelopes — a very long message eats a visible share of that.</p>
+    <p><strong>Mail expires after 7 days.</strong> If no mule reaches the recipient's node in 7 days, the message is gone. Important news? Also tell it in person.</p>
+    <p><strong>Privacy ends at the recipient's device.</strong> Nodes, mules and the Wi-Fi air see only scrambled bytes. Once the message is on the recipient's phone, it is readable there — protect the phone like the letter.</p>
+  </div>
+
+  <div class="card">
+    <h2>Troubleshooting</h2>
+    <ol class="trouble">
+      <li><strong>The portal does not open.</strong> Open Chrome or Safari yourself and type <code>http://offgrid.local:8080</code>. Do not stay inside the small window the Wi-Fi opened.</li>
+      <li><strong>You opened the page by the numbers</strong> (an address like <code>10.42.0.1:8080</code>). The node sends you to <code>offgrid.local:8080</code> automatically. Always use the name — your account lives under the name, not under the numbers.</li>
+      <li><strong>You lost your seed.</strong> If the app still works: open the “Identity” tab, tap “Show seed” and write it down now. If the app's data is already gone and you have no seed: the identity is lost; register again with a new alias and tell your contacts.</li>
+      <li><strong>“Foreign envelopes in transit” says 100.</strong> Your pocket is full. Walk to any node's Wi-Fi and tap “Sync now” to drop the cargo. Until then, new mail may not fit (the oldest envelope in your pocket is dropped first).</li>
+      <li><strong>Nothing arrives.</strong> Check that the sender shows more than “queued”, wait for a mule to walk, and remember the 7-day limit. Silence means “not yet known”, not always “lost”.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>Ten words you need</h2>
+    <dl class="glossary">
+      <dt>Node</dt><dd>the Wi-Fi box that keeps encrypted messages like a mailbox.</dd>
+      <dt>Portal</dt><dd>the page the node shows you over its Wi-Fi.</dd>
+      <dt>Full browser</dt><dd>Chrome or Safari, opened by you. Not the small window the Wi-Fi opens by itself.</dd>
+      <dt>Alias</dt><dd>the name you pick, like <code>alice_77</code>. It is only a label.</dd>
+      <dt>Seed</dt><dd>a long code that IS your identity. If you lose it, you lose your account forever.</dd>
+      <dt>Envelope</dt><dd>one small encrypted package. A message may need one or more envelopes.</dd>
+      <dt>Mule</dt><dd>a person whose phone carries other people's envelopes to the next node.</dd>
+      <dt>Directory</dt><dd>the list of people registered on the node you are at.</dd>
+      <dt>Contact</dt><dd>a person you added in person, saved on your phone only.</dd>
+      <dt>Sync</dt><dd>the moment your phone swaps mail with a node: it drops what it carries and picks up what is yours.</dd>
+    </dl>
+  </div>
+
+  <p class="meta no-print">Master text: <code>docs/quick-start.md</code> (issue #23). Translations must be paired with that file and keep the step structure identical. Validation with real first-time users happens in the issue #20 field test.</p>
+
+  <p class="guide-footer no-print"><a href="/">Back to Messages</a></p>
+</main>
+</body>
+</html>
