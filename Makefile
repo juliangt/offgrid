@@ -37,6 +37,7 @@ build-all:
 test:
 	cd node && $(GO) test ./... -count=1
 	node tests/crypto_roundtrip.mjs
+	node tests/prekeys.mjs
 	node tests/hint_rotation.mjs
 	node tests/spa_structure.mjs
 	node tests/version_migration.mjs
