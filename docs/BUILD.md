@@ -124,6 +124,14 @@ bash tests/sync_e2e.sh
 #     assertions on the generated firewall ruleset, tc shaping stream and
 #     shield scripts (no hardware, no root)
 bash tests/hardening_structure.sh
+
+# 13. Node upgrade + rollback E2E (issue #22): the real raspberry/upgrade.sh
+#     library — the code `install.sh --upgrade` / `--rollback` run on a Pi —
+#     driven rootlessly against a temp "node" with a REAL populated store:
+#     v1-era store migration on populated data, backup generation rotation,
+#     health-gate success path, forced-failure automatic rollback, zero
+#     envelope loss at every phase
+bash tests/upgrade_e2e.sh
 ```
 
 Expected outputs (assertion counts move as suites grow — the shape is what
@@ -214,6 +222,15 @@ matters):
 
    The design behind these artifact assertions — the adversarial assumptions, the per-defense mapping with regression tests, the deliberate non-defenses and the shed → survive → self-recover contract — is `docs/hardening.md`.
 
+13. The node upgrade E2E ends with:
+
+    ```
+    upgrade: summary: 67 passed, 0 failed
+    upgrade: RESULT: PASS
+    ```
+
+    It sources `raspberry/upgrade.sh` — the very library `install.sh --upgrade` and `--rollback` execute on a Pi — binds every `DTN_*` path into a temporary "node" and overrides the three `upgrade_svc_*` systemd seams with plain background-process management, so the exact field code runs here rootlessly against real files and real daemons (on `127.0.0.1:18101`, disjoint from the E2E's `18091-18095` and the chaos suite's `18095-18099`). It needs `go`, `curl` and the `sqlite3` CLI. The legs: structural pins on the field wiring (`install.sh` modes, the binding stop → backup → swap → start → gate order, the provision.sh `STEPS` subset selector, the Makefile + docs wiring); two binaries from the current tree with distinct `-ldflags -X main.build=` ids; a v1-era store crafted with the §9 schema verbatim (`user_version` 0, no `envelopes.v` / `directory.epoch` / `directory.prekeys`) populated with 3 envelopes + 2 directory rows; the deployed release migrating that populated store through the real §15.3 chain (everything keeps being served: ids, byte-identical payloads, epoch-0 directory backfill); the upgrade success path through the library (backup generation with db + previous binary + `MANIFEST.txt`, prune, binary swap, health gate on build identity + schema_version, zero envelope loss, the write path accepts new mail); backup rotation (4 generations → keep 3, explicit `KEEP=1`); the FAILED-migration rollback (store marker forced to 99, the swapped daemon refuses to start naming both versions, the gate fails, `upgrade_auto_rollback` restores the previous binary + db backup and the node serves the full ledger again with the refused store kept as `pre-restore-<UTC>` evidence); and the negative gates (wrong expected build / schema fail an otherwise healthy node).
+
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
 All of section 4 runs on demand in CI (`.github/workflows/test.yml`,
@@ -286,6 +303,75 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 
    `provision.sh` (10 verified steps) detects the board model and userland ISA, masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables` plus the watchdog probe tools, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files (on single-core ARMv6 boards the daemon's watchdog ceiling is relaxed to 60 s), creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the matching binary at `/opt/dtn-node/dtn-node`, enables every unit, and runs the Track-3 field hardening (keys-only sshd drop-in, journald made volatile, security-only unattended upgrades — the read-only root stays an explicit operator step, OFF by default) — verifying each step with `[OK]`/`[FAIL]` and failing fast.
 
+### Path 4 — upgrade a deployed node (no reflash, no data loss; issue #22)
+
+An already-provisioned node gets a new release in place: the envelope store,
+the directory and the provisioning are kept, the binary and the changed
+configs are swapped, and the node only declares success after a health gate.
+`install.sh --upgrade` uses the SAME bundle resolution as the fresh paths —
+`--offline DIR` (USB stick, no Internet, checksum-verified) and `--ref TAG`
+(online, pinned) both work, exactly as in Paths 1–2:
+
+```bash
+sudo ./install.sh --upgrade --offline /media/usb   # from a release bundle
+sudo ./install.sh --upgrade --ref vX.Y.Z           # online, pinned tag
+sudo ./install.sh --rollback                       # back to the previous release
+sudo ./install.sh --rollback --from upgrade-<ts>-<id>   # a specific generation
+```
+
+The upgrade sequence (binding order, `raspberry/upgrade.sh`):
+
+1. **Preflight** — refuses a never-provisioned box (no `dtn-node.service`
+   unit or no binary = use Paths 1–3), notes the current build identity and
+   the store's `PRAGMA user_version`, and probes the STAGED binary against a
+   throwaway database to learn the exact expectations the health gate must
+   demand (its build id + `schema_version`).
+2. **Stop** `dtn-node`.
+3. **Backup generation FIRST, before anything is touched** — the SQLite main
+   file + any `-wal`/`-shm` sidecars + the previous binary + a `MANIFEST.txt`
+   (old build, old `user_version`, sha256s) go into
+   `/var/lib/dtn-node/backups/upgrade-<UTC ts>-<build>/`; the rotation keeps
+   the last 3 generations and prunes older ones. Because the backup happens
+   BEFORE the new binary ever opens the database, even a failed migration is
+   recovered by a plain file restore (the forward-only migration chain of
+   `docs/protocol.md` §15.3 refuses a binary-only downgrade — the documented
+   recovery is `--rollback`, which restores binary AND database together).
+4. **Idempotent provisioning subset** — `provision.sh` re-runs only the steps
+   that can carry changed files (configs, binary, units, hardening), via its
+   `STEPS=` selector; every step is idempotent and network-free, and
+   `install_file` replaces only differing files (keeping the previous one as
+   `.dtn-bak`). No apt, no NetworkManager surgery, no reboot.
+5. **Start + health gate** — poll `GET /api/v1/health` (the §10.7 document)
+   until: HTTP 200, `"status":"ok"`, the serving `build` member equals the
+   staged binary's id, `schema_version` matches it, and (when the `sqlite3`
+   CLI is present) the live `PRAGMA user_version` equals the served
+   `schema_version` — i.e. the migrations really landed. Budget: 120 s.
+6. **Success, or automatic rollback** — ANY failure (provisioning error,
+   daemon that will not start, gate timeout) stops the service, restores the
+   generation (binary + database; the displaced store is kept as
+   `/var/lib/dtn-node/pre-restore-<UTC>/` evidence), restarts, re-verifies
+   health against the OLD expectations and reports loudly. `install.sh
+   --rollback` is the same machinery invoked by hand (it lists the
+   generations and restores the chosen — default latest — one through the
+   same gate).
+
+**Offline USB checklist for a field upgrade.** On a connected machine:
+(1) `cd node && ./build.sh`; (2) download / assemble the release bundle onto
+a USB stick — `dtn-node-linux-arm64` (the board's artifact,
+`docs/pi-models.md` §1), `SHA256SUMS`, `raspberry-<tag>.tar.gz`; (3) on the
+Pi, mount the stick and run the `--upgrade --offline /media/usb` command
+above (same `--country` as the original provisioning, plus `--allow-ssh` if
+the deployment deliberately re-opens client SSH); (4) read the `upgrade:`
+log lines — the gate verdict names the serving build — and finish with the
+verify trio below. `--reboot` is a fresh-install-only flag: the service
+restart IS the activation step of an upgrade.
+
+The automated acceptance test of all of the above is `bash
+tests/upgrade_e2e.sh` (step 13 of §4): it sources `raspberry/upgrade.sh`,
+drives the very same functions rootlessly against a temp "node" and asserts
+migration-on-populated-store, backup rotation, gate success, forced-failure
+rollback and ZERO envelope loss at every phase.
+
 **Verify after reboot — all paths.** From a laptop/phone joined to the `offgrid-messages` open AP:
 
    ```bash
@@ -323,7 +409,7 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
 
 - Database default location on a provisioned node: `/var/lib/dtn-node/node_storage.db` (plus `-wal`/`-shm` while running), owned `dtn:dtn`, mode 0750 on the directory.
 - On first start the daemon creates the database file and its parent directory if missing and logs it, applies the schema of spec §9 idempotently, runs the expired-envelope sweep once, then binds the socket and announces readiness.
-- Backup = stop the unit and copy the three files (or use `sqlite3 .backup`). Envelope data is disposable by design (E2EE dead drop), the directory table is the only state worth keeping.
+- Backup = stop the unit and copy the three files (or use `sqlite3 .backup`). Envelope data is disposable by design (E2EE dead drop), the directory table is the only state worth keeping. The automated version of this — generationed backups + a health gate + tested rollback — is the upgrade path of §5 Path 4 (`docs/RUNBOOK.md` §4.8).
 
 ## 8. Chaos suite
 
