@@ -18,12 +18,19 @@ import { fileURLToPath } from "node:url";
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const webRoot = path.join(repoRoot, "node", "web");
 
-/** All local assets referenced by the page: { url → absolute file path }. */
+/** All local assets referenced by the portal (index.html) or the /guide
+ *  quick-start page (guide.html, issue #23): { url → absolute file path }.
+ *  Route URLs served by mux handlers (not files) are skipped: "/" and the
+ *  guide link "/guide". */
 export function referencedAssets() {
-  const html = fs.readFileSync(path.join(webRoot, "index.html"), "utf8");
+  const routeUrls = new Set(["/", "/guide"]);
   const assets = new Map();
-  for (const m of html.matchAll(/(?:src|href)="(\/[^"]+)"/g)) {
-    assets.set(m[1], path.join(webRoot, m[1]));
+  for (const page of ["index.html", "guide.html"]) {
+    const html = fs.readFileSync(path.join(webRoot, page), "utf8");
+    for (const m of html.matchAll(/(?:src|href)="(\/[^"]+)"/g)) {
+      if (routeUrls.has(m[1])) continue;
+      assets.set(m[1], path.join(webRoot, m[1]));
+    }
   }
   return assets;
 }

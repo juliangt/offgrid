@@ -131,6 +131,15 @@
 #       note, NO external URL appears in any of them (zero external
 #       assets), unknown icons 404, POST 405, and the canonical-host 301
 #       covers the new paths.
+#   19. End-user quick-start guide (issue #23): GET /guide serves the
+#       embedded script-free HTML page (text/html, Cache-Control no-cache,
+#       the 10 numbered steps, glossary, expectations box and
+#       troubleshooting as text markers), /css/guide.css carries the
+#       @page/@media print two-column layout, every referenced
+#       /img/guide/*.png screenshot serves as image/png (unknown -> 404),
+#       the portal footer links /guide labeled "Guide" while /status stays
+#       unlinked, no external URL appears beyond the canonical origin, and
+#       the §10.1 405 + §10.2 301 conventions cover the new paths.
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -975,6 +984,75 @@ if tr -d '\r' < "$WORK/hdr_m301" | grep -qi '^Location: http://offgrid\.local:80
 check "manifest 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
 code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/icons/icon-192.png")"
 check "raw-IP GET /icons/icon-192.png redirects with 301" "301" "$code"
+
+# ---------------------------------------------------------------------------
+# 12c. End-user quick-start guide (issue #23): GET /guide serves the embedded
+#      script-free HTML page (print layout in its own stylesheet, the
+#      glossary and the expectations box as text markers), its screenshots
+#      under /img/guide/ exist as embedded image/png assets, the portal
+#      footer links it ("Guide" — the one portal-visible addition; /status
+#      stays unlinked, asserted above), no external URL appears beyond the
+#      canonical origin, and the §10.2 canonical-host redirect plus the
+#      §10.1 404/405 conventions cover the new paths.
+# ---------------------------------------------------------------------------
+code="$(http GET "http://127.0.0.1:$PORT_A/guide")"
+check "GET /guide -> 200 (issue #23 end-user guide)" "200" "$code"
+curl -sS -o /dev/null -D "$WORK/hdr_guide" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/guide"
+if tr -d '\r' < "$WORK/hdr_guide" | grep -qi '^Content-Type: text/html; charset=utf-8'; then CT=ok; else CT=bad; fi
+check "guide Content-Type is text/html; charset=utf-8" "ok" "$CT"
+if tr -d '\r' < "$WORK/hdr_guide" | grep -qi '^Cache-Control: no-cache'; then CC=ok; else CC=bad; fi
+check "guide Cache-Control is no-cache (revalidated on every load)" "ok" "$CC"
+cp "$WORK/last_body" "$WORK/guide_body"
+if grep -qi '<script' "$WORK/guide_body"; then JS=present; else JS=absent; fi
+check "guide page requires no JavaScript" "absent" "$JS"
+for marker in "Ten words you need" "What to expect" "Troubleshooting" "offgrid.local:8080"; do
+    if grep -qF "$marker" "$WORK/guide_body"; then FOUND=yes; else FOUND=no; fi
+    check "guide HTML carries: $marker" "yes" "$FOUND"
+done
+GUIDE_STEPS="$(grep -c 'class="step"' "$WORK/guide_body" || true)"
+check "guide HTML carries the 10 numbered steps" "10" "$GUIDE_STEPS"
+
+# The print layout ships in the guide stylesheet (one-sheet core flow).
+code="$(http GET "http://127.0.0.1:$PORT_A/css/guide.css")"
+check "GET /css/guide.css -> 200" "200" "$code"
+cp "$WORK/last_body" "$WORK/guide_css"
+for marker in "@page" "@media print" "column-count: 2"; do
+    if grep -qF "$marker" "$WORK/guide_css"; then FOUND=yes; else FOUND=no; fi
+    check "guide stylesheet carries: $marker" "yes" "$FOUND"
+done
+
+# Every referenced screenshot exists as an embedded same-origin image/png.
+GUIDE_IMGS="$(grep -oE 'src="/img/guide/[^"]+"' "$WORK/guide_body" | sed -E 's/src="([^"]+)"/\1/' | sort -u || true)"
+GUIDE_IMG_COUNT="$(printf '%s' "$GUIDE_IMGS" | grep -c . || true)"
+check "guide references at least 4 screenshots" "ok" "$([ "$GUIDE_IMG_COUNT" -ge 4 ] 2>/dev/null && echo ok || echo bad)"
+for img in $GUIDE_IMGS; do
+    code="$(http GET "http://127.0.0.1:$PORT_A$img")"
+    check "GET $img -> 200" "200" "$code"
+    curl -sS -o /dev/null -D "$WORK/hdr_img" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A$img"
+    if tr -d '\r' < "$WORK/hdr_img" | grep -qi '^Content-Type: image/png'; then CT=ok; else CT=bad; fi
+    check "$img Content-Type is image/png" "ok" "$CT"
+done
+code="$(http GET "http://127.0.0.1:$PORT_A/img/guide/nope.png")"
+check "GET /img/guide/nope.png (unknown image) -> JSON 404" "404" "$code"
+
+# The portal footer links the guide (labeled "Guide"); nothing else changed.
+code="$(http GET "http://127.0.0.1:$PORT_A/")"
+cp "$WORK/last_body" "$WORK/index_guide"
+if grep -qF '<footer class="portal-footer"><a href="/guide">Guide</a></footer>' "$WORK/index_guide"; then FOOTER=yes; else FOOTER=no; fi
+check "portal footer links /guide labeled \"Guide\"" "yes" "$FOOTER"
+# No external URL in the guide HTML beyond the canonical §12 origin.
+GUIDE_EXTERNALS="$({ grep -oE 'https?://[^"<[:space:]]+' "$WORK/guide_body" || true; } | { grep -v '^http://offgrid\.local:8080' || true; } | sort -u | tr '\n' ' ')"
+check "no external URL in the guide HTML beyond the canonical origin" "" "$GUIDE_EXTERNALS"
+
+# §10.1 wrong method and §10.2 canonical-host redirect cover the new paths.
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/guide")"
+check "POST /guide rejected with 405 (§10.1 wrong method)" "405" "$code"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_g301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/guide")"
+check "raw-IP GET /guide redirects with 301" "301" "$code"
+if tr -d '\r' < "$WORK/hdr_g301" | grep -qi '^Location: http://offgrid\.local:8080/guide$'; then LOC=canonical; else LOC=missing; fi
+check "guide 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/img/guide/register.png")"
+check "raw-IP GET /img/guide/register.png redirects with 301" "301" "$code"
 
 # ---------------------------------------------------------------------------
 # 13. §4.4 long-message chunking (issue #24): a 1 KiB message survives the

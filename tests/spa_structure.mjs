@@ -163,6 +163,56 @@ ok(!/<link[^>]*rel="manifest"[^>]*href="https?:/.test(html) && !/<link[^>]*href=
 ok(/detectInstallPlatform\(\)/.test(ui) && /install_hint_dismissed/.test(ui),
    "ui.js platform-gates the hint and persists its dismissal in the meta store");
 
+console.log("== 6. /guide quick-start page (issue #23) ==");
+// The served guide: script-free HTML with its own stylesheet and the REAL
+// SPA screenshots under img/guide/. The master text is docs/quick-start.md;
+// this section pins the served page's structure and keeps the binary bloat
+// of the embedded screenshots honest.
+const guidePath = path.join(webRoot, "guide.html");
+ok(fs.existsSync(guidePath), "web/guide.html exists");
+const guide = fs.readFileSync(guidePath, "utf8");
+const gcsp = guide.match(/Content-Security-Policy[^>]*content="([^"]+)"/)?.[1] ?? "";
+for (const directive of ["default-src 'none'", "style-src 'self'", "img-src 'self'", "base-uri 'none'", "form-action 'none'"]) {
+  ok(gcsp.includes(directive), `guide CSP keeps ${directive}`);
+}
+ok(!/<script/i.test(guide), "guide.html carries no JavaScript at all");
+ok(!/<style[\s>]/i.test(guide), "guide.html has no inline <style> blocks (CSP style-src 'self')");
+ok(guide.includes('<link rel="stylesheet" href="/css/guide.css">'), "guide links its own stylesheet (app.css untouched)");
+const guideCss = fs.readFileSync(path.join(webRoot, "css", "guide.css"), "utf8");
+ok(guideCss.includes("@page") && guideCss.includes("@media print"), "guide.css carries the print layout (@page + @media print)");
+ok(/column-count:\s*2/.test(guideCss), "guide.css prints the core flow in two columns (one-sheet contract)");
+for (const marker of ["Ten words you need", "What to expect", "Troubleshooting", "offgrid.local:8080"]) {
+  ok(guide.includes(marker), `guide.html carries: ${marker}`);
+}
+const steps = guide.match(/<li class="step">/g) || [];
+ok(steps.length === 10, "the guide carries exactly the 10 numbered steps");
+ok(html.includes('<footer class="portal-footer"><a href="/guide">Guide</a></footer>'),
+   "portal index links /guide from the footer (labeled \"Guide\"; /status stays unlinked)");
+const guideExternals = [...guide.matchAll(/https?:\/\/[^"'<\s)]+/gi)]
+  .map((m) => m[0])
+  .filter((u) => !u.startsWith("http://offgrid.local:8080"));
+ok(guideExternals.length === 0, `guide.html references no external URL beyond the canonical origin (${guideExternals.join(", ") || "none"})`);
+
+// The screenshots: real PNGs of the SPA screens, sized for the guide
+// (≤ 720 px wide), with a hard cap on the total embedded bytes.
+const imgDir = path.join(webRoot, "img", "guide");
+ok(fs.existsSync(imgDir), "web/img/guide/ exists");
+const guideImgs = [...guide.matchAll(/src="(\/img\/guide\/[^"]+)"/g)].map((m) => m[1]);
+ok(guideImgs.length >= 4, `the guide embeds at least 4 screenshots (${guideImgs.length})`);
+ok(new Set(guideImgs).size === guideImgs.length, "no screenshot is referenced twice");
+let imgTotal = 0;
+for (const url of guideImgs) {
+  const p = path.join(webRoot, url.replace(/^\//, ""));
+  ok(fs.existsSync(p), `${url} exists on disk`);
+  const info = pngInfo(p);
+  ok(info !== null, `${url} is a valid PNG (magic + IHDR)`);
+  ok(info.width >= 300 && info.width <= 720, `${url} width ${info.width} px is readable but ≤ 720 (guide size cap)`);
+  ok(info.height >= 100 && info.height <= 2600, `${url} height ${info.height} px is sane`);
+  ok(info.bytes <= 120 * 1024, `${url} embeds small (${info.bytes} bytes ≤ 120 KiB)`);
+  imgTotal += info.bytes;
+}
+ok(imgTotal < 600 * 1024, `guide screenshots total ${(imgTotal / 1024).toFixed(0)} KiB < 600 KiB (honest binary bloat)`);
+
 console.log(`\nPASS: ${passed} structural assertions on the SPA layout`);
 
 function* walk(dir) {
@@ -171,4 +221,14 @@ function* walk(dir) {
     if (entry.isDirectory()) yield* walk(p);
     else yield p;
   }
+}
+
+// Independent PNG parse (the pwa_assets.mjs pattern): bytes 0..7 magic, the
+// IHDR chunk holds width/height as big-endian uint32 at offsets 16 and 20.
+function pngInfo(file) {
+  const buf = fs.readFileSync(file);
+  const magic = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < 8; i++) if (buf[i] !== magic[i]) return null;
+  if (buf.toString("ascii", 12, 16) !== "IHDR") return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20), bytes: buf.length };
 }
