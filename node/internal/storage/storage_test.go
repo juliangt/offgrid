@@ -307,24 +307,24 @@ func TestDirectoryUpsertRefreshAndOrdering(t *testing.T) {
 	keyB := strings.Repeat("B", 44)
 	keyC := strings.Repeat("C", 44)
 
-	if err := s.UpsertDirectory(keyA, keyA, "alice", 100); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 100, 0); err != nil {
 		t.Fatalf("upsert alice: %v", err)
 	}
-	if err := s.UpsertDirectory(keyB, keyB, "bob", 200); err != nil {
+	if err := s.UpsertDirectory(keyB, keyB, "bob", 200, 0); err != nil {
 		t.Fatalf("upsert bob: %v", err)
 	}
 	// Tie case: carol and dave share last_seen -> pubkey ASC tie-break.
-	if err := s.UpsertDirectory(keyC, keyC, "carol", 300); err != nil {
+	if err := s.UpsertDirectory(keyC, keyC, "carol", 300, 0); err != nil {
 		t.Fatalf("upsert carol: %v", err)
 	}
 	// keyB sorts before the dave key below, so dave must come first at 300.
 	keyD := "D" + strings.Repeat("E", 43)
-	if err := s.UpsertDirectory(keyD, keyD, "dave", 300); err != nil {
+	if err := s.UpsertDirectory(keyD, keyD, "dave", 300, 0); err != nil {
 		t.Fatalf("upsert dave: %v", err)
 	}
 
 	// Refresh alice: new alias and newer last_seen.
-	if err := s.UpsertDirectory(keyA, keyA, "alice_prime", 400); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice_prime", 400, 4); err != nil {
 		t.Fatalf("refresh alice: %v", err)
 	}
 
@@ -392,10 +392,11 @@ func TestPullChunkedKnownIDs(t *testing.T) {
 	}
 }
 
-// TestFreshDatabaseAtSchemaVersion2 verifies that a newly created database is
+// TestFreshDatabaseAtSchemaVersion3 verifies that a newly created database is
 // born directly at the current schema version (§15.3: no simulated history):
-// user_version == SchemaVersion and the envelopes.v column exists.
-func TestFreshDatabaseAtSchemaVersion2(t *testing.T) {
+// user_version == SchemaVersion, the envelopes.v column exists, and the
+// directory.epoch column of §6.1 exists.
+func TestFreshDatabaseAtSchemaVersion3(t *testing.T) {
 	s := newTestStore(t)
 
 	if got := userVersion(t, s.db); got != SchemaVersion {
@@ -403,7 +404,118 @@ func TestFreshDatabaseAtSchemaVersion2(t *testing.T) {
 	}
 	cols := tableColumns(t, s.db, "envelopes")
 	if !hasColumn(cols, "v") {
-		t.Fatalf("schema version 2 must add envelopes.v, got columns %v", cols)
+		t.Fatalf("the current schema must include envelopes.v, got columns %v", cols)
+	}
+	if !hasColumn(tableColumns(t, s.db, "directory"), "epoch") {
+		t.Fatalf("the current schema must include directory.epoch (§6.1), got columns %v", tableColumns(t, s.db, "directory"))
+	}
+}
+
+// TestSchemaV2MigratesToV3PreservesDirectory is the §15.3 chain step
+// introduced with the §6.1 rotating dest_hint (issue #26): a hand-crafted
+// schema-2 database (envelopes.v present, directory without epoch,
+// user_version = 2) holding populated directory rows is migrated on open —
+// user_version becomes SchemaVersion, directory.epoch appears backfilled to
+// 0 (deliberately stale epoch-zero), every pre-existing row survives, and
+// the next upsert stamps the entry with a fresh server-set epoch.
+func TestSchemaV2MigratesToV3PreservesDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "schema2.db")
+
+	// Build the schema-2 fixture: exactly the version-2 schema (§15.3 table)
+	// with populated envelopes AND directory rows, marked user_version = 2.
+	v2, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open schema-2 fixture: %v", err)
+	}
+	defer v2.Close()
+	if _, err := v2.Exec(`CREATE TABLE envelopes (
+  id TEXT PRIMARY KEY, dest_hint TEXT NOT NULL, created_at INTEGER NOT NULL,
+  ttl INTEGER NOT NULL, payload TEXT NOT NULL, v INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE directory (
+  pubkey TEXT PRIMARY KEY, x25519 TEXT NOT NULL, alias TEXT NOT NULL,
+  last_seen INTEGER NOT NULL);
+PRAGMA user_version = 2;`); err != nil {
+		t.Fatalf("create schema-2 fixture: %v", err)
+	}
+	if _, err := v2.Exec(
+		`INSERT INTO envelopes (id, dest_hint, created_at, ttl, payload, v) VALUES (?, ?, ?, ?, ?, ?)`,
+		hexID(7), "9f3ab02c1d77e4c1", 100, 3600, strings.Repeat("A", 332), 2,
+	); err != nil {
+		t.Fatalf("seed envelope: %v", err)
+	}
+	keyA := strings.Repeat("A", 44)
+	keyB := strings.Repeat("B", 44)
+	for _, row := range []struct{ key, alias string }{{keyA, "alice"}, {keyB, "bob"}} {
+		if _, err := v2.Exec(
+			`INSERT INTO directory (pubkey, x25519, alias, last_seen) VALUES (?, ?, ?, ?)`,
+			row.key, row.key, row.alias, 50,
+		); err != nil {
+			t.Fatalf("seed directory %s: %v", row.alias, err)
+		}
+	}
+	if got := userVersion(t, v2); got != 2 {
+		t.Fatalf("fixture must mimic a schema-2 database (user_version=2), got %d", got)
+	}
+	if err := v2.Close(); err != nil {
+		t.Fatalf("close schema-2 fixture: %v", err)
+	}
+
+	// Open with the current build: the chain 2→3 must run.
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer s.Close()
+
+	if got := userVersion(t, s.db); got != SchemaVersion {
+		t.Fatalf("after migration user_version must be %d, got %d", SchemaVersion, got)
+	}
+	if !hasColumn(tableColumns(t, s.db, "directory"), "epoch") {
+		t.Fatalf("migration must add directory.epoch, got columns %v", tableColumns(t, s.db, "directory"))
+	}
+
+	// Every pre-existing envelope row survives the migration untouched.
+	pulled, err := s.PullEnvelopes(nil, 10, 400)
+	if err != nil || len(pulled) != 1 || pulled[0].ID != hexID(7) || pulled[0].V != 2 || pulled[0].Payload != strings.Repeat("A", 332) {
+		t.Fatalf("pre-existing envelope must survive migration intact, got %+v err=%v", pulled, err)
+	}
+
+	// Directory rows survive; epoch is backfilled to 0 (stale on purpose).
+	entries, err := s.GetDirectory(10)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("both directory rows must survive the migration, got %+v err=%v", entries, err)
+	}
+	byKey := make(map[string]DirectoryEntry, len(entries))
+	for _, e := range entries {
+		byKey[e.Pubkey] = e
+	}
+	if byKey[keyA].Alias != "alice" || byKey[keyB].Alias != "bob" {
+		t.Fatalf("directory rows must keep alias and key, got %+v", entries)
+	}
+	for _, e := range entries {
+		if e.Epoch != 0 {
+			t.Fatalf("migrated directory rows must read epoch 0 (DEFAULT backfill), got %+v", e)
+		}
+	}
+
+	// A fresh upsert stamps the server-set epoch; the other entry stays at
+	// the backfilled 0 until its owner re-publishes.
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072000, 1791072000/HintEpochSeconds); err != nil {
+		t.Fatalf("post-migration upsert: %v", err)
+	}
+	entries, err = s.GetDirectory(10)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("re-read directory: got %+v err=%v", entries, err)
+	}
+	byKey = make(map[string]DirectoryEntry, len(entries))
+	for _, e := range entries {
+		byKey[e.Pubkey] = e
+	}
+	if byKey[keyA].Epoch != 1791072000/HintEpochSeconds || byKey[keyA].LastSeen != 1791072000 {
+		t.Fatalf("upsert must stamp last_seen and epoch, got %+v", byKey[keyA])
+	}
+	if byKey[keyB].Epoch != 0 || byKey[keyB].Alias != "bob" {
+		t.Fatalf("untouched entry must keep the backfilled epoch 0, got %+v", byKey[keyB])
 	}
 }
 

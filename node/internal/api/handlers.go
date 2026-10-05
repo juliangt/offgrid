@@ -42,12 +42,19 @@ const (
 type Store interface {
 	InsertEnvelopes(envs []envelope.Envelope) (int, error)
 	PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error)
-	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64) error
+	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64) error
 	GetDirectory(limit int) ([]storage.DirectoryEntry, error)
 	EnvelopeCount() (int64, error)
 	DirectoryCount() (int64, error)
 	DBSizeBytes() (int64, error)
 }
+
+// timeNow is the clock the directory upsert path (§10.3 last_seen) and the
+// §6.1 epoch stamping + capabilities advertisement read. Var purely as a
+// test hook (the §6.1 epoch is floor(now / storage.HintEpochSeconds), which
+// only an injected clock can pin exactly around a real midnight);
+// production code must never reassign it.
+var timeNow = time.Now
 
 // server carries the handler dependencies. postBudget and pushQuota are the
 // per-client admission-control limiters of ratelimit.go (issue #16 Phase 2):
@@ -389,7 +396,11 @@ type directoryRequest struct {
 }
 
 // handlePostDirectory upserts a directory entry keyed by the Ed25519 public
-// key with last_seen = now (§10.3). Invalid alias or keys → 400.
+// key with last_seen = now and epoch = floor(now / HintEpochSeconds) — both
+// set from the NODE clock (§10.3, §6.1: the server, never the client, owns
+// the time reference). Invalid alias or keys → 400. The POST body shape is
+// unchanged since pre-1.6 builds (epoch is additive in the GET response
+// only, §15.4).
 func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	var req directoryRequest
 	if _, ok := decodeJSON(w, r, &req); !ok {
@@ -407,7 +418,8 @@ func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidX25519)
 		return
 	}
-	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, time.Now().Unix()); err != nil {
+	now := timeNow().Unix()
+	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds); err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
 	}
@@ -578,9 +590,12 @@ func rejectionClass(code string) health.RejectionClass {
 
 // capabilitiesResponse is the version-advertisement document served by
 // GET /api/v1/capabilities (§15.5). The member set on this build is exactly
-// these six; new members may only be added additively (§15.4) and MUST be
-// ignored by clients. The three derived members stay consistent with
-// envelope_versions (min = first, max = last, §15.5).
+// these eight: the six §15.5 identity/negotiation members plus the two
+// §6.1 additive members (issue #26 — hint_epoch_seconds, hint_epoch_current)
+// that let clients derive rotating dest_hints from NODE time. New members
+// may only be added additively (§15.4) and MUST be ignored by clients. The
+// three derived members stay consistent with envelope_versions (min = first,
+// max = last, §15.5).
 type capabilitiesResponse struct {
 	API                string  `json:"api"`
 	EnvelopeVersions   []int64 `json:"envelope_versions"`
@@ -588,13 +603,18 @@ type capabilitiesResponse struct {
 	MaxEnvelopeVersion int64   `json:"max_envelope_version"`
 	SchemaVersion      int     `json:"schema_version"`
 	Build              string  `json:"build"`
+	HintEpochSeconds   int64   `json:"hint_epoch_seconds"`
+	HintEpochCurrent   int64   `json:"hint_epoch_current"`
 }
 
 // handleCapabilities advertises the version facts clients negotiate on
 // (§15.5): the API generation, the supported envelope-version set (§15.3),
 // the storage schema version (wired to storage.SchemaVersion, never a
-// hardcoded copy) and the build identifier. It is read-only and sits behind
-// the same middleware as every other API route (§10.2).
+// hardcoded copy) and the build identifier — plus the §6.1 additive members
+// (issue #26): the epoch length and the node's current hint epoch
+// (floor(now / HintEpochSeconds), the same server clock that stamps
+// directory entries). Read-only, behind the same middleware as every other
+// API route (§10.2).
 func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, capabilitiesResponse{
 		API:                "v1",
@@ -603,6 +623,8 @@ func (s *server) handleCapabilities(w http.ResponseWriter, _ *http.Request) {
 		MaxEnvelopeVersion: envelope.MaxSupportedVersion,
 		SchemaVersion:      storage.SchemaVersion,
 		Build:              s.build,
+		HintEpochSeconds:   storage.HintEpochSeconds,
+		HintEpochCurrent:   timeNow().Unix() / storage.HintEpochSeconds,
 	})
 }
 

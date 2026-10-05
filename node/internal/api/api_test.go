@@ -312,6 +312,11 @@ func TestMethodNotAllowed(t *testing.T) {
 func TestDirectoryPostAndGet(t *testing.T) {
 	h, _ := newTestHandler(t)
 
+	// §6.1 (issue #26): pin the node clock so the server-set epoch is exact.
+	// 1791072000 sits mid-epoch 20730 (2026-10-04T04:26:40Z).
+	restore := stubTimeNow(t, time.Unix(1791072000, 0))
+	defer restore()
+
 	// Valid upsert.
 	rec := postJSON(t, h, "/api/v1/directory", map[string]string{
 		"alias": "alice_77", "pubkey": keyB64(1), "x25519": keyB64(2),
@@ -344,6 +349,15 @@ func TestDirectoryPostAndGet(t *testing.T) {
 	}
 	if entries[0].LastSeen == 0 {
 		t.Fatalf("last_seen must be set by the node")
+	}
+	// §6.1 (issue #26): every entry carries the server-set hint epoch —
+	// floor(node now / 86400), set at upsert and additive in this response.
+	if entries[0].LastSeen != 1791072000 {
+		t.Fatalf("last_seen must come from the node clock, got %d", entries[0].LastSeen)
+	}
+	if entries[0].Epoch != 1791072000/storage.HintEpochSeconds {
+		t.Fatalf("epoch must be floor(node now / HintEpochSeconds), got %d want %d",
+			entries[0].Epoch, 1791072000/storage.HintEpochSeconds)
 	}
 
 	// Validation failures -> 400.
@@ -709,11 +723,12 @@ func v2Form(e envelope.Envelope) envelope.Envelope {
 }
 
 // TestCapabilitiesEndpoint verifies the §15.5 version-advertisement document:
-// exactly the six members, envelope_versions ascending [1, 2], the derived
-// invariants (min = first, max = last), schema_version wired to
-// storage.SchemaVersion, a non-empty build identifier, JSON 405 for wrong
-// methods, and the same middleware as every other API route (§10.2: the
-// canonical-host redirect applies here too).
+// exactly the six §15.5 members plus the two additive §6.1 members (issue
+// #26: hint_epoch_seconds, hint_epoch_current), envelope_versions ascending
+// [1, 2], the derived invariants (min = first, max = last), schema_version
+// wired to storage.SchemaVersion, a non-empty build identifier, JSON 405 for
+// wrong methods, and the same middleware as every other API route (§10.2:
+// the canonical-host redirect applies here too).
 func TestCapabilitiesEndpoint(t *testing.T) {
 	h, _ := newTestHandler(t)
 
@@ -730,13 +745,15 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 		t.Fatalf("decode capabilities document: %v", err)
 	}
 
-	// §15.5: the member set is exactly these six.
+	// §15.5 + §6.1 (issue #26): the member set is exactly these eight —
+	// the six §15.5 members plus the additive hint-epoch pair.
 	wantMembers := []string{
 		"api", "envelope_versions", "min_envelope_version",
 		"max_envelope_version", "schema_version", "build",
+		"hint_epoch_seconds", "hint_epoch_current",
 	}
 	if len(doc) != len(wantMembers) {
-		t.Fatalf("capabilities must carry exactly the six §15.5 members, got %d: %v", len(doc), doc)
+		t.Fatalf("capabilities must carry exactly the eight §15.5+§6.1 members, got %d: %v", len(doc), doc)
 	}
 	for _, m := range wantMembers {
 		if _, ok := doc[m]; !ok {
@@ -777,6 +794,26 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 		t.Fatalf("build must surface the identifier wired through New, got %q want %q", build, testBuild)
 	}
 
+	// §6.1 additive members: the epoch length is the binding constant, and
+	// the current epoch derives from the node clock (injected for the pin).
+	if doc["hint_epoch_seconds"] != float64(storage.HintEpochSeconds) {
+		t.Fatalf("hint_epoch_seconds must be storage.HintEpochSeconds (%d), got %v", storage.HintEpochSeconds, doc["hint_epoch_seconds"])
+	}
+	fixedCaps := time.Unix(1791072000, 0) // 2026-10-04T04:26:40Z, mid-epoch 20730
+	restore := stubTimeNow(t, fixedCaps)
+	rec = do(t, h, http.MethodGet, "/api/v1/capabilities", CanonicalHost, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("injected-clock capabilities: got %d", rec.Code)
+	}
+	var doc2 map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc2); err != nil {
+		t.Fatalf("decode injected capabilities: %v", err)
+	}
+	if got := doc2["hint_epoch_current"]; got != float64(1791072000/storage.HintEpochSeconds) {
+		t.Fatalf("hint_epoch_current must be floor(now / HintEpochSeconds) on the node clock, got %v", got)
+	}
+	restore()
+
 	// Wrong methods: JSON 405 with Allow: GET, like every read-only route.
 	for _, method := range []string{http.MethodPost, http.MethodDelete} {
 		rec := do(t, h, method, "/api/v1/capabilities", CanonicalHost, nil, "")
@@ -797,6 +834,16 @@ func TestCapabilitiesEndpoint(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "http://"+CanonicalHost+"/api/v1/capabilities" {
 		t.Fatalf("non-canonical host Location: got %q", loc)
 	}
+}
+
+// stubTimeNow pins the api package's directory/capabilities clock (§10.3,
+// §6.1 — the node clock is the shared epoch reference) and returns the
+// restore function. Tests must call restore (defer or explicit).
+func stubTimeNow(t *testing.T, at time.Time) func() {
+	t.Helper()
+	previous := timeNow
+	timeNow = func() time.Time { return at }
+	return func() { timeNow = previous }
 }
 
 // TestSyncV2AdmissionDedupAndServing covers the node-side rows of the §15.7
