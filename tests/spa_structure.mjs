@@ -66,6 +66,7 @@ const expectedOrder = [
   "/js/hkdf.js",
   "/js/canonical.js",
   "/js/envelopes.js",
+  "/js/prekeys.js",
   "/js/mule.js",
   "/js/chunking.js",
   "/js/acks.js",

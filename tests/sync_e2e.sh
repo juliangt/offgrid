@@ -96,6 +96,21 @@
 #       HINT_TRANSITION_DEADLINE + 1 day; §15.7 i); directory GET carries
 #       the additive epoch member and capabilities the additive §6.1
 #       members.
+#   16. §4.6 prekey bundles — forward secrecy (issue #27): the full mail
+#       path with a PREKEY-published Bob, both endpoints on the SHIPPED SPA
+#       engine (tests/helpers/prekey_e2e.mjs): Bob registers WITH a bundle
+#       (blind node admission, verbatim GET round-trip ≤ 2 KiB); Alice's
+#       engine targets a random ONE-TIME prekey while dest_hint stays
+#       hint_E(Bob's IDENTITY key); delivery + decrypt through the prekey
+#       trial path and the OPK secret is wiped on use; the CAPTURED
+#       envelope bytes then FAIL to decrypt both for an attacker holding
+#       ONLY Bob's extracted long-term key and for Bob's post-wipe state
+#       (the acceptance criterion, end to end); an old-client envelope
+#       addressed to Bob's identity key still opens (permanent identity
+#       trial path, no forward secrecy — documented); a bundle-less
+#       recipient (Alice) receives identity-fallback mail; and a stale-SPK
+#       replenish rotates the published bundle through the ordinary
+#       directory upsert.
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -570,7 +585,7 @@ ENVELOPE_VERSIONS="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body
 check "capabilities envelope_versions is [1,2] (ascending supported set, §15.3)" "[1,2]" "$ENVELOPE_VERSIONS"
 check "capabilities min_envelope_version is 1 (first element)" "1" "$(caps_num min_envelope_version)"
 check "capabilities max_envelope_version is 2 (negotiation ceiling)" "2" "$(caps_num max_envelope_version)"
-check "capabilities schema_version is 3 (§15.3)" "3" "$(caps_num schema_version)"
+check "capabilities schema_version is 4 (§15.3, §4.6)" "4" "$(caps_num schema_version)"
 check "capabilities hint_epoch_seconds is 86400 (§6.1 additive)" "86400" "$(caps_num hint_epoch_seconds)"
 HINT_CUR="$(caps_num hint_epoch_current)"
 check "capabilities hint_epoch_current is a non-negative integer (§6.1 additive)" \
@@ -650,11 +665,15 @@ check "pre-existing envelope keeps its id through the migration" "$ENV_ID" "$(js
 check "pre-existing envelope is served as v1 (DEFAULT 1 backfill, §15.3)" "1" "$(json_v)"
 check "pre-existing payload is byte-identical through the migration (§15.3)" \
     "$(sha256_hex "$ENV_PAYLOAD")" "$(sha256_hex "$(json_payload)")"
-check "user_version migrated from 0 to 3 (§15.3 chain 1→2→3)" "3" "$(sqlite3 "$LEGACY_DB" 'PRAGMA user_version;')"
+check "user_version migrated from 0 to 4 (§15.3 chain 1→2→3→4)" "4" "$(sqlite3 "$LEGACY_DB" 'PRAGMA user_version;')"
 if sqlite3 "$LEGACY_DB" 'PRAGMA table_info(envelopes);' | grep -q '|v|'; then VCOL=present; else VCOL=missing; fi
 check "envelopes table gained the v column (chain step 1→2)" "present" "$VCOL"
 if sqlite3 "$LEGACY_DB" 'PRAGMA table_info(directory);' | grep -q '|epoch|'; then ECOL=present; else ECOL=missing; fi
 check "directory table gained the epoch column (chain step 2→3, §6.1)" "present" "$ECOL"
+if sqlite3 "$LEGACY_DB" 'PRAGMA table_info(directory);' | grep -q '|prekeys|'; then PCOL=present; else PCOL=missing; fi
+check "directory table gained the nullable prekeys column (chain step 3→4, §4.6)" "present" "$PCOL"
+LEG_PREKEYS="$(sqlite3 "$LEGACY_DB" 'SELECT prekeys FROM directory LIMIT 1;')"
+check "pre-existing directory row backfilled to prekeys NULL (bundle-less, §4.6)" "" "$LEG_PREKEYS"
 LEG_EPOCH="$(sqlite3 "$LEGACY_DB" 'SELECT epoch FROM directory LIMIT 1;')"
 check "pre-existing directory row backfilled to epoch 0 (deliberately stale, §6.1)" "0" "$LEG_EPOCH"
 
@@ -712,12 +731,12 @@ fi
 check "start against user_version 99 exits non-zero (§15.7 b downgrade refusal)" \
     "non-zero" "$([ "$REF_STATUS" != 0 ] && echo non-zero || echo zero)"
 check "downgrade-refused daemon never became ready" "1" "$REF_READY"
-if grep -q '99' "$WORK/node_refused.log" && grep -q '3' "$WORK/node_refused.log"; then
+if grep -q '99' "$WORK/node_refused.log" && grep -q '4' "$WORK/node_refused.log"; then
     NAMED=both
 else
     NAMED=missing
 fi
-check "refusal message names both schema versions (99 and 3)" "both" "$NAMED"
+check "refusal message names both schema versions (99 and 4)" "both" "$NAMED"
 check "refused start left the database byte-untouched, sidecars included (§15.3)" \
     "$FINGERPRINT_BEFORE" "$(db_fingerprint "$LEGACY_DB")"
 
@@ -742,7 +761,7 @@ if tr -d '\r' < "$WORK/hdr_health" | grep -qi '^Content-Type: application/json; 
 check "health Content-Type is application/json; charset=utf-8" "ok" "$CT"
 check "health status is \"ok\" (liveness, no invented judgment)" "ok" "$(caps_str status)"
 check "health api is \"v1\" (same source as capabilities)" "v1" "$(caps_str api)"
-check "health schema_version is 3 (same source as capabilities)" "3" "$(caps_num schema_version)"
+check "health schema_version is 4 (same source as capabilities)" "4" "$(caps_num schema_version)"
 ENVELOPE_VERSIONS_HEALTH="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body" | sed -E 's/^"envelope_versions"://')"
 check "health envelope_versions is [1,2] (same source as capabilities)" "[1,2]" "$ENVELOPE_VERSIONS_HEALTH"
 if grep -q '"build":"' "$WORK/last_body"; then BUILD_HEALTH="$(caps_str build)"; else BUILD_HEALTH=""; fi
@@ -1327,6 +1346,225 @@ check "§6.1 bob after the simulated deadline: the legacy envelope is FOREIGN ca
     "foreign" "$(printf '%s\n' "$BOB_POSTDEADLINE" | sed -n 's/^classified=//p')"
 check "§6.1 bob after the simulated deadline: never decrypted (silently not mine, §6.1)" \
     "fail" "$(printf '%s\n' "$BOB_POSTDEADLINE" | sed -n 's/^decrypted=//p')"
+
+stop_daemon "$DAEMON_D_PID"
+DAEMON_D_PID=""
+stop_daemon "$DAEMON_E_PID"
+DAEMON_E_PID=""
+
+# ---------------------------------------------------------------------------
+# 16. §4.6 prekey bundles — forward secrecy (issue #27): the full Alice ->
+#     node -> mule -> node -> Bob path with a PREKEY-published recipient,
+#     both endpoints running the SHIPPED SPA engine headlessly
+#     (tests/helpers/prekey_e2e.mjs):
+#       - Bob registers WITH a bundle (the node admits it blind and the
+#         directory GET round-trips it VERBATIM, ≤ 2 KiB, §10.3);
+#       - Alice's engine picks a random ONE-TIME prekey from the SERVED
+#         bundle as the box target while dest_hint stays derived from Bob's
+#         STABLE identity key (hint_source=identity, §6.1 note);
+#       - delivery + decrypt through the prekey trial path (opened_with
+#         opk:...) and the OPK secret is wiped — the §4.6 FS event;
+#       - the CAPTURED-TRAFFIC leg: the exact served envelope bytes are
+#         re-decrypted by the harness with (a) an attacker view holding
+#         ONLY Bob's extracted long-term identity secret and (b) Bob's
+#         post-wipe device state — BOTH must fail (the issue's acceptance
+#         criterion, proven end to end over real daemons);
+#       - old-client → new recipient: an envelope addressed to Bob's
+#         IDENTITY key (what a pre-1.7 sender emits) still opens through
+#         the permanent identity trial path (no forward secrecy, the
+#         documented transition tradeoff);
+#       - new sender → legacy recipient: Alice's entry carries NO prekeys,
+#         so the §4.6 sender rule falls back to identity addressing and
+#         delivers;
+#       - replenish: Bob's fixture stock carries a stale SPK anchor, so the
+#         sync-time check triggers rotation — the fresh signed bundle is
+#         published through the ORDINARY directory upsert, and the served
+#         entry afterwards carries the NEW spk with the old batch gone.
+# ---------------------------------------------------------------------------
+PREKEY_E2E="$SCRIPT_DIR/helpers/prekey_e2e.mjs"
+NOW_P="$(date +%s)"
+PREKEY_EPOCH_P="$((NOW_P / 86400))"
+
+log "building the §4.6 prekey fixture with the shipped SPA engine (clock = $NOW_P)"
+node "$PREKEY_E2E" fixture "$WORK/prekey_fixture.json" "$NOW_P" >"$WORK/prekey_fixture.log" 2>&1 || {
+    log "prekey fixture build failed"; cat "$WORK/prekey_fixture.log" >&2; exit 1;
+}
+check "§4.6 fixture built (deterministic Bob, stale-SPK stock, bundle signed)" \
+    "ok" "$(sed -n 's/^RESULT=//p' "$WORK/prekey_fixture.log")"
+PREKEY_BOB_OPKS="$(sed -n 's/^bob_opks=//p' "$WORK/prekey_fixture.log")"
+check "§4.6 fixture: Bob's bundle carries the target OPK batch (12, within 8..16)" \
+    "12" "$PREKEY_BOB_OPKS"
+PREKEY_BUNDLE_BYTES="$(sed -n 's/^bundle_bytes=//p' "$WORK/prekey_fixture.log")"
+check "§4.6 fixture: the serialized bundle is within the 2 KiB admission cap (§10.3)" \
+    "ok" "$([ "$PREKEY_BUNDLE_BYTES" -le 2048 ] 2>/dev/null && echo ok || echo bad)"
+BOB_HINT_CUR_P="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob_hint_current)' "$WORK/prekey_fixture.json")"
+ALICE_HINT_CUR_P="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).alice_hint_current)' "$WORK/prekey_fixture.json")"
+
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.alice_reg))' "$WORK/prekey_fixture.json" "$WORK/prekey_reg_alice.json"
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.bob_reg))' "$WORK/prekey_fixture.json" "$WORK/prekey_reg_bob.json"
+
+log "starting the §4.6 prekey node pair: 127.0.0.1:$PORT_D and 127.0.0.1:$PORT_E (fresh databases)"
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_D" -db "$WORK/node_prekey_a.db" >"$WORK/node_prekey_a.log" 2>&1 &
+DAEMON_D_PID=$!
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_E" -db "$WORK/node_prekey_b.db" >"$WORK/node_prekey_b.log" 2>&1 &
+DAEMON_E_PID=$!
+PREKEY_READY=0
+if wait_ready "$PORT_D" && wait_ready "$PORT_E"; then PREKEY_READY=1; fi
+check "prekey node pair ready (§4.6 round trip)" "1" "$PREKEY_READY"
+if [ "$PREKEY_READY" -ne 1 ]; then
+    log "--- prekey node A log ---"; cat "$WORK/node_prekey_a.log" >&2 || true
+    log "--- prekey node B log ---"; cat "$WORK/node_prekey_b.log" >&2 || true
+    exit 1
+fi
+
+# Registration: Bob's body carries the prekeys bundle — the node must admit
+# it blind (shape only, no signature verification, §1/§10.3) on BOTH nodes.
+for PORT in "$PORT_D" "$PORT_E"; do
+    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/prekey_reg_alice.json")"
+    check "register alice_fs (bundle-less) on prekey node (port $PORT) -> 200" "200" "$code"
+    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/prekey_reg_bob.json")"
+    check "register bob_prekey WITH the prekeys bundle on prekey node (port $PORT) -> 200" "200" "$code"
+done
+
+# The directory GET round-trips the bundle verbatim (additive member).
+code="$(http GET "http://127.0.0.1:$PORT_D/api/v1/directory")"
+check "GET directory on prekey node A -> 200" "200" "$code"
+cp "$WORK/last_body" "$WORK/prekey_dir_a.json"
+if grep -q '"prekeys":' "$WORK/prekey_dir_a.json"; then BUNDLE=roundtripped; else BUNDLE=missing; fi
+check "the served directory carries Bob's prekeys bundle (§10.3 additive member)" "roundtripped" "$BUNDLE"
+FIX_SPK="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob_bundle.spk)' "$WORK/prekey_fixture.json")"
+if grep -qF "$FIX_SPK" "$WORK/prekey_dir_a.json"; then SPK=served; else SPK=missing; fi
+check "the served bundle keeps Bob's signed spk verbatim (stored VERBATIM, §9)" "served" "$SPK"
+if grep -q '"prekeys":' "$WORK/last_body"; then :; fi
+code="$(http GET "http://127.0.0.1:$PORT_E/api/v1/directory")"
+check "GET directory on prekey node B -> 200" "200" "$code"
+cp "$WORK/last_body" "$WORK/prekey_dir_b.json"
+if grep -qF "$FIX_SPK" "$WORK/prekey_dir_b.json"; then SPK2=served; else SPK2=missing; fi
+check "both nodes serve the same bundle (upsert keyed by pubkey)" "served" "$SPK2"
+
+# ---- Leg A: prekey-addressed mail, wipe-on-use, then the captured-
+#      traffic attack. Alice reads node A's directory (the sender's view). ----
+node "$PREKEY_E2E" send "$WORK/prekey_fixture.json" "$WORK/prekey_dir_a.json" "$WORK/prekey_send_a.json" prekey bob "$NOW_P" >"$WORK/prekey_send_a.log" 2>&1
+check "§4.6 send (prekey): the engine targeted a ONE-TIME prekey" "opk" "$(sed -n 's/^target=//p' "$WORK/prekey_send_a.log")"
+check "§4.6 send (prekey): dest_hint source is the STABLE identity key (§6.1 note)" \
+    "identity" "$(sed -n 's/^hint_source=//p' "$WORK/prekey_send_a.log")"
+check "§4.6 send (prekey): dest_hint is exactly hint_E(Bob's identity key)" \
+    "$BOB_HINT_CUR_P" "$(sed -n 's/^dest_hint=//p' "$WORK/prekey_send_a.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_send_a.json")"
+check "alice pushes the prekey-addressed envelope to prekey node A -> 200" "200" "$code"
+PREKEY_A_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/prekey_send_a.json")"
+
+make_sync_body "$WORK/prekey_mule_a1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_mule_a1.json")"
+check "mule pulls exactly 1 envelope (the prekey mail) from prekey node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_mule_pull1.json"
+node "$ACK_E2E" carry "$WORK/prekey_mule_pull1.json" "$WORK/prekey_mule_push1.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_mule_push1.json")"
+check "mule drops the prekey mail at prekey node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/prekey_bob_pull1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_bob_pull1.json")"
+check "bob pulls exactly the prekey-addressed envelope from prekey node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_bob_pull1.json"
+
+node "$PREKEY_E2E" bob_receive "$WORK/prekey_fixture.json" "$WORK/prekey_bob_pull1.json" - "$WORK/prekey_state.json" "$NOW_P" >"$WORK/prekey_bob_receive1.log" 2>&1
+check "§4.6 bob_receive (leg A): the envelope classifies as Bob's own" \
+    "mine" "$(sed -n 's/^classified=//p' "$WORK/prekey_bob_receive1.log")"
+check "§4.6 bob_receive (leg A): it decrypts through the prekey trial path" \
+    "ok" "$(sed -n 's/^decrypted=//p' "$WORK/prekey_bob_receive1.log")"
+check "§4.6 bob_receive (leg A): it opened through a ONE-TIME prekey" \
+    "opk" "$(sed -n 's/^opened_with=//p' "$WORK/prekey_bob_receive1.log" | cut -d: -f1)"
+check "§4.6 bob_receive (leg A): the OPK secret was WIPED on use (the FS event)" \
+    "1" "$(sed -n 's/^wiped=//p' "$WORK/prekey_bob_receive1.log")"
+
+# The captured-traffic leg: the served bytes above are exactly what a dead
+# drop would hold. After the wipe, NEITHER the extracted long-term key
+# (attack) NOR Bob's post-wipe device state may open them.
+node "$PREKEY_E2E" fs_proof "$WORK/prekey_fixture.json" "$WORK/prekey_bob_pull1.json" "$WORK/prekey_state.json" "$NOW_P" >"$WORK/prekey_fs_proof.log" 2>&1
+check "§4.6 FORWARD-SECRECY PROOF: captured bytes + extracted LONG-TERM key fail" \
+    "fail" "$(sed -n 's/^attack=//p' "$WORK/prekey_fs_proof.log")"
+check "§4.6 FORWARD-SECRECY PROOF: the post-wipe device state fails too" \
+    "fail" "$(sed -n 's/^state=//p' "$WORK/prekey_fs_proof.log")"
+
+# ---- Leg B: old-client -> new recipient (identity-addressed mail). ----
+node "$PREKEY_E2E" send "$WORK/prekey_fixture.json" "$WORK/prekey_dir_a.json" "$WORK/prekey_send_b.json" legacy bob "$NOW_P" >"$WORK/prekey_send_b.log" 2>&1
+check "§4.6 send (legacy, old client): addressed to the identity key" \
+    "identity" "$(sed -n 's/^target=//p' "$WORK/prekey_send_b.log")"
+check "§4.6 send (legacy, old client): the hint matches the identity derivation" \
+    "$BOB_HINT_CUR_P" "$(sed -n 's/^dest_hint=//p' "$WORK/prekey_send_b.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_send_b.json")"
+check "the old-client envelope is pushed to prekey node A -> 200" "200" "$code"
+PREKEY_B_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/prekey_send_b.json")"
+
+make_sync_body "$WORK/prekey_mule_a2.json" "[\"$PREKEY_A_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_mule_a2.json")"
+check "mule pulls exactly 1 envelope (the old-client mail) from prekey node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_mule_pull2.json"
+node "$ACK_E2E" carry "$WORK/prekey_mule_pull2.json" "$WORK/prekey_mule_push2.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_mule_push2.json")"
+check "mule drops the old-client mail at prekey node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/prekey_bob_pull2.json" "[\"$PREKEY_A_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_bob_pull2.json")"
+check "bob pulls exactly the old-client envelope from prekey node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_bob_pull2.json"
+node "$PREKEY_E2E" bob_receive "$WORK/prekey_fixture.json" "$WORK/prekey_bob_pull2.json" "$WORK/prekey_state.json" "$WORK/prekey_state.json" "$NOW_P" >"$WORK/prekey_bob_receive2.log" 2>&1
+check "§4.6 old-client mail to a prekey-published recipient still decrypts" \
+    "ok" "$(sed -n 's/^decrypted=//p' "$WORK/prekey_bob_receive2.log")"
+check "§4.6 old-client mail opens through the PERMANENT identity trial path (no FS, documented)" \
+    "identity" "$(sed -n 's/^opened_with=//p' "$WORK/prekey_bob_receive2.log" | cut -d: -f1)"
+check "§4.6 old-client mail consumes no prekey" \
+    "0" "$(sed -n 's/^wiped=//p' "$WORK/prekey_bob_receive2.log")"
+
+# ---- Leg C: new sender -> legacy (bundle-less) recipient. ----
+node "$PREKEY_E2E" send "$WORK/prekey_fixture.json" "$WORK/prekey_dir_a.json" "$WORK/prekey_send_c.json" prekey alice "$NOW_P" >"$WORK/prekey_send_c.log" 2>&1
+check "§4.6 send (bundle-less recipient): the sender falls back to the identity key" \
+    "identity" "$(sed -n 's/^target=//p' "$WORK/prekey_send_c.log")"
+check "§4.6 send (bundle-less recipient): the fallback reason is ABSENT (no bundle)" \
+    "absent" "$(sed -n 's/^fallback_reason=//p' "$WORK/prekey_send_c.log")"
+check "§4.6 send (bundle-less recipient): dest_hint is hint_E(Alice's identity key)" \
+    "$ALICE_HINT_CUR_P" "$(sed -n 's/^dest_hint=//p' "$WORK/prekey_send_c.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_send_c.json")"
+check "the fallback envelope is pushed to prekey node A -> 200" "200" "$code"
+PREKEY_C_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/prekey_send_c.json")"
+
+make_sync_body "$WORK/prekey_mule_a3.json" "[\"$PREKEY_A_ID\",\"$PREKEY_B_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/prekey_mule_a3.json")"
+check "mule pulls exactly 1 envelope (the fallback mail) from prekey node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_mule_pull3.json"
+node "$ACK_E2E" carry "$WORK/prekey_mule_pull3.json" "$WORK/prekey_mule_push3.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_mule_push3.json")"
+check "mule drops the fallback mail at prekey node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/prekey_alice_pull.json" "[\"$PREKEY_A_ID\",\"$PREKEY_B_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/prekey_alice_pull.json")"
+check "alice pulls exactly the fallback envelope from prekey node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/prekey_alice_pull.json"
+node "$PREKEY_E2E" plain_receive "$WORK/prekey_fixture.json" "$WORK/prekey_alice_pull.json" alice "$NOW_P" >"$WORK/prekey_alice_receive.log" 2>&1
+check "§4.6 new-sender -> old-recipient mail delivers through the plain §4.3 path" \
+    "ok" "$(sed -n 's/^decrypted=//p' "$WORK/prekey_alice_receive.log")"
+
+# ---- Replenish leg: the stale SPK triggers rotation; the fresh bundle is
+#      published through the ORDINARY directory upsert. ----
+node "$PREKEY_E2E" replenish "$WORK/prekey_fixture.json" "$WORK/prekey_state.json" "$WORK/prekey_replenish_body.json" "$WORK/prekey_state2.json" "$NOW_P" >"$WORK/prekey_replenish.log" 2>&1
+check "§4.6 replenish: the stale-SPK trigger fired" \
+    "spk_stale" "$(sed -n 's/^trigger=//p' "$WORK/prekey_replenish.log")"
+check "§4.6 replenish: the SPK pair rotated" \
+    "yes" "$(sed -n 's/^rotated=//p' "$WORK/prekey_replenish.log")"
+check "§4.6 replenish: the old OPK batch left the published stock" \
+    "yes" "$(sed -n 's/^old_opk_gone=//p' "$WORK/prekey_replenish.log")"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/directory" "$WORK/prekey_replenish_body.json")"
+check "the replenish rides the ordinary directory upsert -> 200" "200" "$code"
+
+code="$(http GET "http://127.0.0.1:$PORT_E/api/v1/directory")"
+check "GET directory after the replenish -> 200" "200" "$code"
+cp "$WORK/last_body" "$WORK/prekey_dir_after.json"
+NEW_SPK="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).prekeys.spk)' "$WORK/prekey_replenish_body.json")"
+OLD_OPK="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob_bundle.opks[0])' "$WORK/prekey_fixture.json")"
+if grep -qF "$NEW_SPK" "$WORK/prekey_dir_after.json"; then ROT=rotated; else ROT=stale; fi
+check "the served entry now carries the ROTATED spk" "rotated" "$ROT"
+if grep -qF "$OLD_OPK" "$WORK/prekey_dir_after.json"; then OLDGONE=served; else OLDGONE=gone; fi
+check "the wiped batch's OPKs are gone from the served bundle" "gone" "$OLDGONE"
 
 stop_daemon "$DAEMON_D_PID"
 DAEMON_D_PID=""
