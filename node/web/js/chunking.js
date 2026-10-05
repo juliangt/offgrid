@@ -152,6 +152,7 @@ function buildMessageEnvelopes(opts) {
       signPublic: opts.signPublic,
       createdAt: opts.createdAt,
       ttl: opts.ttl,
+      hintEpoch: opts.hintEpoch, /* §6.1: every chunk of the message is addressed with the SAME epoch's hint */
       chunk: { g: g, i: i, n: chunks.length }
     }));
   }

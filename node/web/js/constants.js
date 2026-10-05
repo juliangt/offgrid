@@ -58,3 +58,25 @@ var PUBKEY_B64_LEN = 44;                       // 32 raw bytes (§4.1)
 var SIGNATURE_B64_LEN = 88;                    // 64 raw bytes (§4.1)
 var CANONICAL_HOST = "offgrid.local:8080";  // same origin on every node (§12)
 var CANONICAL_URL = "http://" + CANONICAL_HOST;
+
+/* Rotating dest_hint (§6.1 — issue #26, spec 1.6.0). The static §6.1
+ * derivation let any directory-holding node operator recompute every
+ * user's hint forever and link stored envelopes to aliases. Since 1.6.0
+ * the hint a SENDER embeds is derived per epoch:
+ *   hint(E) = lowercase_hex(HKDF-SHA256(ikm = X25519 public key (raw 32 B),
+ *                                       salt = E as 8-byte big-endian,
+ *                                       info = HINT_INFO, L = 32)[0:8])
+ * with E = floor(unix_seconds / HINT_EPOCH_SECONDS) taken from NODE data
+ * (the directory entry's server-set `epoch` on send; the highest epoch
+ * observed from the node on receive), never from the device clock while
+ * any node is reachable — nodes have no NTP, the NODE's clock is the
+ * shared reference. A recipient recognizes {static legacy, hint(E),
+ * hint(E-1)}; the legacy candidate retires at the fixed spec deadline. */
+var HINT_EPOCH_SECONDS = 86400;                // 24 h epoch, UTC (§6.1)
+var HINT_INFO = "offgrid-dest-hint";           // HKDF info string, exact bytes (§6.1)
+var HINT_LENGTH_BYTES = 8;                     // hint = first 8 OKM bytes as 16 hex chars
+var HINT_TRANSITION_DEADLINE = 1795996800;     // 2026-11-30T00:00:00Z (§6.1): from then on
+                                               // the SPA stops recognizing the static hint —
+                                               // mail from pre-1.6 senders no longer arrives
+                                               // (their SPA refreshes from any visited node,
+                                               // so the practical exposure is days).

@@ -11,14 +11,26 @@
  * 6. Pure mule logic: classification (§11) and FIFO eviction (§8.1).
  * ------------------------------------------------------------------- */
 
-/* Split pulled envelopes into mine (dest_hint matches own hint) and
- * foreign (to be carried). Order is preserved. */
-function classifyPullEnvelopes(pulled, ownHint) {
+/* Split pulled envelopes into mine (dest_hint among the OWN HINT
+ * CANDIDATES, §6.1) and foreign (to be carried). `ownHints` is the
+ * recipient's candidate set — an array of hint strings from
+ * hintCandidates (static legacy + hint(E) + hint(E-1), §6.1) — or, for
+ * the pre-1.6 single-hint form, a bare string (accepted unchanged).
+ * Order is preserved. */
+function classifyPullEnvelopes(pulled, ownHints) {
+  var candidates = {};
+  if (typeof ownHints === "string") {
+    candidates[ownHints] = true;
+  } else if (ownHints && ownHints.length) {
+    for (var h = 0; h < ownHints.length; h++) {
+      if (typeof ownHints[h] === "string") candidates[ownHints[h]] = true;
+    }
+  }
   var mine = [];
   var foreign = [];
   for (var i = 0; i < pulled.length; i++) {
     var env = pulled[i];
-    if (env && env.dest_hint === ownHint) mine.push(env);
+    if (env && candidates[env.dest_hint]) mine.push(env);
     else foreign.push(env);
   }
   return { mine: mine, foreign: foreign };
@@ -97,6 +109,20 @@ function maxAdvertisedEnvelopeVersion(capabilities) {
     if (i > 0 && v <= versions[i - 1]) return null; /* strictly ascending, no duplicates */
   }
   return max;
+}
+
+/* §6.1 epoch observation: reduce a capabilities document to the node's
+ * current hint epoch (hint_epoch_current, the additive §15.5 member).
+ * This is the recipient's freshest server-side observation of "now" on
+ * the NODE's clock — the shared reference when recognizing its own
+ * rotating hints (a device clock is the offline-cold fallback only).
+ * Anything absent, mistyped or negative → null (the caller falls back;
+ * unknown capabilities members are ignored per §15.4). */
+function observedEpochFromCapabilities(capabilities) {
+  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return null;
+  var e = capabilities.hint_epoch_current;
+  if (typeof e === "number" && isFinite(e) && Math.floor(e) === e && e >= 0) return e;
+  return null;
 }
 
 /* §15.6 outgoing batch gate — negotiation + conversion, pure. For each

@@ -63,6 +63,7 @@ const expectedOrder = [
   "/js/constants.js",
   "/js/bytes.js",
   "/js/sha256.js",
+  "/js/hkdf.js",
   "/js/canonical.js",
   "/js/envelopes.js",
   "/js/mule.js",
@@ -101,6 +102,10 @@ const expectedApi = [
   "canonicalAckSignedString", "canonicalAckInnerJson",
   "ackTtlFor", "ackReferenceIdFor", "ackTaskForArrival",
   "sentNewRecord", "ackMatchesSent", "sentDeliveredRecord", "sentStatusLabel",
+  // §6.1 rotating dest_hint (issue #26)
+  "HINT_EPOCH_SECONDS", "HINT_INFO", "HINT_LENGTH_BYTES", "HINT_TRANSITION_DEADLINE",
+  "hmacSha256", "hkdfSha256", "epochOf", "deriveRotatingHint", "hintCandidates",
+  "observedEpochFromCapabilities",
   // local store API (section 8)
   "loadIdentity", "saveIdentity", "addInboxMessages", "listInbox",
   "addInboxChunkPart", "listChunkPartials", "removeChunkPartial",

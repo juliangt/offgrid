@@ -59,12 +59,84 @@ function createIdentity() {
   return identityFromSeed(randomBytes(32));
 }
 
-/* §6.1: dest_hint = lowercase_hex(SHA-256(recipient X25519 pubkey)[0:8]). */
+/* §6.1 LEGACY derivation (pre-1.6): dest_hint = lowercase_hex(SHA-256(
+ * recipient X25519 pubkey)[0:8]). Kept verbatim because it is still one
+ * recognition candidate during the §6.1 transition window and the §6.1
+ * static test vector pins it; the SPA stops addressing and recognizing
+ * it at HINT_TRANSITION_DEADLINE (§6.1). */
 function deriveDestHint(x25519PublicRaw) {
   if (!(x25519PublicRaw instanceof Uint8Array) || x25519PublicRaw.length !== 32) {
     throw new Error("X25519 public key must be 32 raw bytes");
   }
   return hexEncode(sha256(x25519PublicRaw).subarray(0, 8));
+}
+
+/* §6.1 (spec 1.6.0): E = floor(unix_seconds / 86400), UTC — the epoch the
+ * NODE's clock defines (directory entries carry it server-side; senders
+ * never trust their own clock while a node is reachable). */
+function epochOf(unixSec) {
+  if (typeof unixSec !== "number" || !isFinite(unixSec) || unixSec < 0) {
+    throw new Error("epoch source must be a non-negative unix-seconds number");
+  }
+  return Math.floor(unixSec / HINT_EPOCH_SECONDS);
+}
+
+/* §6.1: the HKDF salt is the epoch as 8-byte big-endian unsigned. ES5 has
+ * no BigInt: split through the 32-bit halves (epochs fit 53 bits). */
+function epochSalt(epoch) {
+  var e = assertInt(epoch, "epoch");
+  if (e < 0 || e >= 0x20000000000000) {
+    throw new Error("epoch outside the representable uint53 range");
+  }
+  var out = new Uint8Array(8);
+  var hi = Math.floor(e / 0x100000000);
+  var lo = e - hi * 0x100000000;
+  var dv = new DataView(out.buffer);
+  dv.setUint32(0, hi >>> 0);
+  dv.setUint32(4, lo >>> 0);
+  return out;
+}
+
+/* §6.1 rotating derivation (binding, spec 1.6.0):
+ *   hint(E) = lowercase_hex(HKDF-SHA256(ikm = X25519 public key, raw 32 B,
+ *                                       salt = E as 8-byte big-endian,
+ *                                       info = HINT_INFO, L = 32)[0:8])
+ * Pure and synchronous (hkdf.js over the vendored SHA-256): the same key
+ * and epoch produce the same 16-hex-char hint in every WebView. */
+function deriveRotatingHint(x25519PublicRaw, epoch) {
+  if (!(x25519PublicRaw instanceof Uint8Array) || x25519PublicRaw.length !== 32) {
+    throw new Error("X25519 public key must be 32 raw bytes");
+  }
+  var okm = hkdfSha256(x25519PublicRaw, epochSalt(epoch), utf8Encode(HINT_INFO), 32);
+  return hexEncode(okm.subarray(0, HINT_LENGTH_BYTES));
+}
+
+/* §6.1 recipient candidate set: the hints this client recognizes as its
+ * own at time nowSec:
+ *   - the static legacy hint, but ONLY before HINT_TRANSITION_DEADLINE
+ *     (pre-1.6 senders address with it; after the deadline their mail is
+ *     no longer recognized — the documented, honest §6.1 retirement);
+ *   - hint(E), where E is the highest epoch observed from NODE data this
+ *     session (directory entry epochs, capabilities hint_epoch_current);
+ *   - hint(E-1), so an envelope minted in the previous epoch (or carried
+ *     across a boundary) still arrives: no message loss across exactly
+ *     one epoch rotation.
+ * Offline-cold (no node observation yet), E falls back to the device
+ * clock. The result is deduplicated in candidate order. */
+function hintCandidates(x25519PublicRaw, observedEpoch, nowSec) {
+  var now = (typeof nowSec === "number" && isFinite(nowSec)) ? nowSec : Math.floor(Date.now() / 1000);
+  var e;
+  if (typeof observedEpoch === "number" && isFinite(observedEpoch) &&
+      Math.floor(observedEpoch) === observedEpoch && observedEpoch >= 0) {
+    e = observedEpoch; /* server-observed: the shared reference */
+  } else {
+    e = epochOf(now);  /* offline-cold fallback */
+  }
+  var out = [];
+  if (now < HINT_TRANSITION_DEADLINE) out.push(deriveDestHint(x25519PublicRaw));
+  out.push(deriveRotatingHint(x25519PublicRaw, e));
+  if (e >= 1) out.push(deriveRotatingHint(x25519PublicRaw, e - 1));
+  return out;
 }
 
 /* §6.2: id = lowercase_hex(SHA-256(canonical §5.2 string)). */
@@ -101,6 +173,14 @@ function computeEnvelopeId(v, destHint, createdAt, ttl, payload) {
  * signPublic are the ACK AUTHOR's Ed25519 keys — so the sender can
  * authenticate who confirmed receipt. chunk and ack are mutually
  * exclusive; an ack carries no text.
+ *
+ * §6.1 rotating dest_hint (spec 1.6.0): `opts.hintEpoch` (a finite
+ * integer ≥ 0) addresses the envelope with hint(E) = the recipient's
+ * rotating hint for epoch E — the sender passes the SERVER-SET epoch of
+ * the directory entry it is sending to (never its own clock). Absent or
+ * null hintEpoch keeps the LEGACY static §6.1 derivation byte-for-byte
+ * (the pre-1.6 construction; still produced during the transition window
+ * and pinned by the §6.1 static test vector).
  */
 /*
  * Module D — Phase 2/3 evolution mapping (normative source: spec §14).
@@ -241,7 +321,11 @@ function buildEnvelope(opts) {
 
   /* 6: payload, dest_hint, id. */
   var payload = b64encode(concatBytes(eph.publicKey, nonce, boxed));
-  var destHint = deriveDestHint(recipientPub);
+  /* §6.1: with hintEpoch the hint rotates per epoch; without it the
+   * legacy static derivation stays byte-identical to pre-1.6 builds. */
+  var destHint = (opts.hintEpoch === undefined || opts.hintEpoch === null)
+    ? deriveDestHint(recipientPub)
+    : deriveRotatingHint(recipientPub, assertInt(opts.hintEpoch, "hintEpoch"));
   return {
     v: 1,
     id: computeEnvelopeId(1, destHint, createdAt, ttl, payload),
@@ -282,12 +366,25 @@ function validEnvelopeShape(env) {
  * validate the inner fields, verify the detached signature. ANY failure
  * returns {ok:false} — never an error that could leak information — and
  * the caller only counts it in telemetry.
+ *
+ * §6.1 (spec 1.6.0): `ownHints` is the recipient's rotating-hint
+ * CANDIDATE SET (hintCandidates: static legacy + hint(E) + hint(E-1));
+ * an envelope is only addressed to this client when its dest_hint is in
+ * that set. A bare string is accepted (the pre-1.6 single-hint form),
+ * and when ownHints is absent the legacy static identity.hint alone is
+ * used — byte-for-byte the pre-1.6 behavior for callers that have not
+ * migrated. Node blindness is untouched: this comparison is LOCAL, the
+ * node never learns which candidate matched.
  */
-function decryptEnvelope(env, identity, now) {
+function decryptEnvelope(env, identity, now, ownHints) {
   try {
     var nacl = requireNacl();
     if (!validEnvelopeShape(env)) return { ok: false, reason: "bad_envelope" };
-    if (env.dest_hint !== identity.hint) return { ok: false, reason: "not_mine" };
+    var hints;
+    if (typeof ownHints === "string") hints = [ownHints];
+    else if (ownHints && ownHints.length) hints = ownHints;
+    else hints = [identity.hint];
+    if (hints.indexOf(env.dest_hint) < 0) return { ok: false, reason: "not_mine" };
 
     /* §3.1 payload bounds; §4.3 split 32/24/rest. */
     var raw = b64decode(env.payload);
