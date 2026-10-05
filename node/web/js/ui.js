@@ -208,6 +208,16 @@ function renderDirectory() {
     opt.value = entry.x25519;
     opt.textContent = entry.alias + " · " + relativeTime(entry.last_seen || 0);
     opt.title = "Last seen: " + absoluteTime(entry.last_seen || 0);
+    /* §4.6: an entry whose published bundle fails the client-side shape or
+     * signature check is treated as bundle-less (identity fallback) — the
+     * doctored-bundle defense — and the contact view surfaces the warning. */
+    if (entry.prekeys) {
+      var target = DTN.prekeyTargetForEntry(entry);
+      if (!target.ok && target.reason === "invalid") {
+        opt.textContent += " · invalid prekey bundle";
+        opt.title += " — WARNING: this contact's published prekey bundle failed its signature check. Mail will be sent to their long-term key (no forward secrecy).";
+      }
+    }
     select.appendChild(opt);
     count += 1;
   }
@@ -334,6 +344,16 @@ function onSend() {
     showStatus(statusEl, "error", "The recipient key is not valid.");
     return;
   }
+  /* §4.6 sender rule: the BOX targets a prekey from the recipient's
+   * published bundle (random one-time prekey, else the signed medium-term
+   * prekey) after the client-side shape + signature verification; without
+   * a valid bundle (absent, malformed or tampered) the legacy identity key
+   * is used. The §6.1 hint always derives from the STABLE identity key. */
+  var target = DTN.prekeyTargetForEntry(entry);
+  var boxTarget = target.ok ? target.pub : recipientRaw;
+  var prekeyNote = (!target.ok && target.reason === "invalid")
+    ? " Note: their prekey bundle is invalid — sent without forward secrecy."
+    : "";
   /* §6.1: address with the recipient's rotating hint for the epoch the
    * NODE stamped on the directory entry — the freshest server-side truth
    * about that recipient, and never the (clockless-skew) device clock. A
@@ -355,7 +375,8 @@ function onSend() {
   var envs;
   try {
     envs = DTN.buildMessageEnvelopes({
-      recipientBoxPublic: recipientRaw,
+      recipientBoxPublic: boxTarget,
+      hintIdentityBoxPublic: recipientRaw,
       message: text,
       alias: identity.alias,
       signSecret: identity.signSecret,
@@ -417,9 +438,9 @@ function onSend() {
     $("compose-text").value = "";
     updateCounter();
     updateSendEnabled();
-    showStatus(statusEl, "ok", envs.length > 1
+    showStatus(statusEl, "ok", (envs.length > 1
       ? "Message split into " + envs.length + " envelopes and dropped at the node. They will arrive when a mule carries them to their recipient."
-      : "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.");
+      : "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.") + prekeyNote);
     renderTelemetry();
     renderSent();
   }, function (err) {
@@ -620,13 +641,32 @@ function setImportError(msg) {
   el.textContent = msg;
 }
 
-/* Publish {alias, pubkey, x25519} to the node's directory (§10.3). */
-function publishIdentity(identity) {
-  return postJson("/api/v1/directory", {
+/* Publish {alias, pubkey, x25519} — plus the optional §4.6 `prekeys`
+ * bundle when one is published (registration, import, replenish) — to the
+ * node's directory (§10.3). A publication WITHOUT the bundle clears any
+ * previously stored one server-side (the §9 downgrade self-heal), so
+ * callers always pass the current bundle once prekeys exist. */
+function publishIdentity(identity, prekeysBundle) {
+  var body = {
     alias: identity.alias,
     pubkey: identity.signPublicB64,
     x25519: identity.boxPublicB64
-  });
+  };
+  if (prekeysBundle) body.prekeys = prekeysBundle;
+  return postJson("/api/v1/directory", body);
+}
+
+/* The §4.6 initial stock + bundle for a registration or an import: fresh
+ * random pairs (never derived from the identity seed), signed with the
+ * identity Ed25519 key. Best-effort on generation: a null stock publishes
+ * a bundle-less identity (still conforming; the first sync replenishes). */
+function newPrekeyPublication(identity) {
+  try {
+    var stock = DTN.prekeyGenerateStock(nowSec());
+    return { stock: stock, bundle: DTN.prekeyBundleForPublish(stock, identity.signSecret, identity.signPublicB64) };
+  } catch (e) {
+    return { stock: null, bundle: null };
+  }
 }
 
 function onRegister() {
@@ -645,8 +685,13 @@ function onRegister() {
   identity.alias = alias;
   identity.registered_at = nowSec();
 
-  publishIdentity(identity).then(function () {
-    return DTN.saveIdentity(identity);
+  /* §4.6: publish the initial prekey stock with the identity; the secrets
+   * stay on this device (the `prekeys` store, §15.6 migration v4). */
+  var publication = newPrekeyPublication(identity);
+  publishIdentity(identity, publication.bundle).then(function () {
+    var saved = DTN.saveIdentity(identity);
+    var stocked = publication.stock ? DTN.savePrekeyState(publication.stock) : Promise.resolve();
+    return Promise.all([saved, stocked]);
   }).then(function () {
     btn.textContent = btnLabel;
     uiState.identity = identity;
@@ -696,8 +741,15 @@ function onImport() {
   identity.alias = alias;
   identity.registered_at = nowSec();
 
-  publishIdentity(identity).then(function () {
-    return DTN.saveIdentity(identity);
+  /* §4.6: the old prekey stock is unrecoverable (the seed derives only the
+   * long-term keys), so the import publishes a FRESH bundle — the old OPKs
+   * leave the directory (mail to them can no longer be opened) and the new
+   * stock takes over on this device. */
+  var publication = newPrekeyPublication(identity);
+  publishIdentity(identity, publication.bundle).then(function () {
+    var saved = DTN.saveIdentity(identity);
+    var stocked = publication.stock ? DTN.savePrekeyState(publication.stock) : Promise.resolve();
+    return Promise.all([saved, stocked]);
   }).then(function () {
     uiState.identity = identity;
     enterApp();
@@ -995,6 +1047,18 @@ function runSync(outgoing) {
         summary.pushed = pushList.length;
         summary.withheld = gate.withheld.length;
         return summary;
+      }).then(function (summary) {
+        /* §4.6 replenish, AFTER the pulls (the wipe-on-use transactions of
+         * this cycle have settled through processPulled): rotate the SPK
+         * when stale (> 30 days on the bundle ts anchor) and/or replenish
+         * the OPK stock at/below the low-water mark — a fresh signed
+         * batch, re-published through the ordinary directory upsert, and
+         * the local stock swapped only on a 200 (best-effort: on failure
+         * the old stock is kept and the retry happens next sync). */
+        return replenishPrekeys(identity).then(function (replenished) {
+          summary.prekeysReplenished = replenished;
+          return summary;
+        });
       });
     });
   });
@@ -1019,14 +1083,22 @@ function buildAckEnvelopes(tasks, identity, directory) {
     var entry = byPubkey[task.sender_key];
     var senderBox = entry ? DTN.b64decode(entry.x25519) : null;
     if (!entry || !senderBox || senderBox.length !== 32) continue;
+    /* §4.6 sender rule for acks too: the box targets a verified prekey
+     * when the sender published a bundle (an ack consumes one OPK — the
+     * same bounded loss window as any other mail), else the identity key. */
+    var ackTarget = DTN.prekeyTargetForEntry(entry);
+    var ackBox = ackTarget.ok ? ackTarget.pub : senderBox;
     /* §6.1: address the ack with the sender's rotating hint for the epoch
      * the node stamped on their directory entry (legacy static hint when
-     * the entry predates 1.6 — still recognized inside the window). */
+     * the entry predates 1.6 — still recognized inside the window). The
+     * hint source is the STABLE identity key even when the box targets a
+     * prekey (§4.6). */
     var hintEpoch = (typeof entry.epoch === "number" && isFinite(entry.epoch) &&
                      Math.floor(entry.epoch) === entry.epoch && entry.epoch >= 0)
       ? entry.epoch : null;
     out.push(DTN.buildEnvelope({
-      recipientBoxPublic: senderBox,     /* addressed BACK to the sender's dest_hint */
+      recipientBoxPublic: ackBox,        /* addressed BACK to the sender's dest_hint */
+      hintIdentityBoxPublic: senderBox,  /* §4.6: hint from the identity key */
       message: "",                       /* acks carry no text (§4.5, m = "") */
       alias: identity.alias,             /* the ACK AUTHOR's alias (the original recipient) */
       signSecret: identity.signSecret,
@@ -1043,60 +1115,73 @@ function buildAckEnvelopes(tasks, identity, directory) {
 /* §11 classification of the pulled envelopes + persistence, extended with
  * the §4.4 chunk flow (chunk arrivals merge into inbox_parts keyed by the
  * group id `g`; a completing chunk publishes ONE inbox row, clears the
- * partial and yields the ONE §4.5 ack task) and the §4.5 ack flow: ack
+ * partial and yields the ONE §4.5 ack task), the §4.5 ack flow: ack
  * arrivals flip the matching sent record to "delivered" (after the
  * ackMatchesSent bind; acks are never answered — termination rule), and
  * message arrivals yield at most one ack task each, built into envelopes
- * against the node directory and pushed by a follow-up cycle. */
+ * against the node directory and pushed by a follow-up cycle. §4.6: the
+ * decryption runs with the device's prekey trial list (identity secret
+ * first, then SPK, then each unconsumed OPK — first success wins) and the
+ * OPK secret that opened an envelope is WIPED synchronously (one
+ * readwrite transaction per wipe — the forward-secrecy event). */
 function processPulled(pulled, known, identity) {
-  var fresh = [];
-  var pulledIds = [];
-  var dedup = {};
-  for (var i = 0; i < pulled.length; i++) {
-    var env = pulled[i];
-    if (!env || typeof env.id !== "string" || dedup[env.id]) continue;
-    dedup[env.id] = true;
-    pulledIds.push(env.id);
-    if (known[env.id]) continue; /* replay of an envelope we already have */
-    fresh.push(env);
-  }
-  /* §6.1 recipient candidate set: static legacy hint (pre-deadline),
-   * hint(E) and hint(E-1), where E is the highest epoch observed from
-   * node data this session (capabilities hint_epoch_current, directory
-   * entry epochs) — or the device clock when offline-cold. */
-  var candidates = DTN.hintCandidates(identity.boxPublic, observedHintEpoch, nowSec());
-  var cls = DTN.classifyPullEnvelopes(fresh, candidates);
-  var inboxRecords = [];
-  var chunkArrivals = [];
-  var ackTasks = [];      /* §4.5: one per received message, acks to emit */
-  var ackArrivals = [];   /* §4.5: received ack envelopes */
-  var rejected = 0;
-  var now = nowSec();
-  for (var j = 0; j < cls.mine.length; j++) {
-    var res = DTN.decryptEnvelope(cls.mine[j], identity, now, candidates);
-    if (res.ok) {
-      if (res.ack) {
-        /* §4.5 termination rule: an ack is recorded, never answered. */
-        ackArrivals.push(res);
-      } else if (res.chunk) {
-        chunkArrivals.push({ env: cls.mine[j], dec: res });
-      } else {
-        inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: now });
-        /* §4.5: a fully received flat message is ackable NOW — one ack,
-         * referencing this envelope's id. */
-        ackTasks.push({
-          r: cls.mine[j].id,
-          sender_key: res.k,
-          sender_alias: res.a,
-          created_at: cls.mine[j].created_at,
-          ttl: cls.mine[j].ttl,
-          type: DTN.ACK_TYPE_RECEIVED
-        });
-      }
-    } else {
-      rejected += 1; /* silent reject (§4.3): counted, never surfaced */
+  /* §4.6: the trial list is a snapshot of this sync's stock; two arrivals
+   * to the same OPK in one batch both open (the documented collision
+   * window) and the wipe itself is idempotent. */
+  return DTN.loadPrekeyState().then(function (stock) {
+    var trialKeys = DTN.prekeyTrialKeys(stock);
+    var fresh = [];
+    var pulledIds = [];
+    var dedup = {};
+    for (var i = 0; i < pulled.length; i++) {
+      var env = pulled[i];
+      if (!env || typeof env.id !== "string" || dedup[env.id]) continue;
+      dedup[env.id] = true;
+      pulledIds.push(env.id);
+      if (known[env.id]) continue; /* replay of an envelope we already have */
+      fresh.push(env);
     }
-  }
+    /* §6.1 recipient candidate set: static legacy hint (pre-deadline),
+     * hint(E) and hint(E-1), where E is the highest epoch observed from
+     * node data this session (capabilities hint_epoch_current, directory
+     * entry epochs) — or the device clock when offline-cold. */
+    var candidates = DTN.hintCandidates(identity.boxPublic, observedHintEpoch, nowSec());
+    var cls = DTN.classifyPullEnvelopes(fresh, candidates);
+    var inboxRecords = [];
+    var chunkArrivals = [];
+    var ackTasks = [];      /* §4.5: one per received message, acks to emit */
+    var ackArrivals = [];   /* §4.5: received ack envelopes */
+    var wipeTasks = [];     /* §4.6: one per envelope opened through an OPK */
+    var rejected = 0;
+    var now = nowSec();
+    for (var j = 0; j < cls.mine.length; j++) {
+      var res = DTN.decryptEnvelope(cls.mine[j], identity, now, candidates, trialKeys);
+      if (res.ok) {
+        if (res.opened_with && res.opened_with.tag === "opk" && res.opened_with.pub) {
+          wipeTasks.push(DTN.wipeOpkSecret(res.opened_with.pub));
+        }
+        if (res.ack) {
+          /* §4.5 termination rule: an ack is recorded, never answered. */
+          ackArrivals.push(res);
+        } else if (res.chunk) {
+          chunkArrivals.push({ env: cls.mine[j], dec: res });
+        } else {
+          inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: now });
+          /* §4.5: a fully received flat message is ackable NOW — one ack,
+           * referencing this envelope's id. */
+          ackTasks.push({
+            r: cls.mine[j].id,
+            sender_key: res.k,
+            sender_alias: res.a,
+            created_at: cls.mine[j].created_at,
+            ttl: cls.mine[j].ttl,
+            type: DTN.ACK_TYPE_RECEIVED
+          });
+        }
+      } else {
+        rejected += 1; /* silent reject (§4.3): counted, never surfaced */
+      }
+    }
   /* §4.4: sweep expired partials (passive, sync-time), then merge each
    * arrival; every completion counts as one inbox message delivered. */
   return DTN.purgeExpiredChunkPartials(now).then(function () {
@@ -1148,28 +1233,68 @@ function processPulled(pulled, known, identity) {
             return DTN.addTransitEnvelopes(cls.foreign);
           }).then(function (transitOutcome) {
             return DTN.markSeenIds(pulledIds).then(function () {
-              return {
-                status: "ok",
-                pulled: pulled.length,
-                fresh: fresh.length,
-                mine: cls.mine.length,
-                inboxAdded: inboxRecords.length + completed,
-                chunksArrived: arrived,
-                chunksCompleted: completed,
-                acksArrived: ackArrivals.length,
-                acksMatched: acksMatched,
-                acksDelivered: acksDelivered,
-                acksEmitted: ackEnvs.length,
-                acks: ackEnvs, /* §4.5: pushed by the chainAckSync follow-up */
-                rejected: rejected,
-                transitAdded: transitOutcome.added,
-                evicted: transitOutcome.evicted.length
-              };
+              /* §4.6: the wipe transactions ride this chain so a caller
+               * awaiting the summary sees a settled, counted store. */
+              return Promise.all(wipeTasks).then(function (wipeResults) {
+                var prekeyWipes = 0;
+                for (var w = 0; w < wipeResults.length; w++) {
+                  if (wipeResults[w]) prekeyWipes += 1;
+                }
+                return {
+                  status: "ok",
+                  pulled: pulled.length,
+                  fresh: fresh.length,
+                  mine: cls.mine.length,
+                  inboxAdded: inboxRecords.length + completed,
+                  chunksArrived: arrived,
+                  chunksCompleted: completed,
+                  acksArrived: ackArrivals.length,
+                  acksMatched: acksMatched,
+                  acksDelivered: acksDelivered,
+                  acksEmitted: ackEnvs.length,
+                  acks: ackEnvs, /* §4.5: pushed by the chainAckSync follow-up */
+                  rejected: rejected,
+                  transitAdded: transitOutcome.added,
+                  evicted: transitOutcome.evicted.length,
+                  prekeyWipes: prekeyWipes /* §4.6: OPK secrets wiped on use */
+                };
+              });
             });
           });
         });
       });
     });
+  });
+});
+}
+
+/* §4.6 replenish (sync-time, after pulls): when the device stock is
+ * missing (fresh identity, pre-1.7 record), the SPK is stale or the OPK
+ * stock is at/below the low-water mark, generate the fresh batch, sign
+ * its bundle, re-POST the own directory entry (alias, keys, prekeys) and
+ * only then swap the local stock (the old batch's secrets die with the
+ * swap). Best-effort in every direction: a failed POST keeps the old
+ * stock and returns false (retry next sync); a failed stock WRITE after
+ * a successful POST also returns false (the directory is already serving
+ * the new bundle, so the retry regenerates and re-publishes — harmless).
+ * Resolves true when a replenish completed. */
+function replenishPrekeys(identity) {
+  return DTN.loadPrekeyState().then(function (stock) {
+    var need = DTN.prekeyNeedsReplenish(stock, nowSec());
+    if (!need.needed) return false;
+    var fresh = DTN.prekeyReplenishedStock(stock, nowSec());
+    var bundle = DTN.prekeyBundleForPublish(fresh, identity.signSecret, identity.signPublicB64);
+    return publishIdentity(identity, bundle).then(function () {
+      return DTN.savePrekeyState(fresh).then(function () {
+        return true;
+      }, function () {
+        return false;
+      });
+    }, function () {
+      return false; /* node unreachable: keep the old stock, retry next sync */
+    });
+  }, function () {
+    return false; /* store read failure: nothing to do this cycle */
   });
 }
 
@@ -1190,7 +1315,9 @@ function recordSyncMeta(summary) {
     withheld: summary.withheld || 0, /* §15.6: above the node's ceiling, still carried */
     acks_emitted: summary.acksEmitted || 0,   /* §4.5 ack telemetry */
     acks_matched: summary.acksMatched || 0,
-    acks_delivered: summary.acksDelivered || 0
+    acks_delivered: summary.acksDelivered || 0,
+    prekey_wipes: summary.prekeyWipes || 0,   /* §4.6 wipe-on-use telemetry */
+    prekeys_replenished: summary.prekeysReplenished === true
   };
   return DTN.setMeta("last_sync", meta).then(function () {
     if (meta.evicted > 0) {

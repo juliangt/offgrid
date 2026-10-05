@@ -80,3 +80,22 @@ var HINT_TRANSITION_DEADLINE = 1795996800;     // 2026-11-30T00:00:00Z (§6.1): 
                                                // mail from pre-1.6 senders no longer arrives
                                                // (their SPA refreshes from any visited node,
                                                // so the practical exposure is days).
+
+/* Prekey bundles — bounded forward secrecy (§4.6 — issue #27, spec 1.7.0).
+ * The envelope format is UNTOUCHED: the box targets a prekey public from the
+ * recipient's published bundle (random one-time prekey, else the signed
+ * medium-term prekey, else the long-term identity key) while dest_hint stays
+ * derived from the STABLE identity key (§6.1). The secret that opened an
+ * envelope is wiped synchronously (the forward-secrecy event). Node-side
+ * admission is blind-shape only; the SPK signature is verified CLIENT-side
+ * (the canonical bundle string is the §5-style fixed-order form
+ * {"b":1,"k":<k>,"spk":<spk>,"ts":<ts>,"opk":<count>}, §4.6). */
+var PREKEY_BUNDLE_VERSION = 1;                 // bundle schema version (§15-style)
+var PREKEY_SPK_TTL_SECONDS = 2592000;          // 30 days: SPK rotation anchor (bundle ts)
+var PREKEY_OPK_LOW_WATER = 4;                  // replenish when unconsumed stock ≤ this
+var PREKEY_OPK_BATCH_TARGET = 12;              // fresh OPKs per batch (8..16 admission window)
+var PREKEY_OPK_MIN = 8;                        // node admission floor (§10.3)
+var PREKEY_OPK_MAX = 16;                       // node admission ceiling (§10.3)
+var PREKEY_BUNDLE_MAX_BYTES = 2048;            // node admission cap for the serialized member
+var PREKEY_PUBLIC_B64_LEN = 44;                // Base64 of a 32-byte X25519 public
+var PREKEY_SIG_B64_LEN = 88;                   // Base64 of a 64-byte Ed25519 signature

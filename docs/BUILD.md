@@ -71,7 +71,8 @@ One command from the repository root (the exact sequence below, wrapped):
 make test
 ```
 
-The explicit steps, for CI copies and non-make shells:
+The explicit steps, for CI copies and non-make shells (the same sequence
+`make test` wraps):
 
 ```bash
 # 1. Go unit tests (storage, api, envelope, sdnotify — including the fuzz
@@ -81,23 +82,40 @@ cd node && go test ./... -count=1 && cd ..
 # 2. Crypto round-trip against the SPA engine (scripts in index.html order)
 node tests/crypto_roundtrip.mjs
 
-# 3. SPA layout contract: referenced assets, CSP, load order, DTN API surface
+# 3. §4.6 prekey bundles and forward secrecy: canonical bundle string and
+#    worked vector, selection/trial order, wipe-on-use, replenish,
+#    compatibility both directions, chunking/acks over prekey envelopes
+node tests/prekeys.mjs
+
+# 4. §6.1 rotating dest_hint: HKDF vectors, candidate set, transition window
+node tests/hint_rotation.mjs
+
+# 5. SPA layout contract: referenced assets, CSP, load order, DTN API surface
 node tests/spa_structure.mjs
 
-# 4. SPA §15 versioning policy: negotiation guard, blind v1→v2 conversion,
+# 6. SPA §15 versioning policy: negotiation guard, blind v1→v2 conversion,
 #    pull-path stored versions, store migration chain
 node tests/version_migration.mjs
 
-# 5. Full E2E: two daemons + mule walk with curl (starts/stops its own servers)
+# 7. §4.4 long-message convention: split, signed chunk metadata, reassembly
+node tests/chunking.mjs
+
+# 8. §4.5 delivery-acknowledgment convention: ack construction, TTL formula,
+#    sender-side bind
+node tests/acks.mjs
+
+# 9. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
+#    legs included (starts/stops its own servers)
 bash tests/sync_e2e.sh
 
-# 6. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
-#    assertions on the generated firewall ruleset, tc shaping stream and
-#    shield scripts (no hardware, no root)
+# 10. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
+#     assertions on the generated firewall ruleset, tc shaping stream and
+#     shield scripts (no hardware, no root)
 bash tests/hardening_structure.sh
 ```
 
-Expected outputs:
+Expected outputs (assertion counts move as suites grow — the shape is what
+matters):
 
 1. `go test ./... -count=1` — one `ok` line per package:
 
@@ -105,6 +123,7 @@ Expected outputs:
    ok  	offgrid/dtn-node
    ok  	offgrid/dtn-node/internal/api
    ok  	offgrid/dtn-node/internal/envelope
+   ok  	offgrid/dtn-node/internal/health
    ok  	offgrid/dtn-node/internal/sdnotify
    ok  	offgrid/dtn-node/internal/storage
    ```
@@ -115,28 +134,52 @@ Expected outputs:
    PASS: 44 assertions against the SPA engine (index.html script order)
    ```
 
-3. The structural test ends with:
+3. The prekey test ends with:
 
    ```
-   PASS: 97 structural assertions on the SPA layout
+   PASS: 52 assertions on the §4.6 prekey bundles and forward secrecy (index.html script order)
    ```
 
-4. The versioning test ends with:
+4. The hint-rotation test ends with:
 
    ```
-   PASS: 71 assertions on the SPA §15 versioning policy (index.html script order)
+   PASS: 44 assertions on the §6.1 rotating dest_hint (index.html script order)
    ```
 
-5. The E2E script ends with 84 assertions and:
+5. The structural test ends with:
 
    ```
-   e2e: summary: 84 passed, 0 failed
+   PASS: 161 structural assertions on the SPA layout
+   ```
+
+6. The versioning test ends with:
+
+   ```
+   PASS: 77 assertions on the SPA §15 versioning policy (index.html script order)
+   ```
+
+7. The chunking test ends with:
+
+   ```
+   PASS: 62 assertions on the §4.4 chunking convention (index.html script order)
+   ```
+
+8. The acks test ends with:
+
+   ```
+   PASS: 54 assertions on the §4.5 delivery-acknowledgment convention (index.html script order)
+   ```
+
+9. The E2E script ends with:
+
+   ```
+   e2e: summary: 289 passed, 0 failed
    e2e: RESULT: PASS
    ```
 
-   It builds the dev binary itself, starts two daemons on `127.0.0.1:18091` and `127.0.0.1:18092` (override with `PORT_A` / `PORT_B`; the extra §15 nodes use `PORT_C` / `PORT_E`, defaults `18093` / `18094`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`).
+   It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), and the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m).
 
-6. The Pi hardening test ends with 197 assertions and:
+10. The Pi hardening test ends with 197 assertions and:
 
    ```
    hardening: summary: 197 passed, 0 failed
@@ -149,7 +192,13 @@ Expected outputs:
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
-All of section 4 runs in CI on every push to `main` and every pull request (`.github/workflows/test.yml`, ubuntu-latest: setup-go pinned by `node/go.mod`, Node 22, `make test` then `make chaos`, minimal `contents: read` permissions). The chaos suite has its own section below.
+All of section 4 runs on demand in CI (`.github/workflows/test.yml`,
+ubuntu-latest: setup-go pinned by `node/go.mod`, Node 22, `make test` then
+`make chaos`, minimal `contents: read` permissions). Since the 2026-10-04
+decision the workflow is **manual-dispatch only** (`gh workflow run test`
+optionally with `--ref <branch>`) — it no longer runs on push or pull
+request, so the suite MUST be run locally (this section) before opening a
+PR; see `AGENTS.md`. The chaos suite has its own section below.
 
 ## 5. Deploy to a Raspberry Pi (Zero W or newer)
 
