@@ -13,6 +13,7 @@ package storage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -36,7 +37,10 @@ import (
 // directory.epoch column (§6.1, issue #26): the server-set hint epoch —
 // floor(now / HintEpochSeconds) at upsert — the node publishes so senders
 // derive rotating dest_hints from NODE time, never their own clocks.
-const SchemaVersion = 3
+// Version 4 adds the nullable directory.prekeys column (§4.6, issue #27):
+// the client-published prekey bundle stored verbatim after blind shape
+// validation (§10.3), NULL on entries whose owners published none.
+const SchemaVersion = 4
 
 // HintEpochSeconds is the §6.1 epoch length: a 24-hour UTC epoch. The
 // directory's epoch column and the capabilities document's
@@ -47,13 +51,14 @@ const SchemaVersion = 3
 // derived under — blindness preserved, §13).
 const HintEpochSeconds = 86400
 
-// schemaV3 is the complete schema of storage version 3 (§9 as amended by
-// §15.3 and §6.1): the §9 tables plus envelopes.v plus directory.epoch. It
+// schemaV4 is the complete schema of storage version 4 (§9 as amended by
+// §15.3, §6.1 and §4.6): the §9 tables plus envelopes.v plus
+// directory.epoch plus the nullable directory.prekeys bundle column. It
 // is applied in one transaction to fresh databases only — existing
-// databases reach version 3 exclusively through the migration chain, and a
-// database already marked version 3 is trusted as-is (the marker is
+// databases reach version 4 exclusively through the migration chain, and a
+// database already marked version 4 is trusted as-is (the marker is
 // authoritative, §15.3).
-const schemaV3 = `
+const schemaV4 = `
 CREATE TABLE IF NOT EXISTS envelopes (
   id         TEXT PRIMARY KEY,      -- envelope id, 64 lowercase hex chars (client-computed)
   dest_hint  TEXT NOT NULL,         -- 16 lowercase hex chars
@@ -70,7 +75,8 @@ CREATE TABLE IF NOT EXISTS directory (
   x25519    TEXT NOT NULL,         -- X25519 public key, Base64 (encryption)
   alias     TEXT NOT NULL,
   last_seen INTEGER NOT NULL,      -- unix seconds, set by the node on upsert
-  epoch     INTEGER NOT NULL DEFAULT 0 -- server-set hint epoch, floor(last_seen / 86400) (§6.1)
+  epoch     INTEGER NOT NULL DEFAULT 0, -- server-set hint epoch, floor(last_seen / 86400) (§6.1)
+  prekeys   TEXT                   -- optional §4.6 bundle as published (JSON), NULL when absent
 );
 `
 
@@ -81,12 +87,15 @@ CREATE TABLE IF NOT EXISTS directory (
 // and the next open resumes from user_version. Migrations never rewrite or
 // re-encode stored envelope payload bytes (§15.3); the DEFAULT 1 backfill of
 // migration 1→2 is historically correct (every pre-existing row predates v2),
-// and the DEFAULT 0 backfill of 2→3 is epoch-0 (1970) — deliberately stale:
+// the DEFAULT 0 backfill of 2→3 is epoch-0 (1970) — deliberately stale:
 // senders reading such an entry fall back to the legacy static hint (§6.1)
-// until the entry is refreshed by an upsert.
+// until the entry is refreshed by an upsert — and 3→4 adds the nullable
+// prekeys column: every pre-existing row reads NULL (bundle-less) until its
+// owner's next upsert (§4.6).
 var migrations = map[int][]string{
 	1: {`ALTER TABLE envelopes ADD COLUMN v INTEGER NOT NULL DEFAULT 1`},
 	2: {`ALTER TABLE directory ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`},
+	3: {`ALTER TABLE directory ADD COLUMN prekeys TEXT`},
 }
 
 // knownIDChunkSize bounds how many known_ids placeholders go into a single
@@ -124,12 +133,17 @@ var ErrCapacity = errors.New("storage: envelope capacity reached")
 // (§10.3). Epoch is the server-set §6.1 hint epoch of the upsert that last
 // touched the entry: senders derive the rotating dest_hint from it (never
 // from their own clock), so sender and node share one time reference.
+// Prekeys is the §4.6 bundle as published (blind-validated JSON, §10.3),
+// carried verbatim so clients can verify the signature they published
+// against the bytes the node actually holds; nil (omitted in the JSON)
+// when the entry carries no bundle.
 type DirectoryEntry struct {
-	Alias    string `json:"alias"`
-	Pubkey   string `json:"pubkey"`
-	X25519   string `json:"x25519"`
-	LastSeen int64  `json:"last_seen"`
-	Epoch    int64  `json:"epoch"`
+	Alias    string          `json:"alias"`
+	Pubkey   string          `json:"pubkey"`
+	X25519   string          `json:"x25519"`
+	LastSeen int64           `json:"last_seen"`
+	Epoch    int64           `json:"epoch"`
+	Prekeys  json.RawMessage `json:"prekeys,omitempty"`
 }
 
 // Store wraps the SQLite database. All access is serialized through a single
@@ -333,7 +347,7 @@ func upgrade(db *sql.DB, stored int) error {
 		return err
 	}
 	if !fresh {
-		return createSchemaV3(db)
+		return createSchemaV4(db)
 	}
 	from := stored
 	if from == 0 {
@@ -347,16 +361,16 @@ func upgrade(db *sql.DB, stored int) error {
 	return nil
 }
 
-// createSchemaV3 creates the full current schema (version 3) and sets the
+// createSchemaV4 creates the full current schema (version 4) and sets the
 // user_version marker inside a single transaction, so a crash mid-creation
 // leaves either an empty (fresh) database or a complete, correctly marked one.
-func createSchemaV3(db *sql.DB) error {
+func createSchemaV4(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin create schema: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(schemaV3); err != nil {
+	if _, err := tx.Exec(schemaV4); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	if err := setUserVersion(tx, SchemaVersion); err != nil {
@@ -598,13 +612,22 @@ func placeholders(n int) string {
 // Ed25519 public key, setting last_seen and the §6.1 hint epoch to the
 // values supplied by the node (§10.3: last_seen = now on every upsert;
 // §6.1: epoch = floor(now / HintEpochSeconds) — the server clock, never a
-// client-supplied value). The POST body shape is unchanged: clients cannot
-// influence the epoch, only observe it.
-func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64) error {
+// client-supplied value). prekeys is the §4.6 bundle exactly as validated
+// by the API layer (blind shape check, §10.3): stored VERBATIM — the node
+// never verifies its signature (§1) and never mutates it — or NULL when
+// nil, which is what a POST without the member stores (the documented
+// downgrade self-heal: a legacy republication clears any stale bundle, §9).
+// The POST body shape is otherwise unchanged: clients cannot influence the
+// epoch, only observe it.
+func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error {
+	var stored any
+	if len(prekeys) > 0 {
+		stored = string(prekeys)
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO directory (pubkey, x25519, alias, last_seen, epoch) VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(pubkey) DO UPDATE SET x25519 = excluded.x25519, alias = excluded.alias, last_seen = excluded.last_seen, epoch = excluded.epoch`,
-		pubkey, x25519, alias, lastSeen, epoch,
+		`INSERT INTO directory (pubkey, x25519, alias, last_seen, epoch, prekeys) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(pubkey) DO UPDATE SET x25519 = excluded.x25519, alias = excluded.alias, last_seen = excluded.last_seen, epoch = excluded.epoch, prekeys = excluded.prekeys`,
+		pubkey, x25519, alias, lastSeen, epoch, stored,
 	)
 	if err != nil {
 		return fmt.Errorf("storage: upsert directory %s: %w", pubkey, err)
@@ -617,10 +640,13 @@ func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, ep
 // applied by the caller through limit; directory rows are never auto-deleted
 // in Phase 1. Schema-version-3 builds select directory.epoch (§6.1): every
 // entry carries the server-set hint epoch senders derive the rotating
-// dest_hint from.
+// dest_hint from. Schema-version-4 builds additionally select
+// directory.prekeys (§4.6): entries whose owners published a bundle carry it
+// verbatim; NULL rows omit the member from the served JSON entirely
+// (omitempty), so legacy clients see an unchanged document shape.
 func (s *Store) GetDirectory(limit int) ([]DirectoryEntry, error) {
 	rows, err := s.db.Query(
-		`SELECT pubkey, x25519, alias, last_seen, epoch FROM directory ORDER BY last_seen DESC, pubkey ASC LIMIT ?`,
+		`SELECT pubkey, x25519, alias, last_seen, epoch, prekeys FROM directory ORDER BY last_seen DESC, pubkey ASC LIMIT ?`,
 		limit,
 	)
 	if err != nil {
@@ -631,8 +657,12 @@ func (s *Store) GetDirectory(limit int) ([]DirectoryEntry, error) {
 	entries := make([]DirectoryEntry, 0, limit)
 	for rows.Next() {
 		var d DirectoryEntry
-		if err := rows.Scan(&d.Pubkey, &d.X25519, &d.Alias, &d.LastSeen, &d.Epoch); err != nil {
+		var prekeys sql.NullString
+		if err := rows.Scan(&d.Pubkey, &d.X25519, &d.Alias, &d.LastSeen, &d.Epoch, &prekeys); err != nil {
 			return nil, fmt.Errorf("storage: scan directory: %w", err)
+		}
+		if prekeys.Valid && prekeys.String != "" {
+			d.Prekeys = json.RawMessage(prekeys.String)
 		}
 		entries = append(entries, d)
 	}

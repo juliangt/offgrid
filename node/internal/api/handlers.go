@@ -42,7 +42,7 @@ const (
 type Store interface {
 	InsertEnvelopes(envs []envelope.Envelope) (int, error)
 	PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error)
-	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64) error
+	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error
 	GetDirectory(limit int) ([]storage.DirectoryEntry, error)
 	EnvelopeCount() (int64, error)
 	DirectoryCount() (int64, error)
@@ -251,6 +251,7 @@ const (
 	codeInvalidAlias       = "invalid_alias"
 	codeInvalidPubkey      = "invalid_pubkey"
 	codeInvalidX25519      = "invalid_x25519"
+	codeInvalidPrekeys     = "invalid_prekeys"
 	codeNodeFull           = "node_full"
 	codeRateLimited        = "rate_limited"
 	codeStorageUnavailable = "storage_unavailable"
@@ -347,6 +348,14 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) (string, bool) 
 // decodeBase64Key validates a directory public key: standard-alphabet padded
 // Base64 (§3.3) decoding to exactly 32 bytes (§10.3).
 func decodeBase64Key(s string) ([]byte, error) {
+	return decodeBase64OfLen(s, 32)
+}
+
+// decodeBase64OfLen validates standard-alphabet padded Base64 (§3.3)
+// decoding to exactly want bytes — the shared check behind the directory
+// keys (32 B, §10.3) and the §4.6 prekey bundle members (32 B keys, 64 B
+// signature).
+func decodeBase64OfLen(s string, want int) ([]byte, error) {
 	if strings.ContainsAny(s, "\r\n") {
 		return nil, errors.New("key contains newline characters")
 	}
@@ -354,8 +363,8 @@ func decodeBase64Key(s string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) != 32 {
-		return nil, errors.New("key must decode to exactly 32 bytes")
+	if len(raw) != want {
+		return nil, fmt.Errorf("key must decode to exactly %d bytes", want)
 	}
 	return raw, nil
 }
@@ -388,19 +397,97 @@ func (s *server) handleGetDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, entries)
 }
 
-// directoryRequest is the POST /api/v1/directory body (§10.3).
+// directoryRequest is the POST /api/v1/directory body (§10.3). Prekeys is
+// the OPTIONAL §4.6 bundle (issue #27, additive since 1.7.0): captured as a
+// RawMessage so the exact published bytes are blind-validated and stored
+// verbatim; an absent member or an explicit null stores NULL (which clears
+// any previously stored bundle — the documented downgrade self-heal, §9).
 type directoryRequest struct {
-	Alias  string `json:"alias"`
-	Pubkey string `json:"pubkey"`
-	X25519 string `json:"x25519"`
+	Alias   string          `json:"alias"`
+	Pubkey  string          `json:"pubkey"`
+	X25519  string          `json:"x25519"`
+	Prekeys json.RawMessage `json:"prekeys,omitempty"`
+}
+
+// §4.6 prekey-bundle admission bounds (blind shape only — the node NEVER
+// verifies the bundle's Ed25519 signature, §1/§10.3; clients verify):
+//   - the whole serialized member is at most maxPrekeysBytes (2048 bytes;
+//     the §4.6 worst case is ≈ 938 B at the 16-OPK maximum, so the cap has
+//     comfortable headroom while bounding the directory GET, §8.1 NOTE);
+//   - v is exactly 1 (the §15-style bundle schema version; a future version
+//     arrives with a new spec revision);
+//   - spk decodes to 32 bytes, spk_sig to 64 bytes, every opks entry to
+//     32 bytes (padded standard Base64, §3.3);
+//   - ts is an integer > 0 (the SPK TTL anchor);
+//   - opks holds between prekeyOPKMin (8) and prekeyOPKMax (16) entries.
+//     Unknown members inside prekeys are ignored (§15.4 additive policy).
+const (
+	maxPrekeysBytes = 2048
+	prekeyOPKMin    = 8
+	prekeyOPKMax    = 16
+)
+
+// prekeyBundle is the blind shape of the §4.6 prekeys member (§10.3).
+type prekeyBundle struct {
+	V      int64    `json:"v"`
+	SPK    string   `json:"spk"`
+	SPKSig string   `json:"spk_sig"`
+	TS     int64    `json:"ts"`
+	OPKs   []string `json:"opks"`
+}
+
+// validatePrekeysBundle blind-validates the optional §4.6 prekeys member of
+// a directory POST (§10.3): nil (absent) and explicit JSON null both store
+// NULL; anything present must be the exact bundle shape above and within
+// the size cap. Returns the bytes to store verbatim. The node does not
+// parse the signature beyond its length and does not verify it (§1).
+func validatePrekeysBundle(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	if len(raw) > maxPrekeysBytes {
+		return nil, fmt.Errorf("prekeys bundle is %d bytes, over the %d-byte cap", len(raw), maxPrekeysBytes)
+	}
+	var b prekeyBundle
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return nil, fmt.Errorf("prekeys must be a bundle object: %w", err)
+	}
+	if b.V != 1 {
+		return nil, fmt.Errorf("prekeys.v must be 1, got %d", b.V)
+	}
+	if _, err := decodeBase64OfLen(b.SPK, 32); err != nil {
+		return nil, fmt.Errorf("prekeys.spk: %w", err)
+	}
+	if _, err := decodeBase64OfLen(b.SPKSig, 64); err != nil {
+		return nil, fmt.Errorf("prekeys.spk_sig: %w", err)
+	}
+	if b.TS <= 0 {
+		return nil, fmt.Errorf("prekeys.ts must be > 0, got %d", b.TS)
+	}
+	if len(b.OPKs) < prekeyOPKMin || len(b.OPKs) > prekeyOPKMax {
+		return nil, fmt.Errorf("prekeys.opks must hold %d..%d entries, got %d", prekeyOPKMin, prekeyOPKMax, len(b.OPKs))
+	}
+	for _, opk := range b.OPKs {
+		if _, err := decodeBase64OfLen(opk, 32); err != nil {
+			return nil, fmt.Errorf("prekeys.opks entry: %w", err)
+		}
+	}
+	return raw, nil
 }
 
 // handlePostDirectory upserts a directory entry keyed by the Ed25519 public
 // key with last_seen = now and epoch = floor(now / HintEpochSeconds) — both
 // set from the NODE clock (§10.3, §6.1: the server, never the client, owns
-// the time reference). Invalid alias or keys → 400. The POST body shape is
-// unchanged since pre-1.6 builds (epoch is additive in the GET response
-// only, §15.4).
+// the time reference). Invalid alias or keys → 400; an invalid §4.6 prekeys
+// member → 400 invalid_prekeys (blind shape validation only — the node
+// never verifies the bundle signature, §1/§4.6). The POST body shape is
+// otherwise unchanged since pre-1.6 builds (epoch is additive in the GET
+// response only, §15.4; prekeys is additive since 1.7.0 and its absence
+// clears any stored bundle, §9).
 func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	var req directoryRequest
 	if _, ok := decodeJSON(w, r, &req); !ok {
@@ -418,8 +505,13 @@ func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidX25519)
 		return
 	}
+	prekeys, err := validatePrekeysBundle(req.Prekeys)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidPrekeys)
+		return
+	}
 	now := timeNow().Unix()
-	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds); err != nil {
+	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds, prekeys); err != nil {
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -938,5 +939,236 @@ func TestSyncDedupAbsorbsV2AfterV1(t *testing.T) {
 	}
 	if pulled[0].V != 1 || len(pulled[0].Meta) != 0 {
 		t.Fatalf("first stored row wins: must serve v=1 without meta, got %+v", pulled[0])
+	}
+}
+
+// prekeyTestBundle builds a blind-valid §4.6 bundle body (the node never
+// verifies the signature — any 64-byte Base64 value passes admission).
+func prekeyTestBundle(spkSeed, sigSeed byte, opkSeeds ...byte) map[string]any {
+	opks := make([]string, 0, len(opkSeeds))
+	for _, s := range opkSeeds {
+		opks = append(opks, keyB64(s))
+	}
+	for len(opks) < 8 {
+		opks = append(opks, keyB64(byte(len(opks)+100)))
+	}
+	return map[string]any{
+		"v":       1,
+		"spk":     keyB64(spkSeed),
+		"spk_sig": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{sigSeed}, 64)),
+		"ts":      1791072000,
+		"opks":    opks,
+	}
+}
+
+// TestDirectoryPrekeysPostAndGet covers the §10.3/§4.6 admission and serving
+// behavior (issue #27): a valid bundle round-trips verbatim through the
+// GET, the blind shape-validation matrix rejects everything malformed with
+// 400 invalid_prekeys (batch fail-closed: alias/keys still validated),
+// "prekeys": null and an absent member both store NULL (a plain POST clears
+// a previously stored bundle — the §9 downgrade self-heal), unknown members
+// inside the bundle are ignored (§15.4), and an old-client body without the
+// member is accepted beside bundled entries (wire compatibility both ways).
+func TestDirectoryPrekeysPostAndGet(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	// Valid upsert with a bundle.
+	rec := postJSON(t, h, "/api/v1/directory", map[string]any{
+		"alias": "bob", "pubkey": keyB64(1), "x25519": keyB64(2),
+		"prekeys": prekeyTestBundle(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bundled upsert: got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Old-client compatibility: a body WITHOUT the member is accepted beside
+	// the bundled entry (unknown-member-tolerant in both directions is a
+	// client property; server-side the new node accepts both shapes).
+	rec = postJSON(t, h, "/api/v1/directory", map[string]string{
+		"alias": "alice", "pubkey": keyB64(21), "x25519": keyB64(22),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("legacy upsert: got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET directory: got %d", rec.Code)
+	}
+	var entries []storage.DirectoryEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("GET directory must return a JSON array: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	var bundled *storage.DirectoryEntry
+	for i := range entries {
+		if entries[i].Pubkey == keyB64(1) {
+			bundled = &entries[i]
+		} else if entries[i].Prekeys != nil {
+			t.Fatalf("legacy entry must not carry prekeys, got %s", string(entries[i].Prekeys))
+		}
+	}
+	if bundled == nil || bundled.Prekeys == nil {
+		t.Fatalf("the bundled entry lost its bundle: %+v", entries)
+	}
+	var got prekeyBundle
+	if err := json.Unmarshal(bundled.Prekeys, &got); err != nil {
+		t.Fatalf("served prekeys must be the stored bundle object: %v", err)
+	}
+	if got.V != 1 || got.TS != 1791072000 || len(got.OPKs) != 12 {
+		t.Fatalf("served bundle fields drifted: %+v", got)
+	}
+	if got.SPK != keyB64(3) {
+		t.Fatalf("served spk drifted: %s", got.SPK)
+	}
+	// The member must be serialized at most 2 KiB in the GET response
+	// (§8.1 NOTE: the per-entry bundle bounds the directory GET size).
+	if len(bundled.Prekeys) > maxPrekeysBytes {
+		t.Fatalf("served bundle is %d bytes, over the %d-byte cap", len(bundled.Prekeys), maxPrekeysBytes)
+	}
+
+	// Blind shape validation matrix → 400 invalid_prekeys.
+	sp31 := base64.StdEncoding.EncodeToString(make([]byte, 31))
+	sig63 := base64.StdEncoding.EncodeToString(make([]byte, 63))
+	bigOPK := strings.Repeat("A", 3000) // forces the serialized member over 2048 bytes
+	badCases := []struct {
+		name   string
+		bundle map[string]any
+	}{
+		{"v 2", func() map[string]any { b := prekeyTestBundle(3, 4); b["v"] = 2; return b }()},
+		{"v absent", func() map[string]any { b := prekeyTestBundle(3, 4); delete(b, "v"); return b }()},
+		{"spk not base64", func() map[string]any { b := prekeyTestBundle(3, 4); b["spk"] = "!!not-base64!!"; return b }()},
+		{"spk 31 bytes", func() map[string]any { b := prekeyTestBundle(3, 4); b["spk"] = sp31; return b }()},
+		{"sig 63 bytes", func() map[string]any { b := prekeyTestBundle(3, 4); b["spk_sig"] = sig63; return b }()},
+		{"sig not base64", func() map[string]any { b := prekeyTestBundle(3, 4); b["spk_sig"] = "short"; return b }()},
+		{"ts zero", func() map[string]any { b := prekeyTestBundle(3, 4); b["ts"] = 0; return b }()},
+		{"ts negative", func() map[string]any { b := prekeyTestBundle(3, 4); b["ts"] = -5; return b }()},
+		{"ts string", func() map[string]any { b := prekeyTestBundle(3, 4); b["ts"] = "1791072000"; return b }()},
+		{"opks 7 entries", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = b["opks"].([]string)[:7]; return b }()},
+		{"opks 17 entries", func() map[string]any { b := prekeyTestBundle(3, 4); opks := b["opks"].([]string); opks = append(opks, keyB64(31), keyB64(32), keyB64(33), keyB64(34), keyB64(35), keyB64(36), keyB64(37), keyB64(38), keyB64(39)); b["opks"] = opks; return b }()},
+		{"opk entry 31 bytes", func() map[string]any { b := prekeyTestBundle(3, 4); opks := append([]string{sp31}, b["opks"].([]string)[1:]...); b["opks"] = opks; return b }()},
+		{"opks not array", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = "opks"; return b }()},
+		{"member not object", func() map[string]any { b := prekeyTestBundle(3, 4); b["opks"] = []any{map[string]string{"nope": "x"}}; return b }()},
+		{"oversize member", func() map[string]any { b := prekeyTestBundle(3, 4); b["unknown_pad"] = bigOPK; return b }()},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJSON(t, h, "/api/v1/directory", map[string]any{
+				"alias": "mallory", "pubkey": keyB64(41), "x25519": keyB64(42),
+				"prekeys": tc.bundle,
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("got %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), codeInvalidPrekeys) {
+				t.Fatalf("error body must name invalid_prekeys, got %s", rec.Body.String())
+			}
+		})
+	}
+
+	// The failed upserts above must not have stored mallory (fail closed per
+	// request; the matrix cases each failed whole).
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	var fresh []storage.DirectoryEntry
+	_ = json.Unmarshal(rec.Body.Bytes(), &fresh)
+	if len(fresh) != 2 {
+		t.Fatalf("failed bundles must not store their entry, got %d entries", len(fresh))
+	}
+
+	// "prekeys": null is stored as NULL.
+	var after []storage.DirectoryEntry
+	rec = postJSON(t, h, "/api/v1/directory", map[string]any{
+		"alias": "bob", "pubkey": keyB64(1), "x25519": keyB64(2),
+		"prekeys": nil,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("null prekeys upsert: got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	after = nil // fresh slice: Unmarshal keeps struct fields absent from the JSON
+	_ = json.Unmarshal(rec.Body.Bytes(), &after)
+	for _, e := range after {
+		if e.Pubkey == keyB64(1) && e.Prekeys != nil {
+			t.Fatalf("explicit null must clear the bundle, got %s", string(e.Prekeys))
+		}
+	}
+
+	// Re-publish the bundle, then a plain POST (absent member) clears it
+	// again — the documented downgrade self-heal (§9).
+	rec = postJSON(t, h, "/api/v1/directory", map[string]any{
+		"alias": "bob", "pubkey": keyB64(1), "x25519": keyB64(2),
+		"prekeys": prekeyTestBundle(3, 4),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-publish: got %d", rec.Code)
+	}
+	rec = postJSON(t, h, "/api/v1/directory", map[string]string{
+		"alias": "bob", "pubkey": keyB64(1), "x25519": keyB64(2),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain upsert: got %d", rec.Code)
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	after = nil // fresh slice: Unmarshal keeps struct fields absent from the JSON
+	_ = json.Unmarshal(rec.Body.Bytes(), &after)
+	for _, e := range after {
+		if e.Pubkey == keyB64(1) && e.Prekeys != nil {
+			t.Fatalf("plain upsert must clear the bundle, got %s", string(e.Prekeys))
+		}
+	}
+
+	// Unknown members INSIDE a valid bundle are ignored (§15.4).
+	rec = postJSON(t, h, "/api/v1/directory", map[string]any{
+		"alias": "bob", "pubkey": keyB64(1), "x25519": keyB64(2),
+		"prekeys": func() map[string]any {
+			b := prekeyTestBundle(3, 4)
+			b["future_member"] = map[string]any{"anything": true}
+			return b
+		}(),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unknown-member bundle: got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	after = nil // fresh slice: Unmarshal keeps struct fields absent from the JSON
+	_ = json.Unmarshal(rec.Body.Bytes(), &after)
+	for _, e := range after {
+		if e.Pubkey == keyB64(1) && e.Prekeys == nil {
+			t.Fatalf("valid bundle with unknown members must be stored")
+		}
+	}
+}
+
+// TestDirectoryPrekeysStoredVerbatim pins the §10.3 "stored VERBATIM"
+// property with a hand-built body: the exact member bytes the client sent
+// come back from the GET (modulo JSON compaction of insignificant
+// whitespace) — the property clients rely on when verifying their own
+// signature against the served bytes.
+func TestDirectoryPrekeysStoredVerbatim(t *testing.T) {
+	h, _ := newTestHandler(t)
+	// Whitespace-padded member: compaction must not change any VALUE.
+	sigB64 := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{7}, 64))
+	opkJSON := `"` + keyB64(50) + `","` + keyB64(51) + `","` + keyB64(52) + `","` + keyB64(53) + `","` + keyB64(54) + `","` + keyB64(55) + `","` + keyB64(56) + `","` + keyB64(57) + `"`
+	raw := `{"alias":"bob","pubkey":"` + keyB64(1) + `","x25519":"` + keyB64(2) + `","prekeys":{ "v": 1, "spk":"` + keyB64(3) + `", "spk_sig":"` + sigB64 + `", "ts":1791072000, "opks":[` + opkJSON + `] }}`
+	rec := do(t, h, http.MethodPost, "/api/v1/directory", CanonicalHost, []byte(raw), "application/json")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("whitespace-padded bundle upsert: got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	rec = do(t, h, http.MethodGet, "/api/v1/directory", CanonicalHost, nil, "")
+	var entries []storage.DirectoryEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("GET directory: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Prekeys == nil {
+		t.Fatalf("expected one bundled entry, got %+v", entries)
+	}
+	var got prekeyBundle
+	if err := json.Unmarshal(entries[0].Prekeys, &got); err != nil {
+		t.Fatalf("served prekeys must parse: %v", err)
+	}
+	if got.V != 1 || got.SPK != keyB64(3) || got.TS != 1791072000 || len(got.OPKs) != 8 {
+		t.Fatalf("served bundle values drifted from the published bytes: %+v", got)
 	}
 }
