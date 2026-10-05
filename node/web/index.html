@@ -96,10 +96,17 @@
         <label for="compose-text">Message</label>
         <textarea id="compose-text" rows="4" placeholder="Write your message…"></textarea>
         <div class="counter-row"><span id="byte-counter">0/128</span> <span id="chunk-note"></span></div>
+        <label class="inline"><input type="checkbox" id="compose-ack" checked> Track delivery — show “delivered” when the recipient's device receives this message</label>
         <div class="actions">
           <button id="btn-send" type="button" class="primary" disabled>Sign and send</button>
         </div>
         <p id="compose-status" hidden></p>
+      </div>
+      <div class="card" id="sent-card">
+        <h2>Sent messages</h2>
+        <p class="hint">Delivery feedback is best-effort: the confirmation itself travels like mail and may arrive late or never.</p>
+        <ul id="sent-list" class="inbox sent"></ul>
+        <p id="sent-empty" class="muted">Nothing sent yet.</p>
       </div>
     </section>
 
@@ -127,6 +134,11 @@
         </div>
       </div>
       <div class="card">
+        <h2>Delivery confirmations</h2>
+        <label class="inline"><input type="checkbox" id="id-acks"> Send delivery confirmations for messages I receive</label>
+        <p class="hint">When on, your device answers each received message with one small signed, encrypted acknowledgment back to the sender. Nodes and mules stay blind; the sender only learns that your device pulled the message. Acks are never sent for confirmations themselves.</p>
+      </div>
+      <div class="card">
         <h2>Backup seed</h2>
         <p class="hint">The only way to recover your identity if the browser data is wiped. Keep it off this device.</p>
         <div class="actions">
@@ -147,6 +159,7 @@
 <script src="/js/envelopes.js"></script>
 <script src="/js/mule.js"></script>
 <script src="/js/chunking.js"></script>
+<script src="/js/acks.js"></script>
 <script src="/js/engine.js"></script>
 <script src="/js/store.js"></script>
 <script src="/js/ui.js"></script>

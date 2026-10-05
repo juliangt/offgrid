@@ -89,6 +89,18 @@ function computeEnvelopeId(v, destHint, createdAt, ttl, payload) {
  * byte string is the §5.1 form with ",w,g,i,n" appended in fixed order
  * (canonicalChunkedSignedString). A flat inner (no opts.chunk) is
  * byte-identical to the pre-§4.4 construction.
+ *
+ * §4.5 delivery acknowledgments: `opts.ack` ({r, y}) marks the envelope
+ * as an ACK — an ordinary v1 envelope whose inner follows the "ack1"
+ * convention (w = "ack1", r = the referenced message's envelope id,
+ * y = ack type 1 = received; inner m = ""). The signature covers the
+ * ack members too (canonicalAckSignedString, fixed order w, r, y after
+ * t), and the ack is ADDRESSED TO THE SENDER of the original message:
+ * opts.recipientBoxPublic is the SENDER's X25519 key, opts.alias is the
+ * ACK AUTHOR's (the original recipient's) alias and opts.signSecret/
+ * signPublic are the ACK AUTHOR's Ed25519 keys — so the sender can
+ * authenticate who confirmed receipt. chunk and ack are mutually
+ * exclusive; an ack carries no text.
  */
 /*
  * Module D — Phase 2/3 evolution mapping (normative source: spec §14).
@@ -184,20 +196,43 @@ function buildEnvelope(opts) {
     chunk = { w: CHUNK_TAG, g: c.g, i: c.i, n: c.n };
   }
 
+  /* §4.5 optional ack metadata, validated before anything is signed. */
+  var ack = null;
+  if (opts.ack !== undefined && opts.ack !== null) {
+    if (chunk) {
+      throw new Error("an envelope cannot carry both chunk and ack metadata (§4.4, §4.5)");
+    }
+    if (message !== "") {
+      throw new Error("acks carry no text: inner m must be the empty string (§4.5)");
+    }
+    if (typeof opts.ack.r !== "string" || !HEX64_REGEX.test(opts.ack.r)) {
+      throw new Error("ack.r must be a 64-lowercase-hex envelope id (§4.5)");
+    }
+    assertInt(opts.ack.y, "ack.y");
+    if (opts.ack.y !== ACK_TYPE_RECEIVED) {
+      throw new Error("ack.y must be " + ACK_TYPE_RECEIVED + " (received), the only type §4.5 defines");
+    }
+    ack = { w: ACK_TAG, r: opts.ack.r, y: opts.ack.y };
+  }
+
   var k = b64encode(opts.signPublic);
   var t = createdAt;
 
-  /* 1–2: sign the canonical bytes (no s member) — §5.1 flat form, or the
-   * §4.4 chunked form when this envelope carries chunk metadata. */
+  /* 1–2: sign the canonical bytes (no s member) — §5.1 flat form, the
+   * §4.4 chunked form, or the §4.5 ack form. */
   var signedString = chunk
     ? canonicalChunkedSignedString(message, opts.alias, k, t, chunk.w, chunk.g, chunk.i, chunk.n)
-    : canonicalSignedString(message, opts.alias, k, t);
+    : (ack
+      ? canonicalAckSignedString(message, opts.alias, k, t, ack.w, ack.r, ack.y)
+      : canonicalSignedString(message, opts.alias, k, t));
   var s = b64encode(nacl.sign.detached(utf8Encode(signedString), opts.signSecret));
 
-  /* 3: complete inner JSON bytes (same flat/chunked split). */
+  /* 3: complete inner JSON bytes (same flat/chunked/ack split). */
   var innerBytes = utf8Encode(chunk
     ? canonicalChunkedInnerJson(message, opts.alias, k, s, t, chunk.w, chunk.g, chunk.i, chunk.n)
-    : canonicalInnerJson(message, opts.alias, k, s, t));
+    : (ack
+      ? canonicalAckInnerJson(message, opts.alias, k, s, t, ack.w, ack.r, ack.y)
+      : canonicalInnerJson(message, opts.alias, k, s, t)));
 
   /* 4–5: ephemeral box toward the recipient. */
   var eph = nacl.box.keyPair();
@@ -273,15 +308,18 @@ function decryptEnvelope(env, identity, now) {
       return { ok: false, reason: "bad_inner" };
     }
     /* §4.1 inner_json has exactly the five flat fields; §4.4 chunked
-     * inners have exactly those five plus w, g, i, n. Anything else —
-     * including an unknown `w` tag — is corrupt by definition. */
+     * inners have exactly those five plus w, g, i, n; §4.5 ack inners
+     * have exactly those five plus w, r, y. Anything else — including an
+     * unknown `w` tag — is corrupt by definition. */
     if (!inner || typeof inner !== "object" || Array.isArray(inner)) {
       return { ok: false, reason: "bad_inner" };
     }
     var keyCount = Object.keys(inner).length;
     var isChunked = keyCount === 9 &&
       "w" in inner && "g" in inner && "i" in inner && "n" in inner;
-    if (!((keyCount === 5 || isChunked) &&
+    var isAck = keyCount === 8 &&
+      "w" in inner && "r" in inner && "y" in inner;
+    if (!((keyCount === 5 || isChunked || isAck) &&
           "m" in inner && "a" in inner && "k" in inner && "s" in inner && "t" in inner)) {
       return { ok: false, reason: "bad_inner" };
     }
@@ -300,6 +338,19 @@ function decryptEnvelope(env, identity, now) {
       }
       chunkMeta = { w: inner.w, g: inner.g, i: inner.i, n: inner.n };
     }
+    /* §4.5 ack metadata, validated BEFORE the signature (the signature
+     * covers w, r, y, so a tampered member fails verification below —
+     * but a structurally non-conforming ack is rejected outright). */
+    var ackMeta = null;
+    if (isAck) {
+      if (inner.w !== ACK_TAG) return { ok: false, reason: "bad_inner" };
+      if (inner.m !== "") return { ok: false, reason: "bad_inner" };   /* acks carry no text */
+      if (typeof inner.r !== "string" || !HEX64_REGEX.test(inner.r)) {
+        return { ok: false, reason: "bad_inner" };
+      }
+      if (inner.y !== ACK_TYPE_RECEIVED) return { ok: false, reason: "bad_inner" };
+      ackMeta = { w: inner.w, r: inner.r, y: inner.y };
+    }
     if (typeof inner.m !== "string" || messageByteLength(inner.m) > MESSAGE_MAX_BYTES ||
         !validateAlias(inner.a) ||
         typeof inner.k !== "string" || inner.k.length !== PUBKEY_B64_LEN ||
@@ -312,12 +363,15 @@ function decryptEnvelope(env, identity, now) {
       return { ok: false, reason: "from_future" }; /* §4.3 step 6 */
     }
 
-    /* §4.3 step 5: rebuild the signed string — §5.1 flat form or the §4.4
-     * chunked form — and verify with k. */
+    /* §4.3 step 5: rebuild the signed string — §5.1 flat form, the §4.4
+     * chunked form or the §4.5 ack form — and verify with k. */
     var signedString = chunkMeta
       ? canonicalChunkedSignedString(inner.m, inner.a, inner.k, inner.t,
                                      chunkMeta.w, chunkMeta.g, chunkMeta.i, chunkMeta.n)
-      : canonicalSignedString(inner.m, inner.a, inner.k, inner.t);
+      : (ackMeta
+        ? canonicalAckSignedString(inner.m, inner.a, inner.k, inner.t,
+                                   ackMeta.w, ackMeta.r, ackMeta.y)
+        : canonicalSignedString(inner.m, inner.a, inner.k, inner.t));
     var sigOk = false;
     try {
       sigOk = nacl.sign.detached.verify(utf8Encode(signedString), b64decode(inner.s), b64decode(inner.k));
@@ -326,6 +380,14 @@ function decryptEnvelope(env, identity, now) {
     }
     if (!sigOk) return { ok: false, reason: "bad_signature" };
 
+    if (ackMeta) {
+      /* §4.5: the ack result carries the ack members; `a`/`k` are the ACK
+       * AUTHOR's (the original recipient's) alias and Ed25519 key — the
+       * sender binds them against the recipient it sent to before trusting
+       * the delivery signal (ackMatchesSent, §4.5). Acks are never acked:
+       * the receive path records them and emits nothing (termination rule). */
+      return { ok: true, m: "", a: inner.a, t: inner.t, k: inner.k, ack: ackMeta };
+    }
     return chunkMeta
       ? { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k, chunk: chunkMeta }
       : { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k };

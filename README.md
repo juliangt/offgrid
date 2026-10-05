@@ -42,7 +42,7 @@ Key design decisions:
 3. The envelope enters a node via `POST /api/v1/sync` — the node only sees random bytes and a truncated key hash.
 4. Any syncing user becomes a mule: unknown envelopes ride along in their `transit_queue`.
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
-6. Bob syncs, recognizes his own `dest_hint`, decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox.
+6. Bob syncs, recognizes his own `dest_hint`, decrypts, verifies Alice's Ed25519 signature, and the message lands in his inbox. If delivery confirmations are on, his device answers with one small signed, encrypted acknowledgment that travels back the same way — and Alice sees her message as *delivered*.
 
 ## Installation
 
@@ -80,6 +80,10 @@ Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
 That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.
 
+### Delivery feedback (best-effort)
+
+The composer can track each sent message locally: **queued** (waiting for the next sync) → **sent** (a node holds it; a mule may be carrying it) → **delivered** (the recipient's device confirmed receipt). The confirmation is one small signed, encrypted acknowledgment envelope that travels back exactly like any other mail — nodes and mules stay blind, it costs at most one envelope per message, and acknowledgments are never acknowledged (no storms). Honesty notes: it is **best-effort**, not a read receipt — the ack itself travels by mule, can arrive late, and can expire or be evicted like any envelope, so silence means *unknown*; it can only be emitted when the recipient's device can resolve your public key from a node directory. Delivery confirmations can be turned off in the Identity tab, and you choose per message whether to track delivery (the sent list lives only on your device).
+
 ## Building and testing from source
 
 Requirements: Go 1.26+ and Node.js (tests only). From the repository root:
@@ -89,7 +93,7 @@ cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev bina
 cd node && go test ./... -count=1 && cd ..
 node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
 node tests/spa_structure.mjs       # 91 assertions on the SPA layout, CSP and API surface
-bash tests/sync_e2e.sh             # 31 assertions: two real daemons + full mule walk (curl only)
+bash tests/sync_e2e.sh             # 192 assertions: two real daemons + full mule walk (curl only)
 ```
 
 `tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.

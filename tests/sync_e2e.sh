@@ -66,6 +66,19 @@
 #       §3.1 v1 envelope within the §8.2 payload bounds [248, 400] (the
 #       daemons accepted nothing a node would reject); a one-chunk-short
 #       partial never renders as a complete message.
+#   14. §4.5 delivery acknowledgments (issue #25): the ack travels the full
+#       multi-node path with the SHIPPED SPA engine on both ends — Alice
+#       pushes a flat and a chunked message through a fresh node pair,
+#       Bob's engine decrypts/reassembles, resolves Alice's X25519 key
+#       from the node directory and emits exactly ONE signed ack envelope
+#       addressed back to her dest_hint (flat: the envelope id; chunked:
+#       the LAST chunk's envelope id, emitted once at reassembly
+#       completion); a mule carries the acks back; Alice's engine verifies
+#       them against her sent record (bound to the recipient's Ed25519
+#       key) and flips the state to delivered. Every ack is an ordinary
+#       §3.1 v1 envelope within the §8.2 bounds; acks are never acked
+#       (termination); and a mule tampering with the ack payload fails
+#       verification at Alice (state stays queued).
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -91,9 +104,9 @@
 #
 # Usage:  bash tests/sync_e2e.sh
 # Env:    PORT_A (default 18091), PORT_B (default 18092), PORT_C (default
-#         18093), PORT_E (default 18094)
-# Needs:  go (daemon build), curl, node (the §4.4 chunking E2E drives the
-#         shipped SPA engine via tests/helpers/spa_loader.mjs), and for
+#         18093), PORT_E (default 18094), PORT_D (default 18095)
+# Needs:  go (daemon build), curl, node (the §4.4 chunking and §4.5 ack E2Es
+#         drive the shipped SPA engine via tests/helpers/*.mjs), and for
 #         sections 11-12 (§15.7 a/b) the sqlite3 CLI plus shasum (macOS) /
 #         sha256sum (GNU) for the database fixtures and the §15.7 b byte
 #         fingerprint.
@@ -109,6 +122,7 @@ PORT_A="${PORT_A:-18091}"
 PORT_B="${PORT_B:-18092}"
 PORT_C="${PORT_C:-18093}"
 PORT_E="${PORT_E:-18094}"
+PORT_D="${PORT_D:-18095}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -116,6 +130,7 @@ DAEMON_A_PID=""
 DAEMON_B_PID=""
 DAEMON_C_PID=""
 DAEMON_E_PID=""
+DAEMON_D_PID=""
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/dtn-e2e.XXXXXX")"
 
@@ -136,6 +151,10 @@ cleanup() {
     if [ -n "$DAEMON_E_PID" ]; then
         kill "$DAEMON_E_PID" 2>/dev/null || true
         wait "$DAEMON_E_PID" 2>/dev/null || true
+    fi
+    if [ -n "$DAEMON_D_PID" ]; then
+        kill "$DAEMON_D_PID" 2>/dev/null || true
+        wait "$DAEMON_D_PID" 2>/dev/null || true
     fi
     rm -rf "$WORK"
     exit "$status"
@@ -862,6 +881,226 @@ check "§4.4 reassembly: sha256 of the reassembled text equals the original 1 Ki
     "ok" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^sha=//p')"
 check "§4.4 reassembly: reassembled text sha256 matches the fixture (E2E, real daemons)" \
     "$CHUNK_SHA" "$(printf '%s\n' "$CHUNK_VERIFY" | sed -n 's/^reassembled_sha256=//p')"
+
+# ---------------------------------------------------------------------------
+# 14. §4.5 delivery acknowledgments (issue #25): the ack travels the full
+#     multi-node path. Both endpoints run the SHIPPED SPA engine headlessly
+#     (tests/helpers/ack_e2e.mjs): Alice pushes a flat and a chunked
+#     message into a FRESH node pair (so pull counts are exact), Bob's
+#     engine decrypts/reassembles the served bytes and emits exactly ONE
+#     signed ack envelope addressed back to Alice's dest_hint — resolving
+#     her X25519 key from the node directory by the Ed25519 key her signed
+#     message carried (best-effort, §4.5) — and a mule carries the acks
+#     back the same way it carries any mail. Alice's engine verifies each
+#     ack against her sent record (bound to the recipient's Ed25519 key)
+#     and flips the state to delivered. The negative leg starts a third
+#     fresh node: an adversarial mule flips a payload character en route
+#     and the tampered ack must fail verification at Alice (state stays
+#     queued).
+# ---------------------------------------------------------------------------
+ACK_E2E="$SCRIPT_DIR/helpers/ack_e2e.mjs"
+
+log "building the §4.5 ack fixture with the shipped SPA engine"
+node "$ACK_E2E" fixture "$WORK/ack_fixture.json" >"$WORK/ack_fixture.log" 2>&1 || {
+    log "ack fixture build failed"; cat "$WORK/ack_fixture.log" >&2; exit 1;
+}
+ACK_FLAT_ID="$(sed -n 's/^flat_id=//p' "$WORK/ack_fixture.log")"
+ACK_CHUNK_PARTS="$(sed -n 's/^chunk_parts=//p' "$WORK/ack_fixture.log")"
+ACK_CHUNK_REF="$(sed -n 's/^chunk_ref=//p' "$WORK/ack_fixture.log")"
+# Bob's ack-signing Ed25519 public key (derived by the fixture from a fixed
+# seed; passed to alice_verify so the sent record binds the expected signer).
+BOB_SIGN_PUB="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob_sign_pub)' "$WORK/ack_fixture.json")"
+check "§4.5 fixture: flat message built with a 64-hex envelope id" \
+    "ok" "$(printf '%s' "$ACK_FLAT_ID" | grep -qE '^[0-9a-f]{64}$' && echo ok || echo bad)"
+check "§4.5 fixture: chunked message splits into 2..16 envelopes (§4.4 cap)" \
+    "ok" "$([ "$ACK_CHUNK_PARTS" -ge 2 ] 2>/dev/null && [ "$ACK_CHUNK_PARTS" -le 16 ] && echo ok || echo bad)"
+ACK_ALICE_PUB="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).alice_pub)' "$WORK/ack_fixture.json")"
+ACK_ALICE_X25519="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).alice_x25519)' "$WORK/ack_fixture.json")"
+ACK_ALICE_REG="{\"alias\":\"alice_ack\",\"pubkey\":\"$ACK_ALICE_PUB\",\"x25519\":\"$ACK_ALICE_X25519\"}"
+printf '%s' "$ACK_ALICE_REG" > "$WORK/ack_reg_alice.json"
+node "$ACK_E2E" bodies "$WORK/ack_fixture.json" "$WORK" >/dev/null 2>&1
+
+log "starting the §4.5 ack node pair: 127.0.0.1:$PORT_D and 127.0.0.1:$PORT_E (fresh databases)"
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_D" -db "$WORK/node_ack_a.db" >"$WORK/node_ack_a.log" 2>&1 &
+DAEMON_D_PID=$!
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_E" -db "$WORK/node_ack_b.db" >"$WORK/node_ack_b.log" 2>&1 &
+DAEMON_E_PID=$!
+ACK_READY=0
+if wait_ready "$PORT_D" && wait_ready "$PORT_E"; then ACK_READY=1; fi
+check "ack node pair ready (§4.5 round trip)" "1" "$ACK_READY"
+if [ "$ACK_READY" -ne 1 ]; then
+    log "--- ack node A log ---"; cat "$WORK/node_ack_a.log" >&2 || true
+    log "--- ack node B log ---"; cat "$WORK/node_ack_b.log" >&2 || true
+    exit 1
+fi
+
+# Alice (the fixture identity) registers on BOTH ack nodes: the ack's
+# best-effort resolution reads the directory of the node Bob syncs with.
+for PORT in "$PORT_D" "$PORT_E"; do
+    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/ack_reg_alice.json")"
+    check "register alice_ack on ack node (port $PORT) -> 200" "200" "$code"
+done
+
+# ---- FLAT round: message out, ONE ack back, state flips to delivered. ----
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_push_flat.json")"
+check "alice pushes the flat message to ack node 1 -> 200" "200" "$code"
+check "flat push pulls nothing back (own id in known_ids)" "0" "$(json_count_envelopes)"
+
+make_sync_body "$WORK/ack_mule1_a.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_mule1_a.json")"
+check "mule syncs with ack node 1 -> 200" "200" "$code"
+check "mule pulls exactly 1 envelope (the flat message)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_mule_pull1.json"
+node "$ACK_E2E" carry "$WORK/ack_mule_pull1.json" "$WORK/ack_mule_push1.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_mule_push1.json")"
+check "mule drops the flat message at ack node 2 -> 200" "200" "$code"
+
+make_sync_body "$WORK/ack_bob_pull.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_bob_pull.json")"
+check "bob pulls from ack node 2 -> 200" "200" "$code"
+check "bob pulls exactly the flat message" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_bob_flat_pull.json"
+code="$(http GET "http://127.0.0.1:$PORT_E/api/v1/directory")"
+check "bob reads the ack node 2 directory -> 200 (§4.5 best-effort resolution)" "200" "$code"
+cp "$WORK/last_body" "$WORK/ack_dir_b.json"
+
+BOB_ACK_FLAT="$(node "$ACK_E2E" bob_ack "$WORK/ack_fixture.json" "$WORK/ack_bob_flat_pull.json" "$WORK/ack_dir_b.json" "$WORK/bob_ack_flat.json" flat 2>"$WORK/ack_bob_flat.log" || true)"
+check "§4.5 bob_ack (flat): decrypt, task, reference, dest, ttl and bounds all hold" \
+    "ok" "$(printf '%s\n' "$BOB_ACK_FLAT" | sed -n 's/^result=//p')"
+check "§4.5 bob_ack (flat): the ack references the message's envelope id" \
+    "$ACK_FLAT_ID" "$(printf '%s\n' "$BOB_ACK_FLAT" | sed -n 's/^ack_ref=//p')"
+check "§4.5 bob_ack (flat): exactly ONE ack envelope per message (overhead bound)" \
+    "1" "$(printf '%s\n' "$BOB_ACK_FLAT" | sed -n 's/^count=//p')"
+check "§4.5 bob_ack (flat): TERMINATION — the ack itself yields no ack task" \
+    "ok" "$(printf '%s\n' "$BOB_ACK_FLAT" | sed -n 's/^term=//p')"
+ACK1_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).envelope.id)' "$WORK/bob_ack_flat.json")"
+ACK1_ENV="[$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).envelope))' "$WORK/bob_ack_flat.json")]"
+
+# Bob's engine hands the ack to HIS node like any outgoing mail (§4.5: it
+# rides the next sync; the harness pushes it directly).
+make_sync_body "$WORK/ack_bob_push1.json" "[\"$ACK1_ID\"]" "$ACK1_ENV"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_bob_push1.json")"
+check "bob pushes his ack envelope to ack node 2 -> 200 (an ack is an ordinary envelope)" "200" "$code"
+
+# The ack rides back: mule pulls it (only the flat id is known so far),
+# carries it to ack node 1; Alice pulls and her engine flips the state.
+make_sync_body "$WORK/ack_mule2_b.json" "[\"$ACK_FLAT_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_mule2_b.json")"
+check "mule pulls the ack from ack node 2 -> 200" "200" "$code"
+check "mule pulls exactly 1 envelope (the ack)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_mule_pull2.json"
+node "$ACK_E2E" carry "$WORK/ack_mule_pull2.json" "$WORK/ack_mule_push2.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_mule_push2.json")"
+check "mule drops the ack at ack node 1 -> 200" "200" "$code"
+
+make_sync_body "$WORK/ack_alice_pull.json" "[\"$ACK_FLAT_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_alice_pull.json")"
+check "alice pulls from ack node 1 -> 200" "200" "$code"
+check "alice pulls exactly 1 envelope (the ack)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_alice_flat_pull.json"
+ALICE_VERIFY_FLAT="$(node "$ACK_E2E" alice_verify "$WORK/ack_fixture.json" "$WORK/ack_alice_flat_pull.json" "$BOB_SIGN_PUB" 2>"$WORK/ack_verify_flat.log" || true)"
+check "§4.5 alice_verify (flat): the served ack decrypts and binds to the sent record" \
+    "ok" "$(printf '%s\n' "$ALICE_VERIFY_FLAT" | sed -n 's/^matched=//p')"
+check "§4.5 alice_verify (flat): the message state flips to delivered" \
+    "delivered" "$(printf '%s\n' "$ALICE_VERIFY_FLAT" | sed -n 's/^state=//p')"
+
+# ---- CHUNKED round: ONE ack at reassembly completion, referencing the
+#      agreed id (the LAST chunk's envelope id). ----
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_push_chunked.json")"
+check "alice pushes the chunked message ($ACK_CHUNK_PARTS envelopes) to ack node 1 -> 200" "200" "$code"
+
+ACK_CHUNK_IDS_JSON="$(node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.stdout.write(JSON.stringify(fx.chunked.envelopes.map((e)=>e.id)))' "$WORK/ack_fixture.json")"
+# The mule knows the flat message and the first ack; the chunks are new cargo.
+MULE_KNOWS="[\"$ACK_FLAT_ID\",\"$ACK1_ID\",${ACK_CHUNK_IDS_JSON:1}"
+make_sync_body "$WORK/ack_mule3_a.json" "[\"$ACK_FLAT_ID\",\"$ACK1_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_mule3_a.json")"
+check "mule syncs with ack node 1 for the chunk envelopes -> 200" "200" "$code"
+check "mule pulls exactly $ACK_CHUNK_PARTS chunk envelopes" "$ACK_CHUNK_PARTS" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_mule_pull3.json"
+node "$ACK_E2E" carry "$WORK/ack_mule_pull3.json" "$WORK/ack_mule_push3.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_mule_push3.json")"
+check "mule drops the chunk envelopes at ack node 2 -> 200" "200" "$code"
+
+# Bob knows the flat message and the first ack; the chunks are new to him.
+make_sync_body "$WORK/ack_bob_pull2.json" "[\"$ACK_FLAT_ID\",\"$ACK1_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_bob_pull2.json")"
+check "bob pulls from ack node 2 -> 200" "200" "$code"
+check "bob pulls exactly the $ACK_CHUNK_PARTS chunk envelopes" "$ACK_CHUNK_PARTS" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_bob_chunk_pull.json"
+BOB_ACK_CHUNKED="$(node "$ACK_E2E" bob_ack "$WORK/ack_fixture.json" "$WORK/ack_bob_chunk_pull.json" "$WORK/ack_dir_b.json" "$WORK/bob_ack_chunked.json" chunked 2>"$WORK/ack_bob_chunk.log" || true)"
+check "§4.5 bob_ack (chunked): reassembly completed and every ack check holds" \
+    "ok" "$(printf '%s\n' "$BOB_ACK_CHUNKED" | sed -n 's/^result=//p')"
+check "§4.5 bob_ack (chunked): the ack references the LAST chunk's envelope id (§4.5 agreed id)" \
+    "$ACK_CHUNK_REF" "$(printf '%s\n' "$BOB_ACK_CHUNKED" | sed -n 's/^ack_ref=//p')"
+check "§4.5 bob_ack (chunked): exactly ONE ack for the whole message" \
+    "1" "$(printf '%s\n' "$BOB_ACK_CHUNKED" | sed -n 's/^count=//p')"
+ACK2_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).envelope.id)' "$WORK/bob_ack_chunked.json")"
+ACK2_ENV="[$(node -e 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).envelope))' "$WORK/bob_ack_chunked.json")]"
+make_sync_body "$WORK/ack_bob_push2.json" "[\"$ACK2_ID\"]" "$ACK2_ENV"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_bob_push2.json")"
+check "bob pushes the chunked message's ack to ack node 2 -> 200" "200" "$code"
+
+# The mule still does not know ack2 (it only carried flat, ack1, chunks).
+make_sync_body "$WORK/ack_mule4_b.json" "$MULE_KNOWS" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_mule4_b.json")"
+check "mule pulls the chunked message's ack from ack node 2 -> 200" "200" "$code"
+check "mule pulls exactly 1 envelope (the second ack)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_mule_pull4.json"
+node "$ACK_E2E" carry "$WORK/ack_mule_pull4.json" "$WORK/ack_mule_push4.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_mule_push4.json")"
+check "mule drops the second ack at ack node 1 -> 200" "200" "$code"
+
+make_sync_body "$WORK/ack_alice_pull2.json" "$MULE_KNOWS" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/ack_alice_pull2.json")"
+check "alice pulls from ack node 1 -> 200" "200" "$code"
+check "alice pulls exactly 1 envelope (the chunked message's ack)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_alice_chunk_pull.json"
+ALICE_VERIFY_CHUNKED="$(node "$ACK_E2E" alice_verify "$WORK/ack_fixture.json" "$WORK/ack_alice_chunk_pull.json" "$BOB_SIGN_PUB" 2>"$WORK/ack_verify_chunk.log" || true)"
+check "§4.5 alice_verify (chunked): the served ack binds to the sent record" \
+    "ok" "$(printf '%s\n' "$ALICE_VERIFY_CHUNKED" | sed -n 's/^matched=//p')"
+check "§4.5 alice_verify (chunked): the message state flips to delivered" \
+    "delivered" "$(printf '%s\n' "$ALICE_VERIFY_CHUNKED" | sed -n 's/^state=//p')"
+
+# ---- Negative: an adversarial mule tampers with the ack payload en route.
+#      A fresh node carries the tampered bytes blindly (same id: admission
+#      and dedup are unchanged) and Alice's engine MUST reject them.
+#      Re-pulling with MULE_KNOWS yields ack2 again: the node still serves
+#      it (pulls are stateless; nothing about the original is consumed). ----
+make_sync_body "$WORK/ack_mule5_b.json" "$MULE_KNOWS" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/ack_mule5_b.json")"
+check "adversarial mule re-pulls the chunked ack from ack node 2 -> 200" "200" "$code"
+check "adversarial mule pulls exactly 1 envelope (the ack)" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_mule_pull5.json"
+node "$ACK_E2E" tamper "$WORK/ack_mule_pull5.json" "$WORK/ack_tampered.json" >/dev/null 2>&1
+
+stop_daemon "$DAEMON_D_PID"
+DAEMON_D_PID=""
+stop_daemon "$DAEMON_E_PID"
+DAEMON_E_PID=""
+
+log "starting the tamper node on 127.0.0.1:$PORT_C with a fresh database (§4.5 negative)"
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_C" -db "$WORK/node_ack_tamper.db" >"$WORK/node_ack_tamper.log" 2>&1 &
+DAEMON_C_PID=$!
+TAMPER_READY=0
+if wait_ready "$PORT_C"; then TAMPER_READY=1; fi
+check "tamper node ready" "1" "$TAMPER_READY"
+TAMPER_PUSH="[$(cat "$WORK/ack_tampered.json")]"
+make_sync_body "$WORK/ack_tamper_push.json" "[]" "$TAMPER_PUSH"
+code="$(http POST "http://127.0.0.1:$PORT_C/api/v1/sync" "$WORK/ack_tamper_push.json")"
+check "the tampered ack is admitted (an ordinary envelope: id and shape unchanged) -> 200" "200" "$code"
+make_sync_body "$WORK/ack_tamper_pull.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_C/api/v1/sync" "$WORK/ack_tamper_pull.json")"
+check "alice pulls the TAMPERED ack from the tamper node -> 200" "200" "$code"
+check "tamper node serves exactly the tampered ack" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/ack_alice_tamper_pull.json"
+ALICE_VERIFY_TAMPER="$(node "$ACK_E2E" alice_verify "$WORK/ack_fixture.json" "$WORK/ack_alice_tamper_pull.json" "$BOB_SIGN_PUB" 2>"$WORK/ack_verify_tamper.log" || true)"
+check "§4.5 negative: the tampered ack FAILS verification at Alice (Poly1305 MAC)" \
+    "fail" "$(printf '%s\n' "$ALICE_VERIFY_TAMPER" | sed -n 's/^decrypted=//p')"
+check "§4.5 negative: no delivery signal — the state stays queued" \
+    "queued" "$(printf '%s\n' "$ALICE_VERIFY_TAMPER" | sed -n 's/^state=//p')"
+
+stop_daemon "$DAEMON_C_PID"
+DAEMON_C_PID=""
 
 # ---------------------------------------------------------------------------
 # Summary.

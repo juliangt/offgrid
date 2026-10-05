@@ -92,6 +92,7 @@ Current Raspberry Pi OS Lite (Bookworm) images use **NetworkManager** by default
 | `dest_hint` | First 8 B of `SHA-256(recipient X25519_pub)` in hex (16 chars) | Blind routing + mule self-identification; limitation documented in §1.2 |
 | Envelope `id` | `SHA-256(canonical JSON of v‖dest_hint‖created_at‖ttl‖payload)` in hex (64 chars) | Global dedup across nodes (`INSERT OR IGNORE`) — computed by the client |
 | Plaintext limit | 128 bytes per envelope (visible counter in the UI); longer texts are split client-side into at most 16 chunk envelopes and reassembled by the recipient (protocol §4.4) | Alignment with the Phase 2/3 budget; long messages ride as ordinary envelopes |
+| Delivery feedback | One optional signed "ack" envelope per delivered message, addressed back to the sender's `dest_hint` (recipients opt in per identity; acks are never acked; best-effort) | Private delivery states without any node/mule change — the ack is an ordinary envelope with a versioned inner convention (protocol §4.5) |
 | Default TTL | 604,800 s (7 days); min 3,600; max 2,592,000 (30 days) | Envelope expiry in dead drops with limited storage |
 | Mule capacity (`transit_queue`) | 100 envelopes, FIFO eviction by `created_at` | Within the required 50–100 range |
 | Per-sync limits | `limit` default 50, max 200; push max 100 envelopes; body ≤ 1 MiB; `known_ids` max 500 | Protection of the open node (abuse/filling) |

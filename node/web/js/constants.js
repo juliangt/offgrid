@@ -41,6 +41,19 @@ var CHUNK_META_MAX_BYTES = 58;                 // worst-case inner footprint of 
 var CHUNK_TEXT_PLUS_ALIAS_LIMIT = 152 - CHUNK_META_MAX_BYTES; // = 94 (§8.2 budget, see above)
 var CHUNK_WARN_PARTS = 8;                      // ≥ this many envelopes → UI warns about
                                                // the share of a 100-envelope mule queue
+/* Delivery acknowledgments (§4.5 — client-side convention inside the box).
+ * An ack is an ordinary v1 envelope whose signed-then-encrypted inner
+ * follows the versioned "ack1" convention; nodes and mules stay blind.
+ * The ack metadata occupies at most 88 bytes of inner_json
+ * (,"w":"ack1" = 11, ,"r":"<64 hex>" = 71, ,"y":1 = 6), so with m = ""
+ * the §8.2 envelope bound still holds per ack envelope:
+ *   payload = 248 + 0 + A + 88 = 336 + A ≤ 360 ≤ 400   (A ≤ 24, §4.1)
+ * and one delivered message produces at most ONE ack envelope (§4.5). */
+var ACK_TAG = "ack1";                          // inner `w` schema tag (§4.5, §15-style)
+var ACK_TYPE_RECEIVED = 1;                     // ack `y` type 1: message received (§4.5)
+var ACK_META_MAX_BYTES = 88;                   // worst-case inner footprint of w,r,y
+var SENT_HISTORY_MAX = 200;                    // sender-side sent-record cap (local hygiene)
+
 var PUBKEY_B64_LEN = 44;                       // 32 raw bytes (§4.1)
 var SIGNATURE_B64_LEN = 88;                    // 64 raw bytes (§4.1)
 var CANONICAL_HOST = "offgrid.local:8080";  // same origin on every node (§12)

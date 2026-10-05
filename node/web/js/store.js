@@ -15,6 +15,9 @@
  *                    chunked messages, §4.4)
  *      inbox_parts   partial chunked messages awaiting reassembly, keyed by
  *                    the §4.4 group id `g` (created by migration v2)
+ *      sent          sender-side sent-message records keyed by the §4.5
+ *                    ack reference id (created by migration v3); tracks
+ *                    queued → sent → delivered (§4.5)
  *      transit_queue foreign envelopes being carried, keyed by envelope id
  *      seen_ids      dedup memory of every envelope id ever pulled or
  *                    pushed, so known_ids = inbox ∪ transit ∪ seen (§11)
@@ -28,10 +31,11 @@
  *    call them).
  * ------------------------------------------------------------------- */
 var DB_NAME = "dtn_local_store";
-var DB_VERSION = 2;
+var DB_VERSION = 3;
 var STORE_IDENTITY = "identity";
 var STORE_INBOX = "inbox";
 var STORE_PARTS = "inbox_parts";
+var STORE_SENT = "sent";
 var STORE_TRANSIT = "transit_queue";
 var STORE_SEEN = "seen_ids";
 var STORE_META = "meta";
@@ -75,9 +79,19 @@ var IDB_MIGRATIONS = [
     migrate: function (db) {
       db.createObjectStore(STORE_PARTS, { keyPath: "g" });
     }
+  },
+  {
+    version: 3,
+    /* v3 (§4.5 delivery acks, issue #25): the sent store for sender-side
+     * sent-message records, keyed by the §4.5 ack reference id. Strictly
+     * additive: one new store, no existing store or record is touched
+     * (§15.6); a database without ack tracking keeps working unchanged. */
+    migrate: function (db) {
+      db.createObjectStore(STORE_SENT, { keyPath: "id" });
+    }
   }
   /* Future versions append here, e.g. (never added speculatively):
-   * { version: 3, migrate: function (db) { db.createObjectStore(...) } }
+   * { version: 4, migrate: function (db) { db.createObjectStore(...) } }
    */
 ];
 
@@ -263,7 +277,12 @@ function listInbox() {
  * wins, so re-delivered duplicates are no-ops).
  * `env` is the pulled envelope (its created_at/ttl are shared by all
  * chunks of the message), `dec` the decryptEnvelope result carrying
- * `chunk: {g, i, n}`. Resolves {complete, record?}. */
+ * `chunk: {g, i, n}` and the sender's Ed25519 key `k` (kept in the
+ * partial state so the §4.5 ack can be addressed at completion, even
+ * when the last chunk arrives in a later sync). Resolves
+ * {complete, record?, ack_task?} — ack_task carries the §4.5 ack
+ * parameters (reference id = the LAST chunk's envelope id, the sender's
+ * key and the shared lifetime) when the message completed. */
 function addInboxChunkPart(env, dec, nowSec) {
   return getDB().then(function (db) {
     return new Promise(function (resolve, reject) {
@@ -277,13 +296,25 @@ function addInboxChunkPart(env, dec, nowSec) {
          * with the chunks' own shared TTL deadline (§4.4, no extension). */
         var state = req.result ||
           chunkNewState(dec.chunk.g, dec.chunk.n, dec.a, dec.t,
-                        env.created_at, env.ttl, nowSec);
+                        env.created_at, env.ttl, nowSec, dec.k);
         var merged = chunkStateWithPart(state, dec.chunk.i, dec.m, env.id);
         if (chunkStateComplete(merged)) {
           outcome.record = chunkInboxRecord(merged);
           inbox.put(outcome.record);
           parts.delete(dec.chunk.g);
           outcome.complete = true;
+          /* §4.5: ONE ack per message, emitted exactly at reassembly
+           * completion, referencing the agreed id — the LAST chunk's
+           * envelope id (§4.5 reference rule). The deletion above makes a
+           * second completion (and a second ack) impossible. */
+          outcome.ack_task = {
+            r: merged.parts[String(merged.n - 1)].id,
+            sender_key: merged.k,
+            sender_alias: merged.a,
+            created_at: merged.created_at,
+            ttl: merged.ttl,
+            type: ACK_TYPE_RECEIVED
+          };
         } else {
           parts.put(merged);
         }
@@ -330,6 +361,119 @@ function purgeExpiredChunkPartials(nowSec) {
       tx.oncomplete = function () { resolve(swept); };
       tx.onerror = function () { reject(tx.error || new Error("could not sweep expired partials")); };
       tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
+/* ----- sent: sender-side delivery tracking (§4.5) ----- */
+
+/* Add one sent record (the pure shape of sentNewRecord, keyed by the §4.5
+ * ack reference id) and enforce the local history cap SENT_HISTORY_MAX
+ * (oldest by created_at evicted first — local hygiene only; the network
+ * is never consulted about it). */
+function addSentRecord(record) {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE_SENT, "readwrite");
+      var store = tx.objectStore(STORE_SENT);
+      store.put(record);
+      tx.oncomplete = function () { resolve(record); };
+      tx.onerror = function () { reject(tx.error || new Error("could not save the sent message")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  }).then(function (rec) {
+    return capSentHistory().then(function () { return rec; });
+  });
+}
+
+/* Soft local cap: keep the SENT_HISTORY_MAX newest records by created_at
+ * (ties break on the record id for determinism). */
+function capSentHistory() {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE_SENT, "readwrite");
+      var store = tx.objectStore(STORE_SENT);
+      var rows = [];
+      var req = store.openCursor();
+      req.onsuccess = function (e) {
+        var cursor = e.target.result;
+        if (cursor) {
+          rows.push(cursor.value);
+          cursor.continue();
+          return;
+        }
+        if (rows.length <= SENT_HISTORY_MAX) return;
+        rows.sort(function (x, y) {
+          return (y.created_at - x.created_at) || (x.id < y.id ? -1 : (x.id > y.id ? 1 : 0));
+        });
+        for (var i = SENT_HISTORY_MAX; i < rows.length; i++) store.delete(rows[i].id);
+      };
+      tx.oncomplete = function () { resolve(); };
+      tx.onerror = function () { reject(tx.error || new Error("could not cap the sent history")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
+/* Sent records, newest first by sender timestamp (mirrors listInbox). */
+function listSent() {
+  return storeGetAll(STORE_SENT).then(function (rows) {
+    rows.sort(function (x, y) {
+      return (y.t - x.t) || (y.created_at - x.created_at);
+    });
+    return rows;
+  });
+}
+
+/* queued → sent (§4.5): flip every still-queued record that owns ANY of
+ * `envIds` — the ids the sync cycle just pushed to a node ("carried by a
+ * mule" from here on). Resolves the number of records flipped. */
+function markSentPushed(envIds) {
+  if (!envIds || !envIds.length) return Promise.resolve(0);
+  var pushed = {};
+  for (var i = 0; i < envIds.length; i++) pushed[envIds[i]] = true;
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE_SENT, "readwrite");
+      var store = tx.objectStore(STORE_SENT);
+      var flipped = 0;
+      var req = store.openCursor();
+      req.onsuccess = function (e) {
+        var cursor = e.target.result;
+        if (!cursor) return;
+        var rec = cursor.value;
+        if (rec.state === "queued" && rec.env_ids) {
+          for (var j = 0; j < rec.env_ids.length; j++) {
+            if (pushed[rec.env_ids[j]]) {
+              rec.state = "sent";
+              rec.sent_at = Math.floor(Date.now() / 1000);
+              cursor.update(rec);
+              flipped += 1;
+              break;
+            }
+          }
+        }
+        cursor.continue();
+      };
+      tx.oncomplete = function () { resolve(flipped); };
+      tx.onerror = function () { reject(tx.error || new Error("could not update the sent state")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
+/* A verified ack arrives (§4.5): bind it to the sent record its
+ * reference names (ackMatchesSent — the signature's key must be the
+ * recipient the message was sent to), then flip sent/queued → delivered.
+ * An ack that binds to nothing (unknown reference, wrong signer, already
+ * delivered) is a silent no-op — acks are idempotent and never re-acked.
+ * Resolves {matched, delivered}. */
+function applyAckToSent(dec, nowSec) {
+  return storeGet(STORE_SENT, dec && dec.ack ? dec.ack.r : null).then(function (record) {
+    if (!record || !ackMatchesSent(dec, record)) return { matched: false, delivered: false };
+    if (record.state === "delivered") return { matched: true, delivered: false };
+    return storePut(STORE_SENT, sentDeliveredRecord(record, nowSec)).then(function () {
+      return { matched: true, delivered: true };
     });
   });
 }
@@ -469,6 +613,11 @@ DTN.listChunkPartials = listChunkPartials;
 DTN.removeChunkPartial = removeChunkPartial;
 DTN.purgeExpiredChunkPartials = purgeExpiredChunkPartials;
 DTN.STORE_PARTS = STORE_PARTS;
+DTN.addSentRecord = addSentRecord;
+DTN.listSent = listSent;
+DTN.markSentPushed = markSentPushed;
+DTN.applyAckToSent = applyAckToSent;
+DTN.STORE_SENT = STORE_SENT;
 DTN.addTransitEnvelopes = addTransitEnvelopes;
 DTN.listTransit = listTransit;
 DTN.removeTransitIds = removeTransitIds;

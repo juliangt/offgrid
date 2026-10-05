@@ -84,6 +84,28 @@ function canonicalChunkedInnerJson(m, a, k, s, t, w, g, i, n) {
          ',"n":' + String(assertInt(n, "n")) + "}";
 }
 
+/* §4.5 signed byte string of an ACK inner: the §5.1 form gains the
+ * ack-convention members in FIXED order w, r, y after t (m is the empty
+ * string for acks). Only ack inners use this form — the plain §5.1 string
+ * for flat messages and the §4.4 string for chunked messages stay
+ * byte-identical to their pre-§4.5 constructions (§4.5 binding). */
+function canonicalAckSignedString(m, a, k, t, w, r, y) {
+  return canonicalSignedString(m, a, k, t).slice(0, -1) +   /* drop the closing brace */
+         ',"w":' + jsonEscapeString(w) +
+         ',"r":' + jsonEscapeString(r) +
+         ',"y":' + String(assertInt(y, "y")) + "}";
+}
+
+/* §4.5 complete inner_json of an ack: §4.1 order m, a, k, s, t followed by
+ * w, r, y (same fixed order as the signed string, with s in its §4.1
+ * position). */
+function canonicalAckInnerJson(m, a, k, s, t, w, r, y) {
+  return canonicalInnerJson(m, a, k, s, t).slice(0, -1) +   /* drop the closing brace */
+         ',"w":' + jsonEscapeString(w) +
+         ',"r":' + jsonEscapeString(r) +
+         ',"y":' + String(assertInt(y, "y")) + "}";
+}
+
 /* §5.2 hashed byte string for the envelope id, fixed key order v,
  * dest_hint, created_at, ttl, payload (id itself excluded). */
 function canonicalEnvelopeString(v, destHint, createdAt, ttl, payload) {

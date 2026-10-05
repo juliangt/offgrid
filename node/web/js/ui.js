@@ -152,7 +152,7 @@ function selectTab(name) {
   }
   if (name === "inbox") renderInbox();
   if (name === "identity") renderIdentityTab();
-  if (name === "compose") refreshDirectory();
+  if (name === "compose") { refreshDirectory(); renderSent(); }
 }
 
 /* ----- directory (§10.3 GET) ----- */
@@ -261,10 +261,34 @@ function showStatus(el, kind, text) {
   el.textContent = text;
 }
 
-/* Send flow (plan 2.5): build the envelope(s) per §4.2/§4.4/§5/§6, remember
- * EVERY chunk envelope's id so none is ever re-pulled (§10.4, §4.4), count
- * the message, and hand the envelopes to the node immediately. The mule
- * sync engine (section 10) takes over from the next sync onwards. */
+/* ----- delivery-confirmation setting (§4.5): one per-identity flag ----- */
+
+/* The single persisted default (identity.acks_enabled, absent = on): it
+ * gates EMITTING acks for received messages AND the composer's per-send
+ * "track delivery" default. The composer checkbox is the per-message
+ * override; changing either checkbox updates the shared default. */
+function acksWanted() {
+  return !uiState.identity || uiState.identity.acks_enabled !== false;
+}
+
+function setAcksEnabled(enabled) {
+  var identity = uiState.identity;
+  if (!identity) return;
+  identity.acks_enabled = !!enabled;
+  uiState.identity = identity;
+  var idBox = $("id-acks");
+  if (idBox) idBox.checked = identity.acks_enabled;
+  var composeBox = $("compose-ack");
+  if (composeBox) composeBox.checked = identity.acks_enabled;
+  DTN.saveIdentity(identity).then(null, function () { /* best-effort persistence */ });
+}
+
+/* Send flow (plan 2.5): build the envelope(s) per §4.2/§4.4/§4.5/§5/§6,
+ * remember EVERY chunk envelope's id so none is ever re-pulled (§10.4,
+ * §4.4), count the message, keep a local `sent` record when delivery
+ * tracking is on (§4.5 — the record stays on this device only), and hand
+ * the envelopes to the node immediately. The mule sync engine (section
+ * 10) takes over from the next sync onwards. */
 function onSend() {
   if (uiState.sending) return;
   var statusEl = $("compose-status");
@@ -297,6 +321,11 @@ function onSend() {
   updateSendEnabled();
   showStatus(statusEl, "", "Signing and encrypting…");
 
+  var trackDelivery = acksWanted();
+  var composeBox = $("compose-ack");
+  if (composeBox) trackDelivery = composeBox.checked;
+  var createdAt = nowSec();
+
   var envs;
   try {
     envs = DTN.buildMessageEnvelopes({
@@ -305,7 +334,7 @@ function onSend() {
       alias: identity.alias,
       signSecret: identity.signSecret,
       signPublic: identity.signPublic,
-      createdAt: nowSec()
+      createdAt: createdAt
     });
   } catch (e) {
     uiState.sending = false;
@@ -316,13 +345,30 @@ function onSend() {
   var envIds = [];
   for (var i = 0; i < envs.length; i++) envIds.push(envs[i].id);
 
-  DTN.markSeenIds(envIds).then(function () {
+  /* §4.5: the local-only sent record (state "queued") exists BEFORE the
+   * push, so the state machine survives a lost sync response. */
+  var prepare = trackDelivery
+    ? DTN.addSentRecord(DTN.sentNewRecord({
+        envIds: envIds,
+        toAlias: entry.alias,
+        toPubkey: entry.pubkey,
+        text: text,
+        t: createdAt,
+        createdAt: createdAt,
+        ttl: DTN.TTL_DEFAULT
+      }))
+    : Promise.resolve();
+
+  prepare.then(function () {
+    return DTN.markSeenIds(envIds);
+  }).then(function () {
     return DTN.getMeta("sent_count").then(function (n) {
       return DTN.setMeta("sent_count", (typeof n === "number" ? n : 0) + 1);
     });
   }).then(function () {
     /* §11: hand the envelopes to the node immediately (they ride the same
-     * mule cycle as every other sync). */
+     * mule cycle as every other sync). markSentPushed inside the sync
+     * flips the record to "sent" once the node holds them. */
     return performSync(envs);
   }).then(function (summary) {
     uiState.sending = false;
@@ -331,13 +377,14 @@ function onSend() {
        * their ORIGINAL minted form (§15.6 — the stored record keeps the
        * version it was minted under; any §15.1 conversion happens only on
        * the wire copy during a sync) and retry automatically on the next
-       * sync. */
+       * sync. The sent record stays "queued" until that push lands. */
       return DTN.addTransitEnvelopes(envs).then(function () {
         $("compose-text").value = "";
         updateCounter();
         updateSendEnabled();
         showStatus(statusEl, "error", "Could not deliver to the node yet. The message stayed in your transit queue and will retry on the next sync.");
         renderTelemetry();
+        renderSent();
       });
     }
     $("compose-text").value = "";
@@ -347,11 +394,13 @@ function onSend() {
       ? "Message split into " + envs.length + " envelopes and dropped at the node. They will arrive when a mule carries them to their recipient."
       : "Message encrypted and dropped at the node. It will arrive when a mule carries it to its recipient.");
     renderTelemetry();
+    renderSent();
   }, function (err) {
     uiState.sending = false;
     updateSendEnabled();
     showStatus(statusEl, "error", "Send failed (" + err.message + "). Please retry.");
     renderTelemetry();
+    renderSent();
   });
 }
 
@@ -414,6 +463,55 @@ function renderInbox() {
   });
 }
 
+/* ----- sent messages (§4.5 sender state machine) ----- */
+
+/* The local sent history with honest per-message states:
+ *   queued   — built, no node holds it yet (rides the next sync)
+ *   sent     — a node holds it; a mule may be carrying it
+ *   delivered— a verified ack from the expected recipient arrived
+ * The list is local-only data (the `sent` store); nothing about it ever
+ * reaches the network beyond the ordinary message envelopes themselves. */
+function renderSent() {
+  return DTN.listSent().then(function (rows) {
+    var list = $("sent-list");
+    var emptyMsg = $("sent-empty");
+    if (!list) return;
+    list.textContent = "";
+    if (!rows.length) {
+      showEl(emptyMsg);
+      return;
+    }
+    hideEl(emptyMsg);
+    for (var i = 0; i < rows.length; i++) {
+      var rec = rows[i];
+      var li = document.createElement("li");
+      var head = document.createElement("div");
+      head.className = "msg-head";
+      var to = document.createElement("strong");
+      to.textContent = rec.to_alias;
+      var time = document.createElement("span");
+      time.className = "time";
+      time.textContent = relativeTime(rec.t);
+      time.title = absoluteTime(rec.t);
+      head.appendChild(to);
+      head.appendChild(time);
+      var body = document.createElement("div");
+      body.className = "msg-body";
+      body.textContent = rec.m;
+      var state = document.createElement("div");
+      state.className = "sent-state " + rec.state;
+      state.textContent = DTN.sentStatusLabel(rec.state);
+      if (rec.state === "delivered" && rec.acked_at) {
+        state.title = "Confirmation received: " + absoluteTime(rec.acked_at);
+      }
+      li.appendChild(head);
+      li.appendChild(body);
+      li.appendChild(state);
+      list.appendChild(li);
+    }
+  });
+}
+
 /* ----- identity tab ----- */
 
 function renderIdentityTab() {
@@ -425,6 +523,8 @@ function renderIdentityTab() {
   setText("id-hint", identity.hint);
   var seedEl = $("id-seed");
   if (seedEl) seedEl.value = identity.seedB64;
+  var acksBox = $("id-acks");
+  if (acksBox) acksBox.checked = identity.acks_enabled !== false;
 }
 
 function toggleSeed() {
@@ -587,11 +687,13 @@ function enterApp() {
   renderIdentityTab();
   renderTelemetry();
   renderInbox();
+  renderSent();
   refreshDirectory();
   /* §11: sync automatically on page load (push + pull cycle). */
   performSync([]).then(function () {
     renderTelemetry();
     renderInbox();
+    renderSent();
   }, function () {
     renderTelemetry();
   });
@@ -618,6 +720,12 @@ function wireStaticHandlers() {
   $("compose-text").addEventListener("input", updateCounter);
   $("compose-to").addEventListener("change", updateSendEnabled);
   $("btn-send").addEventListener("click", onSend);
+  $("compose-ack").addEventListener("change", function () {
+    setAcksEnabled($("compose-ack").checked);
+  });
+  $("id-acks").addEventListener("change", function () {
+    setAcksEnabled($("id-acks").checked);
+  });
   $("btn-show-seed").addEventListener("click", toggleSeed);
   $("btn-sync").addEventListener("click", onManualSync);
 }
@@ -630,6 +738,7 @@ function onManualSync() {
     btn.disabled = false;
     renderTelemetry();
     renderInbox();
+    renderSent();
   }, function () {
     btn.disabled = false;
     renderTelemetry();
@@ -717,7 +826,10 @@ function performSync(outgoing) {
   var run = function () { return runSync(outgoing); };
   var p = syncChain.then(run, run);
   var settled = p.then(function (summary) {
-    return recordSyncMeta(summary).then(function () { return summary; });
+    return recordSyncMeta(summary).then(function () {
+      chainAckSync(summary);
+      return summary;
+    });
   }, function (err) {
     /* Storage failure outside the HTTP cycle: record it and rethrow so
      * callers can show feedback. */
@@ -729,6 +841,25 @@ function performSync(outgoing) {
   });
   syncChain = settled.then(function () {}, function () {});
   return settled;
+}
+
+/* §4.5 acks ride out like any mail: when a sync RECEIVED messages and
+ * emitted ack envelopes for them (summary.acks, built in processPulled),
+ * a follow-up cycle pushes them immediately. If that cycle cannot reach a
+ * node, the acks join the transit queue and retry with the next sync —
+ * an ack that never makes it is accepted loss (delivery feedback is
+ * best-effort, §4.5). The follow-up cannot loop: ack arrivals are
+ * recorded, never answered (termination rule), and this glue only fires
+ * when a cycle emitted NEW acks. */
+function chainAckSync(summary) {
+  if (!summary || !summary.acks || !summary.acks.length) return;
+  performSync(summary.acks).then(function (ackSummary) {
+    if (!ackSummary || ackSummary.status !== "ok" || ackSummary.errors > 0) {
+      return DTN.addTransitEnvelopes(summary.acks);
+    }
+  }, function () {
+    return DTN.addTransitEnvelopes(summary.acks);
+  }).then(null, function () { /* a lost ack is acceptable (§4.5) */ });
 }
 
 function runSync(outgoing) {
@@ -821,7 +952,12 @@ function runSync(outgoing) {
           var chunk = pushChunks[pushOk[c]] || [];
           for (var k = 0; k < chunk.length; k++) delivered.push(chunk[k].id);
         }
+        /* §4.5: whatever just reached a node flips the matching sent
+         * records from "queued" to "sent" (own sends on their first push,
+         * retried sends riding the transit queue). */
         return DTN.removeTransitIds(delivered).then(function () {
+          return DTN.markSentPushed(delivered);
+        }).then(function () {
           return processPulled(pulled, known, identity);
         });
       }).then(function (summary) {
@@ -834,10 +970,47 @@ function runSync(outgoing) {
   });
 }
 
+/* §4.5 ack envelope construction (recipient side): resolve each sender's
+ * X25519 key from the node directory by the Ed25519 key the signed
+ * message carried, and build ONE ordinary ack envelope addressed back to
+ * the sender's dest_hint — signed by THIS identity's Ed25519 key (the
+ * ack author is the original recipient), TTL-aligned per §4.5. A sender
+ * the directory cannot resolve gets no ack: delivery feedback is
+ * best-effort (§4.5). */
+function buildAckEnvelopes(tasks, identity, directory) {
+  var byPubkey = {};
+  for (var i = 0; i < directory.length; i++) {
+    if (directory[i] && directory[i].pubkey) byPubkey[directory[i].pubkey] = directory[i];
+  }
+  var now = nowSec();
+  var out = [];
+  for (var j = 0; j < tasks.length; j++) {
+    var task = tasks[j];
+    var entry = byPubkey[task.sender_key];
+    var senderBox = entry ? DTN.b64decode(entry.x25519) : null;
+    if (!entry || !senderBox || senderBox.length !== 32) continue;
+    out.push(DTN.buildEnvelope({
+      recipientBoxPublic: senderBox,     /* addressed BACK to the sender's dest_hint */
+      message: "",                       /* acks carry no text (§4.5, m = "") */
+      alias: identity.alias,             /* the ACK AUTHOR's alias (the original recipient) */
+      signSecret: identity.signSecret,
+      signPublic: identity.signPublic,   /* signed by the RECIPIENT's Ed25519 key */
+      createdAt: now,                    /* ack time, NOT the original's (§4.5) */
+      ttl: DTN.ackTtlFor(task.created_at, task.ttl, now),
+      ack: { r: task.r, y: task.type }
+    }));
+  }
+  return out;
+}
+
 /* §11 classification of the pulled envelopes + persistence, extended with
- * the §4.4 chunk flow: chunk arrivals merge into inbox_parts (keyed by the
- * group id `g`), a completing chunk publishes ONE inbox row and clears the
- * partial; flat messages land in the inbox exactly as before. */
+ * the §4.4 chunk flow (chunk arrivals merge into inbox_parts keyed by the
+ * group id `g`; a completing chunk publishes ONE inbox row, clears the
+ * partial and yields the ONE §4.5 ack task) and the §4.5 ack flow: ack
+ * arrivals flip the matching sent record to "delivered" (after the
+ * ackMatchesSent bind; acks are never answered — termination rule), and
+ * message arrivals yield at most one ack task each, built into envelopes
+ * against the node directory and pushed by a follow-up cycle. */
 function processPulled(pulled, known, identity) {
   var fresh = [];
   var pulledIds = [];
@@ -853,15 +1026,30 @@ function processPulled(pulled, known, identity) {
   var cls = DTN.classifyPullEnvelopes(fresh, identity.hint);
   var inboxRecords = [];
   var chunkArrivals = [];
+  var ackTasks = [];      /* §4.5: one per received message, acks to emit */
+  var ackArrivals = [];   /* §4.5: received ack envelopes */
   var rejected = 0;
   var now = nowSec();
   for (var j = 0; j < cls.mine.length; j++) {
     var res = DTN.decryptEnvelope(cls.mine[j], identity, now);
     if (res.ok) {
-      if (res.chunk) {
+      if (res.ack) {
+        /* §4.5 termination rule: an ack is recorded, never answered. */
+        ackArrivals.push(res);
+      } else if (res.chunk) {
         chunkArrivals.push({ env: cls.mine[j], dec: res });
       } else {
         inboxRecords.push({ id: cls.mine[j].id, m: res.m, a: res.a, t: res.t, received_at: now });
+        /* §4.5: a fully received flat message is ackable NOW — one ack,
+         * referencing this envelope's id. */
+        ackTasks.push({
+          r: cls.mine[j].id,
+          sender_key: res.k,
+          sender_alias: res.a,
+          created_at: cls.mine[j].created_at,
+          ttl: cls.mine[j].ttl,
+          type: DTN.ACK_TYPE_RECEIVED
+        });
       }
     } else {
       rejected += 1; /* silent reject (§4.3): counted, never surfaced */
@@ -878,28 +1066,65 @@ function processPulled(pulled, known, identity) {
         seq = seq.then(function () {
           return DTN.addInboxChunkPart(arrival.env, arrival.dec, now).then(function (outcome) {
             arrived += 1;
-            if (outcome.complete) completed += 1;
+            if (outcome.complete) {
+              completed += 1;
+              /* §4.5: the ONE ack per chunked message, emitted exactly at
+               * reassembly completion (addInboxChunkPart deletes the
+               * partial, so a second completion cannot happen). */
+              if (outcome.ack_task) ackTasks.push(outcome.ack_task);
+            }
           });
         });
       })(chunkArrivals[c]);
     }
     return seq.then(function () {
-      return DTN.addInboxMessages(inboxRecords).then(function () {
-        return DTN.addTransitEnvelopes(cls.foreign);
-      }).then(function (transitOutcome) {
-        return DTN.markSeenIds(pulledIds).then(function () {
-          return {
-            status: "ok",
-            pulled: pulled.length,
-            fresh: fresh.length,
-            mine: cls.mine.length,
-            inboxAdded: inboxRecords.length + completed,
-            chunksArrived: arrived,
-            chunksCompleted: completed,
-            rejected: rejected,
-            transitAdded: transitOutcome.added,
-            evicted: transitOutcome.evicted.length
-          };
+      /* §4.5: record every ack arrival against the sent history (the
+       * ackMatchesSent bind decides; mismatches are silent no-ops). */
+      var ackSeq = Promise.resolve();
+      var acksMatched = 0;
+      var acksDelivered = 0;
+      for (var a = 0; a < ackArrivals.length; a++) {
+        (function (dec) {
+          ackSeq = ackSeq.then(function () {
+            return DTN.applyAckToSent(dec, now).then(function (outcome) {
+              if (outcome.matched) acksMatched += 1;
+              if (outcome.delivered) acksDelivered += 1;
+            });
+          });
+        })(ackArrivals[a]);
+      }
+      return ackSeq.then(function () {
+        var buildAcks = (ackTasks.length && identity.acks_enabled !== false)
+          ? getJson("/api/v1/directory").then(function (directory) {
+              return buildAckEnvelopes(ackTasks, identity, Array.isArray(directory) ? directory : []);
+            }, function () {
+              return []; /* directory unobtainable → best-effort: no acks (§4.5) */
+            })
+          : Promise.resolve([]);
+        return buildAcks.then(function (ackEnvs) {
+          return DTN.addInboxMessages(inboxRecords).then(function () {
+            return DTN.addTransitEnvelopes(cls.foreign);
+          }).then(function (transitOutcome) {
+            return DTN.markSeenIds(pulledIds).then(function () {
+              return {
+                status: "ok",
+                pulled: pulled.length,
+                fresh: fresh.length,
+                mine: cls.mine.length,
+                inboxAdded: inboxRecords.length + completed,
+                chunksArrived: arrived,
+                chunksCompleted: completed,
+                acksArrived: ackArrivals.length,
+                acksMatched: acksMatched,
+                acksDelivered: acksDelivered,
+                acksEmitted: ackEnvs.length,
+                acks: ackEnvs, /* §4.5: pushed by the chainAckSync follow-up */
+                rejected: rejected,
+                transitAdded: transitOutcome.added,
+                evicted: transitOutcome.evicted.length
+              };
+            });
+          });
         });
       });
     });
@@ -920,7 +1145,10 @@ function recordSyncMeta(summary) {
     evicted: summary.evicted || 0,
     rejected: summary.rejected || 0,
     pushed: summary.pushed || 0,
-    withheld: summary.withheld || 0 /* §15.6: above the node's ceiling, still carried */
+    withheld: summary.withheld || 0, /* §15.6: above the node's ceiling, still carried */
+    acks_emitted: summary.acksEmitted || 0,   /* §4.5 ack telemetry */
+    acks_matched: summary.acksMatched || 0,
+    acks_delivered: summary.acksDelivered || 0
   };
   return DTN.setMeta("last_sync", meta).then(function () {
     if (meta.evicted > 0) {
