@@ -61,6 +61,29 @@ function canonicalInnerJson(m, a, k, s, t) {
          ',"t":' + String(assertInt(t, "t")) + "}";
 }
 
+/* §4.4 signed byte string of a CHUNKED inner: the §5.1 form gains the
+ * chunk-convention members in FIXED order w, g, i, n after t. Only
+ * chunked messages use this form — a plain (flat) inner keeps the §5.1
+ * string byte-identical to the pre-§4.4 construction (§4.4 binding). */
+function canonicalChunkedSignedString(m, a, k, t, w, g, i, n) {
+  return canonicalSignedString(m, a, k, t).slice(0, -1) +   /* drop the closing brace */
+         ',"w":' + jsonEscapeString(w) +
+         ',"g":' + jsonEscapeString(g) +
+         ',"i":' + String(assertInt(i, "i")) +
+         ',"n":' + String(assertInt(n, "n")) + "}";
+}
+
+/* §4.4 complete inner_json of a chunked message: §4.1 order m, a, k, s, t
+ * followed by w, g, i, n (same fixed order as the signed string, with s
+ * in its §4.1 position). */
+function canonicalChunkedInnerJson(m, a, k, s, t, w, g, i, n) {
+  return canonicalInnerJson(m, a, k, s, t).slice(0, -1) +   /* drop the closing brace */
+         ',"w":' + jsonEscapeString(w) +
+         ',"g":' + jsonEscapeString(g) +
+         ',"i":' + String(assertInt(i, "i")) +
+         ',"n":' + String(assertInt(n, "n")) + "}";
+}
+
 /* §5.2 hashed byte string for the envelope id, fixed key order v,
  * dest_hint, created_at, ttl, payload (id itself excluded). */
 function canonicalEnvelopeString(v, destHint, createdAt, ttl, payload) {

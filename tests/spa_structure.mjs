@@ -66,6 +66,7 @@ const expectedOrder = [
   "/js/canonical.js",
   "/js/envelopes.js",
   "/js/mule.js",
+  "/js/chunking.js",
   "/js/engine.js",
   "/js/store.js",
   "/js/ui.js",
@@ -87,8 +88,17 @@ const expectedApi = [
   "evictTransitQueue", "nacl",
   // §15 versioning policy on the mule side (issue #18, Phase 3)
   "convertEnvelopeV1toV2", "maxAdvertisedEnvelopeVersion", "prepareOutgoingBatch",
+  // §4.4 long-message chunking (issue #24)
+  "CHUNK_TAG", "CHUNK_MAX_PARTS", "CHUNK_G_BYTES", "CHUNK_META_MAX_BYTES",
+  "CHUNK_TEXT_PLUS_ALIAS_LIMIT", "CHUNK_WARN_PARTS",
+  "canonicalChunkedSignedString", "canonicalChunkedInnerJson",
+  "chunkTextBudget", "chunkSplitText", "chunkPlannedCount", "chunkComposerLimit",
+  "buildMessageEnvelopes", "chunkNewState", "chunkStateWithPart", "chunkStateHave",
+  "chunkStateComplete", "chunkStateText", "chunkStateExpired", "chunkInboxRecord",
   // local store API (section 8)
   "loadIdentity", "saveIdentity", "addInboxMessages", "listInbox",
+  "addInboxChunkPart", "listChunkPartials", "removeChunkPartial",
+  "purgeExpiredChunkPartials",
   "addTransitEnvelopes", "listTransit", "removeTransitIds",
   "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire",
   // §15.6 store migrations chain

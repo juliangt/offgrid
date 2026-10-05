@@ -81,6 +81,14 @@ function computeEnvelopeId(v, destHint, createdAt, ttl, payload) {
  *   5. box = crypto_box(inner_bytes, nonce, recipient_x25519_pub, eph_sec)
  *   6. payload = b64(eph_pub ‖ nonce ‖ box); dest_hint §6.1; id §6.2
  * `t` (inner timestamp) equals created_at (§4.1: clients SHOULD).
+ *
+ * §4.4 long messages: `opts.chunk` ({g, i, n}) marks ONE envelope of a
+ * chunked message. Its inner carries four extra members after t —
+ * w (the "chunk1" schema tag), g (16-byte message id, Base64), i (zero
+ * based index), n (total) — and the signature covers them: the signed
+ * byte string is the §5.1 form with ",w,g,i,n" appended in fixed order
+ * (canonicalChunkedSignedString). A flat inner (no opts.chunk) is
+ * byte-identical to the pre-§4.4 construction.
  */
 /*
  * Module D — Phase 2/3 evolution mapping (normative source: spec §14).
@@ -157,15 +165,39 @@ function buildEnvelope(opts) {
   var ttl = (opts.ttl === undefined || opts.ttl === null) ? TTL_DEFAULT : assertInt(opts.ttl, "ttl");
   if (ttl < TTL_MIN || ttl > TTL_MAX) throw new Error("ttl outside [" + TTL_MIN + ", " + TTL_MAX + "] (§8.1)");
 
+  /* §4.4 optional chunk metadata, validated before anything is signed. */
+  var chunk = null;
+  if (opts.chunk !== undefined && opts.chunk !== null) {
+    var c = opts.chunk;
+    var gBytes = (typeof c.g === "string") ? b64decode(c.g) : null;
+    if (!gBytes || gBytes.length !== CHUNK_G_BYTES) {
+      throw new Error("chunk.g must be Base64 of exactly " + CHUNK_G_BYTES + " bytes (§4.4)");
+    }
+    assertInt(c.i, "chunk.i");
+    assertInt(c.n, "chunk.n");
+    if (c.n < 2 || c.n > CHUNK_MAX_PARTS) {
+      throw new Error("chunk.n outside [2, " + CHUNK_MAX_PARTS + "] (§4.4)");
+    }
+    if (c.i < 0 || c.i >= c.n) {
+      throw new Error("chunk.i outside [0, chunk.n) (§4.4)");
+    }
+    chunk = { w: CHUNK_TAG, g: c.g, i: c.i, n: c.n };
+  }
+
   var k = b64encode(opts.signPublic);
   var t = createdAt;
 
-  /* 1–2: sign the canonical §5.1 bytes (no s member). */
-  var signedString = canonicalSignedString(message, opts.alias, k, t);
+  /* 1–2: sign the canonical bytes (no s member) — §5.1 flat form, or the
+   * §4.4 chunked form when this envelope carries chunk metadata. */
+  var signedString = chunk
+    ? canonicalChunkedSignedString(message, opts.alias, k, t, chunk.w, chunk.g, chunk.i, chunk.n)
+    : canonicalSignedString(message, opts.alias, k, t);
   var s = b64encode(nacl.sign.detached(utf8Encode(signedString), opts.signSecret));
 
-  /* 3: complete inner JSON bytes. */
-  var innerBytes = utf8Encode(canonicalInnerJson(message, opts.alias, k, s, t));
+  /* 3: complete inner JSON bytes (same flat/chunked split). */
+  var innerBytes = utf8Encode(chunk
+    ? canonicalChunkedInnerJson(message, opts.alias, k, s, t, chunk.w, chunk.g, chunk.i, chunk.n)
+    : canonicalInnerJson(message, opts.alias, k, s, t));
 
   /* 4–5: ephemeral box toward the recipient. */
   var eph = nacl.box.keyPair();
@@ -240,13 +272,33 @@ function decryptEnvelope(env, identity, now) {
     } catch (e) {
       return { ok: false, reason: "bad_inner" };
     }
-    /* §4.1: inner_json has exactly these fields. */
+    /* §4.1 inner_json has exactly the five flat fields; §4.4 chunked
+     * inners have exactly those five plus w, g, i, n. Anything else —
+     * including an unknown `w` tag — is corrupt by definition. */
     if (!inner || typeof inner !== "object" || Array.isArray(inner)) {
       return { ok: false, reason: "bad_inner" };
     }
-    if (Object.keys(inner).length !== 5 ||
-        !("m" in inner) || !("a" in inner) || !("k" in inner) || !("s" in inner) || !("t" in inner)) {
+    var keyCount = Object.keys(inner).length;
+    var isChunked = keyCount === 9 &&
+      "w" in inner && "g" in inner && "i" in inner && "n" in inner;
+    if (!((keyCount === 5 || isChunked) &&
+          "m" in inner && "a" in inner && "k" in inner && "s" in inner && "t" in inner)) {
       return { ok: false, reason: "bad_inner" };
+    }
+    /* §4.4 chunk metadata, validated BEFORE the signature (the signature
+     * covers w, g, i, n, so a tampered member fails verification below —
+     * but a structurally absurd member is rejected outright). */
+    var chunkMeta = null;
+    if (isChunked) {
+      if (inner.w !== CHUNK_TAG) return { ok: false, reason: "bad_inner" };
+      var gBytes = (typeof inner.g === "string") ? b64decode(inner.g) : null;
+      if (!gBytes || gBytes.length !== CHUNK_G_BYTES) return { ok: false, reason: "bad_inner" };
+      if (typeof inner.i !== "number" || !isFinite(inner.i) || Math.floor(inner.i) !== inner.i ||
+          typeof inner.n !== "number" || !isFinite(inner.n) || Math.floor(inner.n) !== inner.n ||
+          inner.n < 2 || inner.n > CHUNK_MAX_PARTS || inner.i < 0 || inner.i >= inner.n) {
+        return { ok: false, reason: "bad_inner" };
+      }
+      chunkMeta = { w: inner.w, g: inner.g, i: inner.i, n: inner.n };
     }
     if (typeof inner.m !== "string" || messageByteLength(inner.m) > MESSAGE_MAX_BYTES ||
         !validateAlias(inner.a) ||
@@ -260,8 +312,12 @@ function decryptEnvelope(env, identity, now) {
       return { ok: false, reason: "from_future" }; /* §4.3 step 6 */
     }
 
-    /* §4.3 step 5: rebuild the §5.1 string and verify with k. */
-    var signedString = canonicalSignedString(inner.m, inner.a, inner.k, inner.t);
+    /* §4.3 step 5: rebuild the signed string — §5.1 flat form or the §4.4
+     * chunked form — and verify with k. */
+    var signedString = chunkMeta
+      ? canonicalChunkedSignedString(inner.m, inner.a, inner.k, inner.t,
+                                     chunkMeta.w, chunkMeta.g, chunkMeta.i, chunkMeta.n)
+      : canonicalSignedString(inner.m, inner.a, inner.k, inner.t);
     var sigOk = false;
     try {
       sigOk = nacl.sign.detached.verify(utf8Encode(signedString), b64decode(inner.s), b64decode(inner.k));
@@ -270,7 +326,9 @@ function decryptEnvelope(env, identity, now) {
     }
     if (!sigOk) return { ok: false, reason: "bad_signature" };
 
-    return { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k };
+    return chunkMeta
+      ? { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k, chunk: chunkMeta }
+      : { ok: true, m: inner.m, a: inner.a, t: inner.t, k: inner.k };
   } catch (e) {
     return { ok: false, reason: "crypto" };
   }

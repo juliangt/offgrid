@@ -7,10 +7,14 @@
 "use strict";
 
 /* ---------------------------------------------------------------------
- * 8. Local store — IndexedDB "dtn_local_store" v1 (§11, plan 2.3).
+ * 8. Local store — IndexedDB "dtn_local_store" (§11, §15.6, plan 2.3).
  *    Stores:
  *      identity      singleton under the fixed key "identity" (seed+keys)
- *      inbox         decrypted own messages, keyed by envelope id
+ *      inbox         decrypted own messages, keyed by inbox-record id
+ *                    (envelope id for flat messages, "g:"+g for reassembled
+ *                    chunked messages, §4.4)
+ *      inbox_parts   partial chunked messages awaiting reassembly, keyed by
+ *                    the §4.4 group id `g` (created by migration v2)
  *      transit_queue foreign envelopes being carried, keyed by envelope id
  *      seen_ids      dedup memory of every envelope id ever pulled or
  *                    pushed, so known_ids = inbox ∪ transit ∪ seen (§11)
@@ -24,9 +28,10 @@
  *    call them).
  * ------------------------------------------------------------------- */
 var DB_NAME = "dtn_local_store";
-var DB_VERSION = 1;
+var DB_VERSION = 2;
 var STORE_IDENTITY = "identity";
 var STORE_INBOX = "inbox";
+var STORE_PARTS = "inbox_parts";
 var STORE_TRANSIT = "transit_queue";
 var STORE_SEEN = "seen_ids";
 var STORE_META = "meta";
@@ -60,9 +65,19 @@ var IDB_MIGRATIONS = [
       db.createObjectStore(STORE_SEEN);                          /* key = envelope id */
       db.createObjectStore(STORE_META);                          /* key = state name */
     }
+  },
+  {
+    version: 2,
+    /* v2 (§4.4 long messages, issue #24): the inbox_parts store for
+     * partial chunked messages, keyed by the group id `g`. Strictly
+     * additive: one new store, no existing store or record is touched
+     * (§15.6); flat messages keep their v1 shape and semantics. */
+    migrate: function (db) {
+      db.createObjectStore(STORE_PARTS, { keyPath: "g" });
+    }
   }
   /* Future versions append here, e.g. (never added speculatively):
-   * { version: 2, migrate: function (db) { db.createObjectStore(...) } }
+   * { version: 3, migrate: function (db) { db.createObjectStore(...) } }
    */
 ];
 
@@ -238,6 +253,87 @@ function listInbox() {
   });
 }
 
+/* ----- inbox_parts: partial chunked messages (§4.4) ----- */
+
+/* Merge one decrypted chunk envelope into its partial state, inside ONE
+ * readwrite transaction over inbox_parts + inbox: the merged state is
+ * stored, and when the n-th chunk completes the message it lands in the
+ * inbox store and the partial state is deleted — atomically. The merge
+ * rules are the pure §4.4 ones of chunking.js (first write per index
+ * wins, so re-delivered duplicates are no-ops).
+ * `env` is the pulled envelope (its created_at/ttl are shared by all
+ * chunks of the message), `dec` the decryptEnvelope result carrying
+ * `chunk: {g, i, n}`. Resolves {complete, record?}. */
+function addInboxChunkPart(env, dec, nowSec) {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction([STORE_PARTS, STORE_INBOX], "readwrite");
+      var parts = tx.objectStore(STORE_PARTS);
+      var inbox = tx.objectStore(STORE_INBOX);
+      var outcome = { complete: false };
+      var req = parts.get(dec.chunk.g);
+      req.onsuccess = function () {
+        /* First chunk of the group seeds the state; the partial expires
+         * with the chunks' own shared TTL deadline (§4.4, no extension). */
+        var state = req.result ||
+          chunkNewState(dec.chunk.g, dec.chunk.n, dec.a, dec.t,
+                        env.created_at, env.ttl, nowSec);
+        var merged = chunkStateWithPart(state, dec.chunk.i, dec.m, env.id);
+        if (chunkStateComplete(merged)) {
+          outcome.record = chunkInboxRecord(merged);
+          inbox.put(outcome.record);
+          parts.delete(dec.chunk.g);
+          outcome.complete = true;
+        } else {
+          parts.put(merged);
+        }
+      };
+      tx.oncomplete = function () { resolve(outcome); };
+      tx.onerror = function () { reject(tx.error || new Error("could not store the message chunk")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
+function listChunkPartials() {
+  return storeGetAll(STORE_PARTS);
+}
+
+function removeChunkPartial(g) {
+  return withStore(STORE_PARTS, "readwrite", function (store) {
+    store.delete(g);
+    return g;
+  });
+}
+
+/* §4.4 passive purge of expired partials: aligned with the chunks' TTL
+ * deadline (created_at + ttl < now, the §10.6 boundary). Called on sync
+ * and on inbox render — NEVER from a timer (the SPA has none). Resolves
+ * with the number of partials swept. */
+function purgeExpiredChunkPartials(nowSec) {
+  return getDB().then(function (db) {
+    return new Promise(function (resolve, reject) {
+      var tx = db.transaction(STORE_PARTS, "readwrite");
+      var store = tx.objectStore(STORE_PARTS);
+      var swept = 0;
+      var req = store.openCursor();
+      req.onsuccess = function (e) {
+        var cursor = e.target.result;
+        if (cursor) {
+          if (chunkStateExpired(cursor.value, nowSec)) {
+            cursor.delete();
+            swept += 1;
+          }
+          cursor.continue();
+        }
+      };
+      tx.oncomplete = function () { resolve(swept); };
+      tx.onerror = function () { reject(tx.error || new Error("could not sweep expired partials")); };
+      tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
+    });
+  });
+}
+
 /* ----- transit_queue (mule cargo, §2/§11) ----- */
 
 /* Keep exactly the six §3.1 wire fields when pushing a carried record. */
@@ -368,6 +464,11 @@ DTN.loadIdentity = loadIdentity;
 DTN.saveIdentity = saveIdentity;
 DTN.addInboxMessages = addInboxMessages;
 DTN.listInbox = listInbox;
+DTN.addInboxChunkPart = addInboxChunkPart;
+DTN.listChunkPartials = listChunkPartials;
+DTN.removeChunkPartial = removeChunkPartial;
+DTN.purgeExpiredChunkPartials = purgeExpiredChunkPartials;
+DTN.STORE_PARTS = STORE_PARTS;
 DTN.addTransitEnvelopes = addTransitEnvelopes;
 DTN.listTransit = listTransit;
 DTN.removeTransitIds = removeTransitIds;

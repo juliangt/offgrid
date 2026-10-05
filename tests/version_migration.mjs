@@ -271,18 +271,20 @@ console.log("== (f) store migrations chain — §15.6 ==");
   DTN.runIdbMigrations(fakeDb(fresh), 0);
   ok(fresh.every((e) => e.op === "create"),
      "the chain only creates — no other database member is ever touched (additive-only, §15.6)");
-  ok(fresh.map((e) => e.name).join(",") === "identity,inbox,transit_queue,seen_ids,meta",
-     "the v1 step creates the five §11 stores in order");
+  ok(fresh.map((e) => e.name).join(",") === "identity,inbox,transit_queue,seen_ids,meta,inbox_parts",
+     "the v1 step creates the five §11 stores; the v2 step adds only inbox_parts (§4.4, issue #24)");
   ok(fresh.find((e) => e.name === "inbox")?.options?.keyPath === "id" &&
-     fresh.find((e) => e.name === "transit_queue")?.options?.keyPath === "id",
-     "inbox/transit_queue are keyed by envelope id (§11)");
+     fresh.find((e) => e.name === "transit_queue")?.options?.keyPath === "id" &&
+     fresh.find((e) => e.name === "inbox_parts")?.options?.keyPath === "g",
+     "inbox/transit_queue are keyed by envelope id; inbox_parts by the §4.4 group id g");
 
   const atCurrent = [];
   DTN.runIdbMigrations(fakeDb(atCurrent), DTN.DB_VERSION);
   ok(atCurrent.length === 0, "a database already at DB_VERSION runs no step (idempotent, §15.6)");
   const atV1 = [];
   DTN.runIdbMigrations(fakeDb(atV1), chain[0].version);
-  ok(atV1.length === 0, "a database at version 1 runs no step — each step is a delta applied once (§15.3 analogue)");
+  ok(atV1.length === 1 && atV1[0].op === "create" && atV1[0].name === "inbox_parts",
+     "a database at version 1 runs exactly the v2 delta — each step is applied once (§15.3 analogue)");
 
   const again = [];
   DTN.runIdbMigrations(fakeDb(again), 0);

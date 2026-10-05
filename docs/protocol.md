@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.3.0 |
+| **Version** | 1.4.0 |
 | **Date** | 2026-10-04 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -94,6 +94,8 @@ The decrypted `box` contains the UTF-8 bytes of `inner_json`, a JSON object with
 {"m": "Hola Bob", "a": "alice_77", "k": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=", "s": "<88-char Base64 Ed25519 signature>", "t": 1759500001}
 ```
 
+The `m` limit binds **per envelope**. A longer text is never sent flat: the sending client splits it into several ordinary chunk envelopes that carry the pieces plus signed reassembly metadata inside the encrypted payload (§4.4). A flat inner stays exactly as specified here.
+
 ### 4.2 Order of operations — SIGN-THEN-ENCRYPT (binding)
 
 The cryptographic order is **sign-then-encrypt**: the signature and the alias are **inside the ciphertext**.
@@ -116,10 +118,70 @@ Consequences (binding):
 1. Compare `dest_hint` with the recipient's own hint: `hex(SHA-256(own X25519 public key)[0:8])`. If different, do not attempt decryption (mule stores the envelope instead).
 2. Split `payload` into `eph_pub(32)`, `nonce(24)`, `box(rest)`.
 3. `inner_bytes = crypto_box.open(box, nonce, eph_pub, own_X25519_secret)`. Any failure → **discard silently** (never surface errors that could leak information).
-4. Parse `inner_json`; validate `m` ≤ 128 bytes, `a` matches the alias regex, `k`/`s` are valid Base64 lengths (44/88 chars).
-5. Rebuild the signed byte string from `m`, `a`, `k`, `t` and verify `s` with `k` (Ed25519). Failure → discard silently.
+4. Parse `inner_json`; validate `m` ≤ 128 bytes, `a` matches the alias regex, `k`/`s` are valid Base64 lengths (44/88 chars). A chunked inner additionally carries `w`, `g`, `i`, `n` and is validated per §4.4 (exact member set, `w` = `"chunk1"`, `g` = Base64 of 16 bytes, `0 ≤ i < n ≤ 16`).
+5. Rebuild the signed byte string from `m`, `a`, `k`, `t` — plus `w`, `g`, `i`, `n` in the §4.4 order for a chunked inner — and verify `s` with `k` (Ed25519). Failure → discard silently.
 6. Optionally reject as corrupt if `t` is more than 300 s in the future.
-7. Store `(m, a, t)` in the inbox. The alias may be cross-checked against the directory entry for `k`.
+7. Store `(m, a, t)` in the inbox. For a chunked inner, merge the chunk into the reassembly state keyed by `g` and expose ONE message when all `n` chunks arrived (§4.4). The alias may be cross-checked against the directory entry for `k`.
+
+### 4.4 Long messages: transparent client-side chunking (issue #24)
+
+The §8.1 plaintext limit (128 UTF-8 bytes) stays binding — **per envelope**. A longer text is split by the SENDING CLIENT into `n` ordinary envelopes, each carrying one piece of text as its `m` plus four additional members **inside the encrypted payload**. The envelope format (§3), the canonical §5.2 hashed string, the node storage (§9), the HTTP API (§10) and every node behavior are untouched: a chunk envelope **is** a v1 envelope, so envelope-id dedup (§6.2), TTL sweeps (§10.6), the mule `transit_queue` (§8.1) and blind nodes keep working unchanged. Chunking is a client convention living where the protocol is free to define anything — inside the box.
+
+**Inner schema (chunked messages).** A chunked inner has exactly the five §4.1 members plus:
+
+| Field | Type | Binding constraint |
+|---|---|---|
+| `w` | string | Inner-convention wire tag. MUST be `"chunk1"` for this convention — the §15-style versioned tag of the inner schema. A flat inner without `w` is a single-part message (§4.1, forever valid). |
+| `g` | string | **Message id** shared by ALL chunks of one message: Base64 (§3.3, padded — 24 characters) of 16 random bytes from `crypto.getRandomValues` (§7.2), generated once per message. This is the stable message id future features (e.g. acks) will reference; it identifies the MESSAGE, never a single envelope. |
+| `i` | integer | Zero-based chunk index: `0 ≤ i < n`. |
+| `n` | integer | Total chunk count: `2 ≤ n ≤ 16` (a single-part message is flat, never "chunked"). |
+
+**Signed-string rule (binding).** The signature covers everything, including the chunk metadata. The signed byte string of a chunked inner is the §5.1 string with the four members appended in fixed order `w`, `g`, `i`, `n`:
+
+```
+{"m":<m>,"a":<a>,"k":<k>,"t":<t>,"w":<w>,"g":<g>,"i":<i>,"n":<n>}
+```
+
+and the complete chunked inner serializes in fixed order `m`, `a`, `k`, `s`, `t`, `w`, `g`, `i`, `n` (the signature is computed over the string WITHOUT `s`, as in §5.1). This is a NEW canonical form for chunked messages; the §5.1 byte string of a PLAIN (non-chunked) message remains byte-identical to the construction defined in §5.1 — nothing about the flat form drifts. Worked example (exact and complete; `s` abbreviated):
+
+```json
+{"m":"Hola Bob, este mensaje viaja troceado","a":"alice_77","k":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","s":"<88-char Base64 Ed25519 signature>","t":1759500001,"w":"chunk1","g":"A2aYc0XrQ0mT7oP9wK5v1g==","i":0,"n":2}
+```
+
+```
+{"m":"Hola Bob, este mensaje viaja troceado","a":"alice_77","k":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","t":1759500001,"w":"chunk1","g":"A2aYc0XrQ0mT7oP9wK5v1g==","i":0,"n":2}
+```
+
+Because the metadata is signed, a malicious **peer** cannot alter `g`, `i` or `n` without failing Ed25519 verification (a node or mule cannot even see them, §4.2). Module C MUST reject as corrupt (§4.3 silent discard): an unknown `w`; a `g` that is not Base64 of exactly 16 bytes; out-of-range `i` or `n`; or any inner whose member set is neither exactly the five §4.1 members nor those five plus exactly `w`, `g`, `i`, `n` — an inner with extra unknown members is corrupt by definition.
+
+**Per-chunk text budget (binding, derived from §8.2).** The chunk metadata occupies at most **58 bytes** of `inner_json` (`,"w":"chunk1"` = 13, `,"g":"<24 chars>"` = 31, `,"i":<i>` ≤ 7, `,"n":<n>` ≤ 7), and the §8.2 envelope bound still binds per envelope:
+
+```
+inner   = 176 + M + A + 58            (M = |m| chunk text, A = |alias|)
+payload = 248 + M + A + 58 ≤ 400      ⇔      M + A ≤ 94
+```
+
+So the sender splits at **94 − |alias| UTF-8 bytes of text per chunk** (the alias is ASCII-only per §4.1; an invalid alias falls back to the 24-character maximum, budget 70). Every chunk therefore also respects the §8.1 128-byte plaintext limit with room to spare, and every emitted envelope stays within the §8.2 decoded-payload bounds `[248, 400]` — a node rejects nothing new (§10.5).
+
+**Splitting rule (sender).**
+
+1. Split on code-point boundaries: a code point (including any surrogate pair) is NEVER split across chunks.
+2. Chunks are equal-ish: each at most the sender's budget (94 − |alias| bytes), starting from the byte lower bound `ceil(|text| / budget)` and growing to the fixed point of the equal-ish retargeting (a boundary can lose up to 3 bytes to a code point that does not fit — e.g. 33 emoji = 132 bytes need three chunks of 11 emoji, not two).
+3. A text that already fits one envelope is sent FLAT (§4.1, byte-identical construction).
+4. All chunks share the same `created_at`, `ttl` and inner `t` (§15 invariant: no life extension, no per-chunk TTL games). The sender generates ONE random `g` per message and emits exactly one envelope per chunk, each with a fresh ephemeral key pair and nonce (§4.2).
+5. Hard cap: **n ≤ 16** — a text needing more envelopes is refused by the composer. The UI previews the envelope count BEFORE sending ("will send N envelopes") and warns when N ≥ 8 (see the capacity math below). After sending, ALL chunk envelope ids join the sender's `known_ids` (§11) so it never re-pulls its own chunks.
+
+**Reassembly (recipient).** The recipient groups arrivals by the message id `g` (SPA storage: the `inbox_parts` store, created by the additive-only, idempotent schema-version-2 migration of §15.6). Each arrival merges into the partial state for its `g`:
+
+- Chunks may arrive in ANY order; the full text is the chunk texts concatenated in **index** order, never arrival order.
+- Duplicate chunks are no-ops (first write per index wins). Upstream envelope-id dedup (§6.2, §10.4) normally absorbs re-delivery already, but the reassembler MUST tolerate it anyway.
+- When all `n` chunks are held, the message is exposed as ONE inbox message (sender alias and inner `t` of the chunks) and the partial state is deleted.
+- A partial renders as "message i+1/N — still traveling" and expires with its chunks: the partial's deadline is the shared `created_at + ttl` (exclusive expiry — the §10.6 boundary), swept **passively** on sync and inbox load, never by a background timer (the SPA has none).
+- Two honestly signed chunks with the same `g` but conflicting metadata cannot be produced by a peer (the signature covers `g`, `i`, `n`); a sender-side anomaly simply leaves the partial incomplete, and the TTL sweep bounds its lifetime.
+
+**Versioning (§15-style).** `w` applies the §15 versioning philosophy inside the box: `"chunk1"` is convention version 1; an inner carrying an unknown `w` is corrupt by definition and silently discarded (§4.3); a future convention bump defines `"chunk2"` and beyond without repainting `g`/`i`/`n` and without touching the envelope format or `v`.
+
+**Mule capacity math (why the UI exposes the cost).** The cost model is honest and visible. With the alias `alice_77` (8 characters → budget 86), a 1 KiB message (1024 UTF-8 bytes) splits into **12 envelopes** — 12% of a mule's 100-envelope `transit_queue` — and the maximum message (16 chunks) occupies 16%. The composer preview shows "will send N envelopes" before sending and warns at N ≥ 8, so the occupancy of the shared mule capacity is a visible, user-approved cost rather than a hidden one; the mule telemetry panel (§11) shows the queue occupancy itself.
 
 ## 5. Canonical serialization (binding)
 
@@ -142,6 +204,8 @@ The verifier reconstructs this exact byte string from the decrypted fields. Exam
 ```
 {"m":"Hola Bob","a":"alice_77","k":"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=","t":1759500001}
 ```
+
+**Chunked messages** (§4.4) use a NEW canonical form: this string with `,"w":<w>,"g":<g>,"i":<i>,"n":<n>` appended (fixed order). The flat form above is never altered by that extension — plain messages sign exactly the bytes shown here.
 
 ### 5.2 Hashed byte string (for the envelope `id`)
 
@@ -246,6 +310,8 @@ Worked sizes:
 | `m=128`, `a=24` (max) | 328 B | 400 B | 536 | ~696 |
 
 The master prompt's ~180–250 B payload target is met at the floor (248 B ≤ 256 B logical budget); a full 128-byte message with signature and alias inside exceeds it on purpose — that case is exactly what the Phase 3 fragmentation scheme handles (§14.3). On Wi-Fi (Phase 1) the JSON/Base64 inflation is irrelevant.
+
+**Chunked inners (§4.4).** A chunked inner adds at most 58 bytes for `w`, `g`, `i`, `n` (13 + 31 + 7 + 7), so `payload = 248 + M + A + 58`; the §4.4 splitting budget (`M ≤ 94 − |alias|`) is exactly the condition that keeps every chunk envelope within `[248, 400]`. The bounds themselves are unchanged.
 
 Server-side envelope validation MUST enforce: `payload` decodes from Base64 and its decoded length is within `[248, 400]` bytes. The server cannot inspect `inner_json` (encrypted) and MUST NOT try.
 
@@ -429,9 +495,9 @@ DELETE FROM envelopes WHERE created_at + ttl < now;
 ## 11. Client (mule) behavior — Module C normative summary
 
 - **Registration (once):** alias input (validated client-side against the alias regex) → generate Ed25519 + X25519 key pairs → publish `{"alias","pubkey","x25519"}` to `POST /api/v1/directory`. Private keys stay in `IndexedDB` (`identity` store). Manual seed backup (copyable text) and import MUST be offered to survive browser data wipes.
-- **Composition:** recipient picked from the directory; text area with a visible **128-byte UTF-8 counter**; send builds the envelope exactly per §4.2/§5/§6.
+- **Composition:** recipient picked from the directory; text area with a visible **128-byte UTF-8 counter** (per envelope — a longer text is split into chunk envelopes per §4.4, with the envelope count previewed before sending and a warning when it would occupy a large share of a mule queue); send builds the envelope(s) exactly per §4.2/§4.4/§5/§6 and puts every emitted envelope id in `known_ids`.
 - **Sync:** automatic on page load plus a manual button. Push the whole `transit_queue` and `known_ids` (union of inbox ids ∪ transit ids ∪ previously seen/dismissed ids ∪ ids just pushed), with `limit` = 50. Classify `pull_envelopes`:
-  - `dest_hint == own hint` → attempt decrypt + verify (§4.3); success → `inbox`; failure → discard silently.
+  - `dest_hint == own hint` → attempt decrypt + verify (§4.3); success → `inbox` — for a chunked inner (§4.4), merge into the reassembly state keyed by `g`: the message renders when all `n` chunks arrived, partials render as "message i+1/N — still traveling" and expire with the chunks' shared TTL (passive sweep on sync/load); failure → discard silently.
   - otherwise → `transit_queue`; if it would exceed **100** envelopes, evict oldest by `created_at` (FIFO).
 - **UI (mandatory):** registration screen, directory recipient selector, composer with byte counter, inbox with sender alias and time, mule telemetry panel ("Foreign envelopes in transit: X / Capacity: 100") and last-sync status, and the captive-browser banner: "Open this in your full browser: `http://offgrid.local:8080`" (visible, copyable URL) — see §13.4.
 - **Storage:** `IndexedDB` database `dtn_local_store` v1 with stores `identity` (singleton), `inbox`, `transit_queue`; schema migrations by version number. Store upgrades MUST be implemented as the explicit, ordered, additive-only, idempotent migrations chain formalized in §15.6 (the `onupgradeneeded` scaffold of `node/web/js/store.js`).
@@ -717,9 +783,11 @@ A build claiming conformance to this section MUST be covered by tests for each o
 
 **Module B (node daemon) MUST:** implement the schema and pragmas of §9; the nine endpoints with the exact status codes, limits and redirect/exemption behavior of §10 (including the diagnostics surface of §10.7: the health snapshot and the operator status view, aggregate-only, with RAM-only counters, the 1-second snapshot cache and the per-IP diagnostics budget); envelope validation of §10.5; the versioning policy of §15 (supported-set admission, `user_version` migration chain, downgrade refusal, capabilities advertisement); `INSERT OR IGNORE` dedup; the inclusive/exclusive expiry boundary of §10.4/§10.6; the 15-minute + startup cleanup; the canonical-host middleware with captive-probe exemption; the per-client admission control and clean storage-error shed of §10.1 (`429 rate_limited` with `Retry-After` on the write paths, `507 storage_unavailable` on sync storage errors — issue #16); no decryption, no signature verification, no `id` recomputation requirement.
 
-**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
+**Module C (SPA) MUST:** embed tweetnacl.js inline and source all randomness from `crypto.getRandomValues` (§7); implement sign-then-encrypt with the canonical serializations of §5; derive `dest_hint` and `id` per §6; enforce every client-side limit of §8.1 (128-byte counter, alias regex, 100-envelope FIFO transit queue, known_ids composition including own pushes); implement the §4.4 long-message convention (split long texts on code-point boundaries within the per-sender budget, sign the `w`/`g`/`i`/`n` metadata, enforce the n ≤ 16 cap with a pre-send envelope-count preview, reassemble by group id `g` out-of-order and duplicate-tolerantly, render partials as "still traveling" and expire them with the chunks' shared TTL via passive sweeps, additive store migrations for the partial state); implement the sync algorithm and silent-corruption handling of §11; honor the mule-side rules of §15.6 (capabilities check before converting, negotiation ceiling, additive store migrations); display the canonical URL and the full-browser banner (§12, §13.4).
 
 ## Changelog
+
+- **1.4.0 (2026-10-04, issue #24 — long-message chunking):** added §4.4 "Long messages: transparent client-side chunking": texts longer than the 128-byte plaintext limit are split entirely on the client into several ordinary protocol-conforming envelopes that the recipient reassembles into one message, with no node, mule or envelope-format change. The chunked inner carries exactly four extra members inside the box — `w` (the `"chunk1"` inner-schema wire tag, the §15-style versioned tag; unknown tags are corrupt; a flat inner without `w` stays valid forever), `g` (the stable 16-byte random message id, Base64, shared by all chunks and referenceable by future features such as acks), `i` (zero-based index) and `n` (total, 2..16) — and the signature COVERS them: the §4.4 signed byte string is the §5.1 string with the four members appended in fixed order, a new canonical form under which the plain §5.1 string remains byte-identical. Binding splitting rules: per-chunk text budget `94 − |alias|` UTF-8 bytes (derived normatively from §8.2: the metadata costs at most 58 inner bytes, so `payload = 248 + M + A + 58 ≤ 400` — every chunk envelope stays within the §8.2 bounds and nodes reject nothing new), code points never split, equal-ish chunks, shared `created_at`/`ttl`/`t` (no life extension), one envelope per chunk with fresh ephemeral keys, hard cap n ≤ 16, all chunk ids in the sender's `known_ids`. Recipient rules: reassembly by `g` out-of-order and duplicate-tolerantly (first write per index wins), one rendered message on completion, partials shown as "message i+1/N — still traveling" and expiring with the chunks' shared TTL via passive sweeps (no timers), SPA storage extended by the additive-only, idempotent schema-version-2 migration (new `inbox_parts` store, §15.6 chain). The composer previews the envelope cost before sending and warns at n ≥ 8 — with the worked capacity math (alias `alice_77`: 1 KiB = 12 envelopes = 12% of a mule's 100-envelope `transit_queue`; the 16-chunk maximum = 16%) — so the honest cost of a long message is visible, not hidden. §4.1/§4.3/§5.1/§8.2/§11 pointers added; §16 Module C conformance extended. Additive only: no frozen field, limit, canonical flat form, envelope-format or node behavior changed.
 
 - **1.3.0 (2026-10-04, issue #31 — health diagnostics):** added §10.7 "Health snapshot and operator status view": the new `GET /api/v1/health` endpoint (machine-readable, aggregate-only snapshot — build identity, supported envelope versions, storage schema version, process uptime, live envelope count and §8.1 capacity, directory size, database size on disk, the most recent §10.6 cleanup, and process-lifetime RAM-only counters for pushes accepted/rejected with per-class breakdown, dedup hits and TTL sweeps) and the `GET /status` operator status view (server-rendered HTML from the same cached snapshot, no JavaScript, not linked from the portal, behind the same §10.2 canonical-host middleware). Both diagnostics endpoints are bounded: they answer from a snapshot cached at most one second (never one store read per request) and sit behind a per-source-IP budget (burst 60, refill 1/second, `429 rate_limited` + `Retry-After`), recorded as an explicit exception to the otherwise-unbudgeted GET read path in §10.1; an unreadable store sheds `507 storage_unavailable` instead of fabricating numbers. Privacy is normative (reviewed against §13): aggregates only, no per-envelope/per-alias/per-IP datum anywhere in the response, persistence or logs — counters are RAM-only atomics that die on restart, the same §13.6/A7 constraint the hardening defenses already obey. `capabilities` (§15.5) and `health` deliberately remain two documents (stable negotiation contract vs. volatile operational snapshot) with the four shared identity members (`api`, `build`, `envelope_versions`, `schema_version`) guaranteed identical by single-sourcing in the daemon. `status` is liveness only — no fabricated health judgments and no watchdog detail (the `sd_notify` implementation exposes no queryable state). §16 Module B conformance extended to the nine-endpoint surface. Additive only: no frozen field, limit, envelope-format or existing endpoint behavior changed.
 

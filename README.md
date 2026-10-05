@@ -33,12 +33,12 @@ Key design decisions:
 - **Same-origin trick** — every node serves the portal at the same URL, `http://offgrid.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
 - **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Nodes and mules see only random bytes and a truncated key hash — never content, sender identity or the full recipient key.
 - **Self-contained nodes** — a single static Go binary serves the API and the whole SPA (embedded via `go:embed`). No CDNs, no cloud calls, nothing external; everything is served from the Pi.
-- **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
+- **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext per envelope — longer texts are split client-side into several ordinary envelopes and reassembled transparently, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
 
 ### How a message travels
 
 1. Alice registers once on the portal: alias + key pairs generated on her device; private keys never leave her browser's `IndexedDB`.
-2. She picks Bob from the node's public directory and writes a message (up to 128 bytes). Her client signs, encrypts, addresses the envelope with a blind `dest_hint` and computes its `id`.
+2. She picks Bob from the node's public directory and writes a message (up to 128 bytes per envelope; her client splits longer texts into several envelopes — 16 at most — and Bob's reassembles them into one message). Her client signs, encrypts, addresses each envelope with a blind `dest_hint` and computes its `id`.
 3. The envelope enters a node via `POST /api/v1/sync` — the node only sees random bytes and a truncated key hash.
 4. Any syncing user becomes a mule: unknown envelopes ride along in their `transit_queue`.
 5. At the next node the mule pushes the envelope; the nodes never talk to each other.
@@ -75,7 +75,7 @@ Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
 1. **Joins the network** — the captive portal opens automatically (or browse to `http://offgrid.local:8080`).
 2. **Registers once** — picks an alias; key pairs are generated on the device and stay there (with an optional seed backup).
-3. **Writes messages** — picks a recipient from the public directory (alias + public key) and sends up to 128 bytes of UTF-8 text.
+3. **Writes messages** — picks a recipient from the public directory (alias + public key) and writes UTF-8 text: up to 128 bytes per envelope, and the composer splits anything longer into at most 16 envelopes (with the envelope count shown before sending).
 4. **Syncs automatically on page load** — pushes what it carries, pulls what's addressed to it into the inbox, and keeps unknown envelopes (up to 100) in the transit queue for the next node. A telemetry panel shows what the phone is carrying: *"Foreign envelopes in transit: X / Capacity: Y"*.
 
 That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.

@@ -6,7 +6,7 @@
 # coordination notice in AGENTS.md at the repo root. The job body below is
 # unchanged and still runs the FULL documented suite (docs/BUILD.md §4)
 # plus the chaos suite:
-#   * make test  — go unit tests, the 3 headless SPA tests, the curl E2E and
+#   * make test  — go unit tests, the 4 headless SPA tests, the curl E2E and
 #     the Pi hardening structure test (rootless, artifact-level);
 #   * make chaos — the failure-injection harness of tests/chaos/FAILURE_MATRIX.md.
 #     The chaos scripts are Linux-first for exactly this job: on the ubuntu
