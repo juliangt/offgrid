@@ -162,13 +162,17 @@ function buildMessageEnvelopes(opts) {
  * Recipient side: pure reassembly state (§4.4).
  *
  * A partial state is one inbox_parts record:
- *   { g, n, a, t, created_at, ttl, received_at, parts: { "<i>": {m, id} } }
+ *   { g, n, a, k, t, created_at, ttl, received_at, parts: { "<i>": {m, id} } }
  * `created_at`/`ttl` come from the (shared) envelope fields, so the
  * partial expires exactly when its chunks expire (§4.4: aligned expiry).
+ * `k` is the sender's Ed25519 public key (§4.1 inner field, additive
+ * since §4.5): the ack emitted at reassembly completion (§4.5) resolves
+ * the sender's X25519 key from it via the directory. Partials persisted
+ * before §4.5 carry no `k` — their completion emits no ack (best-effort).
  * ------------------------------------------------------------------- */
 
-function chunkNewState(g, n, a, t, createdAt, ttl, receivedAt) {
-  return { g: g, n: n, a: a, t: t, created_at: createdAt, ttl: ttl,
+function chunkNewState(g, n, a, t, createdAt, ttl, receivedAt, k) {
+  return { g: g, n: n, a: a, k: k, t: t, created_at: createdAt, ttl: ttl,
            received_at: receivedAt, parts: {} };
 }
 

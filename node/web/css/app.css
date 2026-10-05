@@ -147,6 +147,12 @@
   .msg-head .time { color: var(--muted); }
   .msg-body { white-space: pre-wrap; word-break: break-word; }
 
+  /* Sent list (§4.5 delivery feedback): state line under each sent message. */
+  .sent .msg-body { font-size: 0.95rem; }
+  .sent-state { font-size: 0.82rem; margin-top: 4px; color: var(--muted); }
+  .sent-state.delivered { color: var(--accent); font-weight: 600; }
+  .sent-state.queued, .sent-state.sent { color: var(--muted); }
+
   .counter-row { display: flex; justify-content: flex-end; gap: 8px; margin: 4px 0 10px; }
   #byte-counter { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
   #byte-counter.over { color: var(--danger); font-weight: 700; }
