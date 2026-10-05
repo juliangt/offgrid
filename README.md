@@ -65,6 +65,8 @@ sudo ./install.sh --offline /media/usb --country AR
 
 The full manual path (build + copy) is in [`docs/BUILD.md`](docs/BUILD.md) §5. Prebuilt binaries for armv6/armv7/arm64 plus `SHA256SUMS` are attached to every release tag.
 
+**Already provisioned?** Upgrade in place — no reflash, no data loss: `sudo ./install.sh --upgrade --offline /media/usb` (or `--ref vX.Y.Z` online); the node backs up the store + previous binary first, and a health gate rolls everything back automatically if the new release does not come up healthy. See [`docs/BUILD.md`](docs/BUILD.md) §5 Path 4 and the runbook [`docs/RUNBOOK.md`](docs/RUNBOOK.md) §4.8.
+
 ### Hardware
 
 For solar-powered deployment (~1 W continuous target): solar + LiFePO4 sizing math, wiring, SD card and enclosure guidance are in [`docs/hardware.md`](docs/hardware.md).
@@ -131,7 +133,7 @@ offgrid/
 | [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
 | [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
-| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), escalation |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), upgrading a deployed node + rollback, escalation |
 | [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
 | [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
 

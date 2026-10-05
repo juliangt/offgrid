@@ -19,7 +19,14 @@
 set -eu
 cd "$(dirname "$0")"
 
-LDFLAGS="-s -w"
+# Build identifier (issue #22): stamped into every binary via -X so the
+# upgrade health gate can verify WHICH binary is actually serving (the
+# "build" member of GET /api/v1/health, §10.7). git describe names tags and
+# commits; outside a git tree the fallback keeps the historical "dev".
+# The -X key is main.build: the linker records a source-built main package as
+# "main", so the module-path form does not resolve (main.go documents this).
+BUILD_ID="$(git describe --always --dirty 2>/dev/null || echo dev)"
+LDFLAGS="-s -w -X main.build=$BUILD_ID"
 
 # 64-bit: Raspberry Pi Zero 2 W, 3, 4, 400, 5 and the CM4/CM5 (64-bit OS).
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="$LDFLAGS" -o dtn-node-linux-arm64 .

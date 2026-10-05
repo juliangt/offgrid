@@ -140,6 +140,37 @@ Pin a version with `--ref vX.Y.Z`; add `--allow-ssh` only if this deployment del
 
 Planned stop: `sudo poweroff` — a clean close checkpoints the WAL; then let the panel run the controller idle (or use the controller's LOAD switch / cover the panel per `docs/hardware.md`). A dirty yank is survivable by design (`tests/chaos/FAILURE_MATRIX.md` row 12) but is never the shutdown procedure when a planned stop is possible.
 
+### 4.8 Upgrading a deployed node (and rolling one back)
+
+The non-destructive upgrade of issue #22 (`docs/BUILD.md` §5 Path 4) replaces the binary and re-runs the idempotent provisioning subset WITHOUT a reflash: the envelope store, the directory and the provisioning are kept, and the machine only declares success after a health gate. On the Pi:
+
+```bash
+sudo ./install.sh --upgrade --offline /media/usb   # release bundle on a USB stick (field default)
+sudo ./install.sh --upgrade --ref vX.Y.Z           # online, pinned release tag
+```
+
+**Pre-upgrade checklist** (a node is a remote island — carry the bundle AND the undo path):
+
+1. Note the current state, from any connected device or the console: `http://offgrid.local:8080/status` (§2.1) — liveness, build, store size — and on the console `systemctl status dtn-node` (nothing flapping, §4.2). An upgrade of a wedged node starts with §4.1 (reboot first), not with a new binary.
+2. Charge/size the power budget: the upgrade stops `dtn-node` for the backup + swap (seconds to a couple of minutes) and the gate adds up to 120 s — no planned power cut in that window (solar units: §4.7).
+3. Bring the release bundle (`dtn-node-linux-*` for the board's ISA + `SHA256SUMS` + `raspberry-<tag>.tar.gz`, checksum-verified) and enough free space on the data card for a backup generation (store size + binary, kept ×3 — see retention below).
+4. Know the undo before you need it: after a successful upgrade the previous binary + store sit in `/var/lib/dtn-node/backups/upgrade-<UTC ts>-<build>/` — the rollback command is `sudo ./install.sh --rollback` (default: latest generation; `--from NAME` picks one).
+
+**What the health gate means.** After the swap the installer polls `GET /api/v1/health` (§10.7) for up to 120 s and only declares success when: HTTP 200, `"status":"ok"`, the serving `build` member is the staged binary's id (the swap really took), `schema_version` matches it, and — when the `sqlite3` CLI is present — the live store `PRAGMA user_version` equals the served `schema_version` (the §15.3 migrations really landed). `upgrade:` log lines narrate every verdict; a green run ends `UPGRADE OK: build=<id> schema_version=<n>`.
+
+**Automatic rollback.** ANY failure — provisioning error, daemon that refuses to start, gate timeout — triggers the rollback by itself: stop → restore the generation (binary + database; the displaced store is preserved as `/var/lib/dtn-node/pre-restore-<UTC>/` evidence, §4.3 discipline) → restart → re-verify health against the OLD expectations. The run ends loudly with `upgrade aborted; the node was rolled back`. If even the rolled-back node fails the gate, the log says `ROLLBACK INCOMPLETE` — treat it as a §4.1/§4.3 case and escalate (§5).
+
+**Manual rollback.** Same machinery, invoked by hand (e.g. a release misbehaves hours later):
+
+```bash
+sudo ./install.sh --rollback                        # list generations, restore the latest
+sudo ./install.sh --rollback --from upgrade-<ts>-<build>   # restore a specific generation
+```
+
+This is ALSO the documented recovery for a binary-only downgrade: the forward-only migration chain refuses to start on an older schema (`docs/protocol.md` §15.3, refusal naming both versions) — do NOT swap binaries again, run `--rollback`, which restores binary AND database together.
+
+**Retention.** Backup generations live under `/var/lib/dtn-node/backups/`, named `upgrade-<UTC ts>-<build>` (they sort in creation order), and the rotation keeps the LAST 3 — every successful upgrade prunes older ones. Three generations cover a release hop and its rollback-of-the-rollback; when disk pressure matters, prune by hand the same way (delete whole generation directories, never files inside them). The `pre-restore-*` evidence dirs are kept until you decide otherwise (§4.3: keep when recording a field failure, delete once noted).
+
 ## 5. Escalation — what the field CANNOT fix
 
 | Not fixable in the field | The honest answer |

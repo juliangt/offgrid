@@ -561,13 +561,21 @@ final_report() {
 EOF
 }
 
-preflight
-disable_networkmanager
-install_packages
-static_ip
-install_configs
-install_binary
-enable_units
-field_hardening
-persist_firewall
-final_report
+# --- dispatch ----------------------------------------------------------------------
+# STEPS (issue #22): optional space-separated subset selector for re-runs.
+# install.sh --upgrade re-runs exactly the steps that can carry CHANGED files
+# (preflight static_ip install_configs install_binary enable_units
+# field_hardening persist_firewall) — every one idempotent and network-free,
+# so an offline USB upgrade works; the NetworkManager and apt steps are
+# one-time setup and a reflash keeps the full default. Every step stays
+# individually idempotent (install_file compares before replacing and keeps a
+# .dtn-bak of the previous file).
+STEPS="${STEPS:-preflight disable_networkmanager install_packages static_ip install_configs install_binary enable_units field_hardening persist_firewall final_report}"
+for step_name in $STEPS; do
+    case "$step_name" in
+        preflight | disable_networkmanager | install_packages | static_ip | install_configs | install_binary | enable_units | field_hardening | persist_firewall | final_report)
+            "$step_name"
+            ;;
+        *) die "unknown step in STEPS: $step_name" ;;
+    esac
+done

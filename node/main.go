@@ -53,7 +53,12 @@ const cleanupInterval = 15 * time.Minute
 // (§15.5: non-empty, free-form — version or VCS string). It defaults to
 // "dev"; release builds stamp it at link time, e.g.:
 //
-//	go build -ldflags "-X offgrid/dtn-node.build=$(git describe --always --dirty)"
+//	go build -ldflags "-X main.build=$(git describe --always --dirty)"
+//
+// The -X key is main.build (not the module path): the linker records a
+// source-built main package as "main", so the module-path form does not
+// resolve. node/build.sh stamps exactly this way (issue #22: the upgrade
+// health gate identities the serving binary by this member).
 var build = "dev"
 
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.

@@ -26,17 +26,35 @@
 # LOCAL — running from a repository checkout that already carries a build
 # (node/dtn-node-linux-* next to raspberry/): nothing is downloaded.
 #
+# UPGRADE — an already-provisioned node (issue #22: no reflash, no data loss):
+#
+#   sudo ./install.sh --upgrade --offline /media/usb   # from the release bundle
+#   sudo ./install.sh --upgrade --ref vX.Y.Z           # online, pinned tag
+#   sudo ./install.sh --rollback                       # back to the previous release
+#
+# The upgrade stops dtn-node, backs up the store (+ WAL) and the previous
+# binary into a generationed backup dir (keeping the last 3 generations),
+# re-runs the idempotent provisioning subset, swaps the binary, restarts and
+# only declares success after the GET /api/v1/health gate (status ok + the
+# new binary's schema_version + build identity). ANY failure rolls the node
+# back automatically. See docs/BUILD.md §5 Path 4 and docs/RUNBOOK.md §4.8.
+#
 # Options:
 #   --country XX    regulatory country for hostapd (default AR, passed through)
 #   --allow-ssh     keep SSH reachable from AP clients (passed through)
 #   --offline DIR   install from a release bundle in DIR instead of downloading
 #   --repo R        GitHub repository as OWNER/REPO (default juliangt/offgrid)
 #   --ref TAG       pin the release tag instead of the latest one
-#   --reboot        reboot automatically after provisioning succeeds
+#   --reboot        reboot automatically after provisioning succeeds (fresh
+#                   installs only; an upgrade activates via the service restart)
+#   --upgrade       upgrade an ALREADY-PROVISIONED node instead of a fresh install
+#   --rollback      restore the previous binary + store from a backup generation
+#   --from NAME     backup generation for --rollback (default: the latest)
 #   -h | --help     this help
 #
-# See docs/pi-models.md for the per-model support matrix and docs/BUILD.md §5
-# for the manual (scp + provision.sh) deployment path.
+# See docs/pi-models.md for the per-model support matrix, docs/BUILD.md §5
+# for the manual (scp + provision.sh) deployment path and docs/BUILD.md §5
+# Path 4 for the upgrade contract.
 
 set -euo pipefail
 
@@ -45,6 +63,13 @@ TAG=""          # empty = latest release
 OFFLINE_DIR=""
 AUTO_REBOOT=0
 LOCAL_TREE=0
+MODE="install"  # install | upgrade | rollback (issue #22)
+FROM_GEN=""
+# The library's default, pre-seeded for set -u: the upgrade preflight
+# (require_provisioned_node) runs BEFORE a lone install.sh resolves the
+# bundle that carries raspberry/upgrade.sh. Sourcing the library later keeps
+# this value (its own ${DTN_INSTALL_DIR:-...} assignment is a no-op then).
+DTN_INSTALL_DIR="${DTN_INSTALL_DIR:-/opt/dtn-node}"
 export COUNTRY="${COUNTRY:-AR}"
 export ALLOW_SSH="${ALLOW_SSH:-0}"
 
@@ -63,17 +88,68 @@ while [ $# -gt 0 ]; do
         --repo) REPO="$2"; shift 2 ;;
         --ref) TAG="$2"; shift 2 ;;
         --reboot) AUTO_REBOOT=1; shift ;;
+        --upgrade) MODE="upgrade"; shift ;;
+        --rollback) MODE="rollback"; shift ;;
+        --from) FROM_GEN="$2"; shift 2 ;;
         -h | --help) usage; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
     esac
 done
 
+# The upgrade/rollback machinery (issue #22) lives in its own file so the
+# rootless acceptance test can source and drive it: tests/upgrade_e2e.sh
+# exercises these very functions against a temp "node".
+#
+# It is SOURCED ONLY WHEN IT RIDES ALONG (repository checkout, extracted
+# release tarball, bundle tree): the curl|bash one-liner (docs/BUILD.md §5
+# Path 1) fetches install.sh ALONE — for it, $0 is the piped stdin and no
+# sibling upgrade.sh exists; there the library arrives with the release
+# bundle resolved further below and is sourced from $SRCDIR before the
+# upgrade dispatch. Only --rollback needs the library with NO bundle, so it
+# demands the tree explicitly (require_upgrade_lib).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+UPGRADE_LIB=""
+if [ -f "$SCRIPT_DIR/upgrade.sh" ]; then
+    UPGRADE_LIB="$SCRIPT_DIR/upgrade.sh"
+    # shellcheck source=upgrade.sh
+    . "$UPGRADE_LIB"
+fi
+require_upgrade_lib() {
+    [ -n "$UPGRADE_LIB" ] \
+        || die "raspberry/upgrade.sh not found next to install.sh: --rollback needs the provisioning tree (run it from the release bundle or an extracted raspberry-<tag>.tar.gz)"
+}
+
+# --- preflight helpers ------------------------------------------------------------
+
+require_root_pi() {
+    [ "$(id -u)" -eq 0 ] || die "must run as root (sudo)"
+    [ -f /proc/device-tree/model ] || die "no /proc/device-tree/model: this is not a Raspberry Pi"
+    grep -q "Raspberry Pi" /proc/device-tree/model || die "$(tr -d '\0' < /proc/device-tree/model) is not a Raspberry Pi"
+}
+
+# require_provisioned_node — the upgrade/rollback modes are meaningless (and
+# dangerous to improvise) on a box that was never provisioned: refuse with
+# guidance instead of half-creating a deployment.
+require_provisioned_node() {
+    [ -f /etc/systemd/system/dtn-node.service ] \
+        || die "no dtn-node unit at /etc/systemd/system/dtn-node.service: this box was never provisioned — use the fresh-install path (see --help)"
+    [ -x "$DTN_INSTALL_DIR/dtn-node" ] \
+        || die "no daemon binary at $DTN_INSTALL_DIR/dtn-node: nothing to upgrade — use the fresh-install path (see --help)"
+}
+
+# --- rollback mode: no bundle needed, just the backup generations ------------------
+
+if [ "$MODE" = "rollback" ]; then
+    require_root_pi
+    require_upgrade_lib
+    require_provisioned_node
+    upgrade_rollback_main "$FROM_GEN"
+    exit 0
+fi
+
 # --- preflight -----------------------------------------------------------------
 
-[ "$(id -u)" -eq 0 ] || die "must run as root (sudo)"
-[ -f /proc/device-tree/model ] || die "no /proc/device-tree/model: this is not a Raspberry Pi"
-grep -q "Raspberry Pi" /proc/device-tree/model || die "$(tr -d '\0' < /proc/device-tree/model) is not a Raspberry Pi"
-
+require_root_pi
 BOARD="$(tr -d '\0' < /proc/device-tree/model)"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -83,6 +159,12 @@ case "$ARCH" in
     *) die "unsupported architecture '$ARCH' (need aarch64, armv7l or armv6l)" ;;
 esac
 log "board: $BOARD (userland $ARCH -> dtn-node-linux-$BINARCH)"
+
+# An upgrade must find the deployment it is supposed to upgrade (issue #22:
+# refuse a fresh box with guidance rather than half-provisioning it).
+if [ "$MODE" = "upgrade" ]; then
+    require_provisioned_node
+fi
 
 # fetch URL DEST — curl when present, wget otherwise (Raspberry Pi OS Lite
 # does not guarantee curl on very old images).
@@ -123,7 +205,6 @@ if [ -n "$OFFLINE_DIR" ]; then
     cp "$OFFLINE_DIR/SHA256SUMS" "$TMP/SHA256SUMS"
     tar -xzf "$OFFLINE_DIR"/raspberry-*.tar.gz -C "$SRCDIR"
 else
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     if [ -f "$SCRIPT_DIR/provision.sh" ] && [ -f "$SCRIPT_DIR/../node/dtn-node-linux-$BINARCH" ]; then
         log "local checkout with a prebuilt binary detected: nothing to download"
         LOCAL_TREE=1
@@ -155,6 +236,23 @@ if [ "$LOCAL_TREE" != "1" ]; then
     actual="$(sha256sum "$SRCDIR/node/dtn-node-linux-$BINARCH" | cut -d' ' -f1)"
     [ "$expected" = "$actual" ] || die "checksum mismatch for dtn-node-linux-$BINARCH (expected $expected, got $actual)"
     log "checksum OK for dtn-node-linux-$BINARCH"
+fi
+
+# --- upgrade mode: backup -> swap -> health gate -> rollback-on-failure -----------
+# When install.sh ran alone (curl|bash, a copied script), the library rides in
+# with the resolved bundle; a tree-carrying checkout already sourced it above.
+if [ -z "$UPGRADE_LIB" ] && [ -f "$SRCDIR/raspberry/upgrade.sh" ]; then
+    # shellcheck source=upgrade.sh
+    . "$SRCDIR/raspberry/upgrade.sh"
+    UPGRADE_LIB="$SRCDIR/raspberry/upgrade.sh"
+fi
+if [ "$MODE" = "upgrade" ]; then
+    require_upgrade_lib
+    if [ "$AUTO_REBOOT" = "1" ]; then
+        log "note: --reboot is ignored in --upgrade mode (the service restart is the activation step)"
+    fi
+    upgrade_node "$SRCDIR/node/dtn-node-linux-$BINARCH" "$SRCDIR/raspberry"
+    exit 0
 fi
 
 # --- provision (verified, idempotent, never starts services) -----------------------
