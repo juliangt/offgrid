@@ -161,6 +161,26 @@
   .status-ok { color: var(--accent); }
   .status-error { color: var(--danger); }
 
+  /* §4.7 identity QR (issue #28): the canvas shows the matrix at its
+     computed module size; pixelated keeps the modules crisp. */
+  #qr-canvas {
+    display: block;
+    margin: 8px auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #ffffff;
+    image-rendering: pixelated;
+    max-width: 100%;
+  }
+  #scan-video {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    margin: 8px auto;
+    border-radius: 8px;
+    background: #000;
+  }
+
   dl { margin: 0; }
   dt { font-weight: 600; font-size: 0.85rem; color: var(--muted); margin-top: 10px; }
   dd { margin: 2px 0 0; }

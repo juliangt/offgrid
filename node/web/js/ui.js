@@ -31,6 +31,9 @@ function setText(id, text) {
 var uiState = {
   identity: null,   /* identity record incl. alias, loaded from the store */
   directory: [],    /* last GET /api/v1/directory result */
+  contacts: [],     /* §4.7 local contacts (IndexedDB `contacts` store) */
+  recipients: [],   /* §4.7 merged picker: contacts ∪ directory, deduped by key */
+  directoryError: false, /* last directory fetch failed (picker shows contacts only) */
   sending: false
 };
 
@@ -153,7 +156,7 @@ function showScreen(name) {
   showEl($(name === "register" ? "screen-register" : "screen-app"));
 }
 
-var TABS = ["compose", "inbox", "identity"];
+var TABS = ["compose", "inbox", "contacts", "identity"];
 
 function selectTab(name) {
   for (var i = 0; i < TABS.length; i++) {
@@ -165,49 +168,75 @@ function selectTab(name) {
   }
   if (name === "inbox") renderInbox();
   if (name === "identity") renderIdentityTab();
+  if (name === "contacts") renderContactsTab();
   if (name === "compose") { refreshDirectory(); renderSent(); }
+  /* Leaving the contacts tab (or entering another one) stops the camera —
+   * a scan session never outlives its tab. */
+  if (name !== "contacts") stopQrScan();
 }
 
-/* ----- directory (§10.3 GET) ----- */
+/* ----- recipients: directory (§10.3 GET) ∪ local contacts (§4.7) ----- */
+
+/* §4.7 offline-first recipient picker: the composer list is the MERGE of
+ * the local contacts and the node directory, deduped by the Ed25519 key
+ * (DTN.qrMergeRecipients). Contacts are shown even when the directory
+ * fetch fails (offline-first): a saved contact carries the X25519 key from
+ * the QR exchange, and the send path degrades per §6.1 (offline-cold
+ * static hint) and §4.6 (no bundle → identity-key addressing). */
+function loadContacts() {
+  return DTN.listContacts().then(function (rows) {
+    uiState.contacts = rows;
+    return rows;
+  }, function () {
+    uiState.contacts = [];
+    return [];
+  });
+}
 
 function refreshDirectory() {
   var select = $("compose-to");
   if (!select) return Promise.resolve([]);
   return getJson("/api/v1/directory").then(function (entries) {
     uiState.directory = Array.isArray(entries) ? entries : [];
+    uiState.directoryError = false;
     /* §6.1: every entry carries the server-set epoch of its upsert —
      * each one is a node-clock observation feeding the candidate set. */
     for (var i = 0; i < uiState.directory.length; i++) {
       if (uiState.directory[i]) noteObservedEpoch(uiState.directory[i].epoch);
     }
-    renderDirectory();
-    return uiState.directory;
+    return loadContacts();
   }, function () {
     uiState.directory = [];
-    select.textContent = "";
-    var opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "Could not load the directory. Retry with \"Refresh directory\".";
-    select.appendChild(opt);
-    updateSendEnabled();
-    return [];
+    uiState.directoryError = true;
+    return loadContacts();
+  }).then(function () {
+    uiState.recipients = DTN.qrMergeRecipients(uiState.directory, uiState.contacts);
+    renderRecipients();
+    return uiState.recipients;
   });
 }
 
-function renderDirectory() {
+function renderRecipients() {
   var select = $("compose-to");
   if (!select) return;
   select.textContent = "";
   var own = uiState.identity ? uiState.identity.signPublicB64 : null;
   var count = 0;
-  for (var i = 0; i < uiState.directory.length; i++) {
-    var entry = uiState.directory[i];
+  for (var i = 0; i < uiState.recipients.length; i++) {
+    var entry = uiState.recipients[i];
     if (!entry || !entry.alias || !entry.x25519) continue;
-    if (own && entry.pubkey === own) continue; /* never offer yourself as a recipient */
+    if (own && entry.ed === own) continue; /* never offer yourself as a recipient */
     var opt = document.createElement("option");
-    opt.value = entry.x25519;
-    opt.textContent = entry.alias + " · " + relativeTime(entry.last_seen || 0);
-    opt.title = "Last seen: " + absoluteTime(entry.last_seen || 0);
+    opt.value = entry.ed;
+    if (entry.in_directory) {
+      opt.textContent = entry.alias + " · " + relativeTime(entry.last_seen || 0);
+      opt.title = "Last seen: " + absoluteTime(entry.last_seen || 0);
+    } else {
+      /* §4.7: a contact the directory does not list — sendable offline. */
+      opt.textContent = entry.alias + " · saved contact";
+      opt.title = "From your in-person contacts (added " + relativeTime(entry.added_at || 0) +
+        "). Identity key: " + entry.ed;
+    }
     /* §4.6: an entry whose published bundle fails the client-side shape or
      * signature check is treated as bundle-less (identity fallback) — the
      * doctored-bundle defense — and the contact view surfaces the warning. */
@@ -224,8 +253,19 @@ function renderDirectory() {
   if (count === 0) {
     var empty = document.createElement("option");
     empty.value = "";
-    empty.textContent = "No other users are registered on this node yet.";
+    empty.textContent = uiState.directoryError
+      ? "Could not load the directory. Retry with \"Refresh directory\"."
+      : "No other users are registered on this node yet.";
     select.appendChild(empty);
+  }
+  var note = $("picker-note");
+  if (note) {
+    if (uiState.directoryError && count > 0) {
+      note.textContent = "The directory is unreachable — showing your saved contacts.";
+      showEl(note);
+    } else {
+      hideEl(note);
+    }
   }
   updateSendEnabled();
 }
@@ -233,8 +273,8 @@ function renderDirectory() {
 function currentRecipient() {
   var select = $("compose-to");
   if (!select || !select.value) return null;
-  for (var i = 0; i < uiState.directory.length; i++) {
-    if (uiState.directory[i] && uiState.directory[i].x25519 === select.value) return uiState.directory[i];
+  for (var i = 0; i < uiState.recipients.length; i++) {
+    if (uiState.recipients[i] && uiState.recipients[i].ed === select.value) return uiState.recipients[i];
   }
   return null;
 }
@@ -325,7 +365,7 @@ function onSend() {
 
   var entry = currentRecipient();
   if (!entry) {
-    showStatus(statusEl, "error", "Pick a recipient from the directory.");
+    showStatus(statusEl, "error", "Pick a recipient from the directory or your contacts (Contacts tab).");
     return;
   }
   var text = $("compose-text").value;
@@ -583,6 +623,229 @@ function toggleSeed() {
   btn.textContent = seedEl.hidden ? "Show seed" : "Hide seed";
 }
 
+/* ----- contacts tab (§4.7 identity QR, issue #28) -----
+ * Show my QR (canvas + the same payload as copyable text — the universal
+ * fallback), add a contact (camera scan when the platform offers
+ * BarcodeDetector, paste always), and the local contact list. All crypto
+ * lives in the engine (qr.js); this section is canvas/camera wiring only. */
+
+function qrReasonLabel(reason) {
+  switch (reason) {
+    case "bad_prefix":    return "this is not an Off-Grid identity payload (missing the OFFGRID1: header)";
+    case "bad_base64":    return "the payload text is damaged (invalid Base64)";
+    case "bad_json":      return "the payload text is damaged (unreadable content)";
+    case "bad_members":   return "the payload has an unexpected set of fields";
+    case "bad_version":   return "the payload uses an unknown version (your app may be outdated)";
+    case "bad_alias":     return "the payload carries an invalid alias";
+    case "bad_key":       return "the payload carries a malformed public key";
+    case "bad_ts":        return "the payload carries an invalid or future timestamp";
+    case "bad_crc":       return "the payload is corrupted (checksum mismatch) — ask the other person to show it again";
+    case "bad_signature": return "the payload failed its signature check — it may be tampered with";
+    default:              return "the payload was rejected (" + reason + ")";
+  }
+}
+
+/* Paint the §4.7 QR onto the canvas (vendored encoder matrix, quiet zone 4,
+ * maximum scanner contrast). On any failure the error is VISIBLE and the
+ * payload text below stays available — the paste/text path never depends
+ * on the canvas. */
+function renderQrCanvas(text) {
+  var canvas = $("qr-canvas");
+  var err = $("qr-error");
+  if (!canvas || !err) return;
+  try {
+    var m = DTN.qrMakeMatrix(text);
+    var quiet = DTN.QR_QUIET_ZONE_MODULES;
+    var px = Math.max(2, Math.floor(232 / (m.size + quiet * 2)));
+    var dim = (m.size + quiet * 2) * px;
+    canvas.width = dim;
+    canvas.height = dim;
+    var ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas is not available");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, dim, dim);
+    ctx.fillStyle = "#000000";
+    for (var r = 0; r < m.size; r++) {
+      for (var c = 0; c < m.size; c++) {
+        if (m.modules[r][c]) ctx.fillRect((c + quiet) * px, (r + quiet) * px, px, px);
+      }
+    }
+    showEl(canvas);
+    hideEl(err);
+  } catch (e) {
+    hideEl(canvas);
+    showEl(err);
+    err.textContent = "Could not render the QR code (" + e.message + "). Use the payload text below.";
+  }
+}
+
+function renderContactsList() {
+  return loadContacts().then(function (rows) {
+    var list = $("contacts-list");
+    var emptyMsg = $("contacts-empty");
+    if (!list) return;
+    list.textContent = "";
+    if (!rows.length) {
+      showEl(emptyMsg);
+      return;
+    }
+    hideEl(emptyMsg);
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var li = document.createElement("li");
+      var head = document.createElement("div");
+      head.className = "msg-head";
+      var alias = document.createElement("strong");
+      alias.textContent = row.alias;
+      var when = document.createElement("span");
+      when.className = "time";
+      when.textContent = (row.source === "qr" ? "scanned " : "pasted ") + relativeTime(row.added_at || 0);
+      when.title = absoluteTime(row.added_at || 0);
+      head.appendChild(alias);
+      head.appendChild(when);
+      var body = document.createElement("div");
+      body.className = "msg-body muted";
+      var key = document.createElement("code");
+      key.textContent = row.ed;
+      body.appendChild(key);
+      li.appendChild(head);
+      li.appendChild(body);
+      list.appendChild(li);
+    }
+  });
+}
+
+function renderContactsTab() {
+  var identity = uiState.identity;
+  if (!identity) return;
+  var payload = "";
+  try {
+    payload = DTN.qrBuildPayload(identity, nowSec());
+  } catch (e) {
+    payload = "";
+  }
+  var payloadEl = $("qr-payload");
+  if (payloadEl) payloadEl.value = payload;
+  if (payload) renderQrCanvas(payload);
+  var scanBtn = $("btn-scan-qr");
+  var notice = $("scan-notice");
+  if (qrScanSupported()) {
+    hideEl(notice);
+    showEl(scanBtn);
+  } else {
+    /* §4.7 degradation (honest notice): iOS Safari and every captive-portal
+     * mini-browser lack BarcodeDetector/camera access — the paste path is
+     * the documented universal fallback. */
+    if (notice) {
+      notice.textContent = "Camera scanning is not available in this browser (it needs the BarcodeDetector API plus camera access — Android Chrome has it). Ask the other person to show the payload text next to their QR code and paste it below.";
+      showEl(notice);
+    }
+    hideEl(scanBtn);
+  }
+  return renderContactsList();
+}
+
+/* The universal fallback: one parser + verification for BOTH paths — a
+ * camera scan hands over the decoded string, a paste hands over the typed
+ * text (§4.7). A rejected payload shows the reason VISIBLELY and stores
+ * NOTHING. */
+function importContactPayload(text, source) {
+  var statusEl = $("contact-status");
+  var parsed = DTN.qrParsePayload(text, nowSec());
+  if (!parsed || !parsed.ok) {
+    if (statusEl) showStatus(statusEl, "error", "Rejected — " + qrReasonLabel(parsed ? parsed.reason : "bad_json") + ". Nothing was saved.");
+    return Promise.resolve(false);
+  }
+  return DTN.saveContact(DTN.qrContactRecord(parsed, source, nowSec())).then(function () {
+    if (statusEl) showStatus(statusEl, "ok", "Added " + parsed.contact.alias + " to your contacts.");
+    var paste = $("contact-paste");
+    if (paste) paste.value = "";
+    return renderContactsList().then(function () {
+      return refreshDirectory();
+    });
+  }, function (err) {
+    if (statusEl) showStatus(statusEl, "error", "Could not save the contact (" + err.message + ").");
+    return false;
+  });
+}
+
+/* §4.7 scanning: the native BarcodeDetector API (Android Chrome — the
+ * realistic "full browser" side) over getUserMedia, feature-detected. No
+ * vendored decoder, nothing to degrade silently: when either API is
+ * missing the scan button is hidden and the honest notice directs to the
+ * paste fallback. */
+var qrScan = { stream: null, timer: null, detector: null };
+
+function qrScanSupported() {
+  return typeof window !== "undefined" && typeof window.BarcodeDetector === "function" &&
+    typeof navigator !== "undefined" && !!navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getUserMedia === "function";
+}
+
+function stopQrScan() {
+  if (qrScan.timer) { clearInterval(qrScan.timer); qrScan.timer = null; }
+  if (qrScan.stream) {
+    var tracks = qrScan.stream.getTracks ? qrScan.stream.getTracks() : [];
+    for (var i = 0; i < tracks.length; i++) {
+      if (tracks[i] && tracks[i].stop) tracks[i].stop();
+    }
+    qrScan.stream = null;
+  }
+  qrScan.detector = null;
+  var box = $("scan-box");
+  var btn = $("btn-scan-qr");
+  var video = $("scan-video");
+  if (video && video.srcObject) video.srcObject = null;
+  if (box) hideEl(box);
+  if (btn) btn.textContent = "Scan a QR code";
+}
+
+function toggleQrScan() {
+  if (qrScan.stream) {
+    stopQrScan();
+    return;
+  }
+  if (!qrScanSupported()) return;
+  var statusEl = $("contact-status");
+  var video = $("scan-video");
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function (stream) {
+    qrScan.stream = stream;
+    if (!video) { stopQrScan(); return; }
+    video.srcObject = stream;
+    showEl($("scan-box"));
+    var p = video.play();
+    if (p && p.catch) p.catch(function () { /* autoplay guard: frames still flow */ });
+    try {
+      qrScan.detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    } catch (e) {
+      qrScan.detector = new window.BarcodeDetector();
+    }
+    var btn = $("btn-scan-qr");
+    if (btn) btn.textContent = "Stop camera";
+    qrScan.timer = setInterval(function () {
+      if (!qrScan.detector || !video.videoWidth) return;
+      qrScan.detector.detect(video).then(function (codes) {
+        if (!codes || !codes.length) return;
+        var raw = null;
+        for (var i = 0; i < codes.length; i++) {
+          if (codes[i] && typeof codes[i].rawValue === "string" && codes[i].rawValue) {
+            raw = codes[i].rawValue;
+            break;
+          }
+        }
+        if (!raw) return;
+        stopQrScan();
+        importContactPayload(raw, "qr");
+      }, function () { /* transient frame failure: keep scanning */ });
+    }, 250);
+  }, function (err) {
+    if (statusEl) {
+      showStatus(statusEl, "error", "Could not open the camera (" +
+        (err && err.name ? err.name : "error") + "). Use the paste box below.");
+    }
+  });
+}
+
 /* ----- telemetry panel (§11) ----- */
 
 function transitCount() {
@@ -786,6 +1049,7 @@ function wireStaticHandlers() {
   wireCopyButtons();
   $("tab-btn-compose").addEventListener("click", function () { selectTab("compose"); });
   $("tab-btn-inbox").addEventListener("click", function () { selectTab("inbox"); });
+  $("tab-btn-contacts").addEventListener("click", function () { selectTab("contacts"); });
   $("tab-btn-identity").addEventListener("click", function () { selectTab("identity"); });
 
   $("btn-register").addEventListener("click", onRegister);
@@ -807,6 +1071,13 @@ function wireStaticHandlers() {
   });
   $("btn-show-seed").addEventListener("click", toggleSeed);
   $("btn-sync").addEventListener("click", onManualSync);
+  /* §4.7 identity QR: the add-contact flow (scan + paste) shares one
+   * parser/verifier; the camera button only appears when the platform
+   * feature-detect supports it. */
+  $("btn-scan-qr").addEventListener("click", toggleQrScan);
+  $("btn-add-contact").addEventListener("click", function () {
+    importContactPayload($("contact-paste").value, "paste");
+  });
 }
 
 /* Manual sync button (§11): full push/pull cycle against the node. */
@@ -1065,16 +1336,17 @@ function runSync(outgoing) {
 }
 
 /* §4.5 ack envelope construction (recipient side): resolve each sender's
- * X25519 key from the node directory by the Ed25519 key the signed
- * message carried, and build ONE ordinary ack envelope addressed back to
- * the sender's dest_hint — signed by THIS identity's Ed25519 key (the
- * ack author is the original recipient), TTL-aligned per §4.5. A sender
- * the directory cannot resolve gets no ack: delivery feedback is
- * best-effort (§4.5). */
-function buildAckEnvelopes(tasks, identity, directory) {
+ * X25519 key from the merged recipient list (§4.7: directory ∪ local
+ * contacts, deduped by the Ed25519 key the signed message carried) and
+ * build ONE ordinary ack envelope addressed back to the sender's
+ * dest_hint — signed by THIS identity's Ed25519 key (the ack author is the
+ * original recipient), TTL-aligned per §4.5. A sender neither directory
+ * nor contacts can resolve gets no ack: delivery feedback is best-effort
+ * (§4.5). */
+function buildAckEnvelopes(tasks, identity, recipients) {
   var byPubkey = {};
-  for (var i = 0; i < directory.length; i++) {
-    if (directory[i] && directory[i].pubkey) byPubkey[directory[i].pubkey] = directory[i];
+  for (var i = 0; i < recipients.length; i++) {
+    if (recipients[i] && recipients[i].pubkey) byPubkey[recipients[i].pubkey] = recipients[i];
   }
   var now = nowSec();
   var out = [];
@@ -1221,11 +1493,23 @@ function processPulled(pulled, known, identity) {
         })(ackArrivals[a]);
       }
       return ackSeq.then(function () {
+        /* §4.5 ack addressing resolves the sender's X25519 key from the
+         * directory — extended by §4.7 with the local contacts: a sender
+         * met in person is addressable even when the directory is
+         * unreachable (merged, deduped by Ed25519 key; a contact-only
+         * sender degrades to the §6.1 offline-cold static hint). */
         var buildAcks = (ackTasks.length && identity.acks_enabled !== false)
-          ? getJson("/api/v1/directory").then(function (directory) {
-              return buildAckEnvelopes(ackTasks, identity, Array.isArray(directory) ? directory : []);
-            }, function () {
-              return []; /* directory unobtainable → best-effort: no acks (§4.5) */
+          ? Promise.all([
+              getJson("/api/v1/directory").then(function (directory) {
+                return Array.isArray(directory) ? directory : [];
+              }, function () {
+                return []; /* directory unobtainable → contacts still resolve */
+              }),
+              loadContacts()
+            ]).then(function (sources) {
+              return DTN.qrMergeRecipients(sources[0], sources[1]);
+            }).then(function (recipients) {
+              return buildAckEnvelopes(ackTasks, identity, recipients);
             })
           : Promise.resolve([]);
         return buildAcks.then(function (ackEnvs) {
