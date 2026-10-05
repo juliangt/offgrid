@@ -111,6 +111,16 @@
 #       recipient (Alice) receives identity-fallback mail; and a stale-SPK
 #       replenish rotates the published bundle through the ordinary
 #       directory upsert.
+#   17. §4.7 identity QR — in-person contact exchange (issue #28): the
+#       acceptance journey on the SHIPPED SPA engine
+#       (tests/helpers/qr_e2e.mjs) with the DIRECTORY NEVER USED — both
+#       nodes' directory endpoints stay EMPTY the whole time: Alice and
+#       Bob import each other's OFFGRID1 payloads into their CONTACTS
+#       (the §4.7 engine parser/verifier), a TAMPERED payload is rejected
+#       with a visible reason (bad_crc) and stores nothing, Alice sends to
+#       her contact with the §6.1 offline-cold STATIC hint and the §4.6
+#       identity fallback, Bob receives and REPLIES the same way, and both
+#       inboxes show both messages.
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -1565,6 +1575,160 @@ if grep -qF "$NEW_SPK" "$WORK/prekey_dir_after.json"; then ROT=rotated; else ROT
 check "the served entry now carries the ROTATED spk" "rotated" "$ROT"
 if grep -qF "$OLD_OPK" "$WORK/prekey_dir_after.json"; then OLDGONE=served; else OLDGONE=gone; fi
 check "the wiped batch's OPKs are gone from the served bundle" "gone" "$OLDGONE"
+
+stop_daemon "$DAEMON_D_PID"
+DAEMON_D_PID=""
+stop_daemon "$DAEMON_E_PID"
+DAEMON_E_PID=""
+
+# ---------------------------------------------------------------------------
+# 17. §4.7 identity QR — in-person contact exchange (issue #28): the
+#     acceptance journey with both endpoints on the SHIPPED SPA engine
+#     (tests/helpers/qr_e2e.mjs):
+#       - Alice and Bob exchange OFFGRID1 QR payloads (engine-built and
+#         engine-verified) and each saves the other as a CONTACT — the
+#         node directory is NEVER consulted and stays EMPTY (the harness
+#         proves it on both nodes before and after);
+#       - a TAMPERED payload (one flipped Base64 character) is rejected
+#         with a visible reason (bad_crc) and stores NOTHING;
+#       - Alice sends to that contact with the directory endpoint unused:
+#         the box targets the identity X25519 key (no bundle, §4.6) and
+#         dest_hint is the §6.1 offline-cold STATIC hint — the directory
+#         carries no entry for Bob at all, yet the mail arrives;
+#       - Bob receives, decrypts, and REPLIES through his own contact
+#         record the same way; both inboxes show both messages.
+# ---------------------------------------------------------------------------
+QR_E2E="$SCRIPT_DIR/helpers/qr_e2e.mjs"
+NOW_Q="$(date +%s)"
+
+log "building the §4.7 identity-QR fixture with the shipped SPA engine (clock = $NOW_Q)"
+node "$QR_E2E" fixture "$WORK/qr_fixture.json" "$NOW_Q" >"$WORK/qr_fixture.log" 2>&1 || {
+    log "qr fixture build failed"; cat "$WORK/qr_fixture.log" >&2; exit 1;
+}
+check "§4.7 fixture built (two identities, both payloads, tampered copy)" \
+    "ok" "$(sed -n 's/^RESULT=//p' "$WORK/qr_fixture.log")"
+check "§4.7 fixture: the tampered payload differs from the original" \
+    "yes" "$(sed -n 's/^tamper_differs=//p' "$WORK/qr_fixture.log")"
+QR_PAYLOAD_CHARS="$(sed -n 's/^payload_chars=//p' "$WORK/qr_fixture.log")"
+check "§4.7 fixture: the payload fits the version-15 QR cap (≤ 421 chars)" \
+    "ok" "$([ "$QR_PAYLOAD_CHARS" -le 421 ] 2>/dev/null && echo ok || echo bad)"
+
+log "starting the §4.7 identity-QR node pair: 127.0.0.1:$PORT_D and 127.0.0.1:$PORT_E (fresh databases)"
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_D" -db "$WORK/node_qr_a.db" >"$WORK/node_qr_a.log" 2>&1 &
+DAEMON_D_PID=$!
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_E" -db "$WORK/node_qr_b.db" >"$WORK/node_qr_b.log" 2>&1 &
+DAEMON_E_PID=$!
+QR_READY=0
+if wait_ready "$PORT_D" && wait_ready "$PORT_E"; then QR_READY=1; fi
+check "identity-QR node pair ready (§4.7 round trip)" "1" "$QR_READY"
+if [ "$QR_READY" -ne 1 ]; then
+    log "--- qr node A log ---"; cat "$WORK/node_qr_a.log" >&2 || true
+    log "--- qr node B log ---"; cat "$WORK/node_qr_b.log" >&2 || true
+    exit 1
+fi
+
+# The directory is ABSENT for this journey: no registration is ever POSTed,
+# so both GETs answer an empty array — the exchange cannot lean on it.
+for PORT in "$PORT_D" "$PORT_E"; do
+    code="$(http GET "http://127.0.0.1:$PORT/api/v1/directory")"
+    check "GET directory on qr node (port $PORT) -> 200" "200" "$code"
+    check "directory on qr node (port $PORT) is EMPTY (no registration ever)" \
+        "0" "$({ grep -o '"alias"' "$WORK/last_body" || true; } | wc -l | tr -d ' ')"
+done
+
+# ---- The QR exchange: each side imports the other's payload. ----
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],fx.bob_payload)' "$WORK/qr_fixture.json" "$WORK/qr_bob_payload.txt"
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],fx.alice_payload)' "$WORK/qr_fixture.json" "$WORK/qr_alice_payload.txt"
+
+node "$QR_E2E" import "$WORK/qr_bob_payload.txt" "$WORK/qr_alice_contact_of_bob.json" "$NOW_Q" >"$WORK/qr_import_alice.log" 2>&1
+check "§4.7 import: Alice parses and verifies Bob's payload" \
+    "ok" "$(sed -n 's/^parsed=//p' "$WORK/qr_import_alice.log")"
+check "§4.7 import: the saved contact carries Bob's scanned alias" \
+    "qr_bob" "$(sed -n 's/^alias=//p' "$WORK/qr_import_alice.log")"
+check "§4.7 import: the contact's identity key is Bob's Ed25519 key" \
+    "$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob.signPublicB64)' "$WORK/qr_fixture.json")" \
+    "$(sed -n 's/^ed=//p' "$WORK/qr_import_alice.log")"
+
+# The tampered payload: VISIBLE rejection, nothing stored.
+node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).tampered_payload)' "$WORK/qr_fixture.json" > "$WORK/qr_tampered_payload.txt"
+rm -f "$WORK/qr_tampered_contact.json"
+node "$QR_E2E" import "$WORK/qr_tampered_payload.txt" "$WORK/qr_tampered_contact.json" "$NOW_Q" >"$WORK/qr_import_tampered.log" 2>&1
+check "§4.7 TAMPERED payload: import is REJECTED with a visible reason" \
+    "fail" "$(sed -n 's/^parsed=//p' "$WORK/qr_import_tampered.log")"
+check "§4.7 TAMPERED payload: the reason names the corruption (bad_crc)" \
+    "bad_crc" "$(sed -n 's/^reason=//p' "$WORK/qr_import_tampered.log")"
+check "§4.7 TAMPERED payload: NOTHING was stored (no contact file)" \
+    "absent" "$([ -f "$WORK/qr_tampered_contact.json" ] && echo present || echo absent)"
+
+node "$QR_E2E" import "$WORK/qr_alice_payload.txt" "$WORK/qr_bob_contact_of_alice.json" "$NOW_Q" >"$WORK/qr_import_bob.log" 2>&1
+check "§4.7 import: Bob parses and verifies Alice's payload (two-way exchange)" \
+    "ok" "$(sed -n 's/^parsed=//p' "$WORK/qr_import_bob.log")"
+
+# ---- Alice sends to her CONTACT with the directory unused. ----
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.alice))' "$WORK/qr_fixture.json" "$WORK/qr_alice_identity.json"
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.bob))' "$WORK/qr_fixture.json" "$WORK/qr_bob_identity.json"
+
+node "$QR_E2E" send "$WORK/qr_alice_identity.json" "$WORK/qr_alice_contact_of_bob.json" "$WORK/qr_send_a.json" "met at the node — no directory needed" "$NOW_Q" >"$WORK/qr_send_a.log" 2>&1
+check "§4.7 send (contact-only): dest_hint is the §6.1 offline-cold STATIC hint" \
+    "$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).bob_hint_legacy)' "$WORK/qr_fixture.json")" \
+    "$(sed -n 's/^dest_hint=//p' "$WORK/qr_send_a.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/qr_send_a.json")"
+check "alice pushes the contact-addressed envelope to qr node A -> 200" "200" "$code"
+QR_A_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/qr_send_a.json")"
+
+make_sync_body "$WORK/qr_mule_a1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/qr_mule_a1.json")"
+check "mule pulls exactly 1 envelope (the contact mail) from qr node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/qr_mule_pull1.json"
+node "$ACK_E2E" carry "$WORK/qr_mule_pull1.json" "$WORK/qr_mule_push1.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/qr_mule_push1.json")"
+check "mule drops the contact mail at qr node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/qr_bob_pull1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/qr_bob_pull1.json")"
+check "bob pulls exactly the contact-addressed envelope from qr node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/qr_bob_pull1.json"
+node "$QR_E2E" receive "$WORK/qr_bob_identity.json" "$WORK/qr_bob_pull1.json" "$NOW_Q" >"$WORK/qr_receive_bob.log" 2>&1
+check "§4.7 receive (bob): the static-hint envelope classifies as his own" \
+    "mine" "$(sed -n 's/^classified=//p' "$WORK/qr_receive_bob.log")"
+check "§4.7 receive (bob): it decrypts and verifies (inbox shows the message)" \
+    "ok" "$(sed -n 's/^decrypted=//p' "$WORK/qr_receive_bob.log")"
+check "§4.7 receive (bob): the text arrives intact" \
+    "met at the node — no directory needed" "$(sed -n 's/^m=//p' "$WORK/qr_receive_bob.log")"
+
+# ---- Bob replies through HIS contact record, same offline path. ----
+node "$QR_E2E" send "$WORK/qr_bob_identity.json" "$WORK/qr_bob_contact_of_alice.json" "$WORK/qr_send_b.json" "reply from the contact exchange — still no directory" "$((NOW_Q + 1))" >"$WORK/qr_send_b.log" 2>&1
+check "§4.7 reply (contact-only): dest_hint is Alice's offline-cold STATIC hint" \
+    "$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).alice_hint_legacy)' "$WORK/qr_fixture.json")" \
+    "$(sed -n 's/^dest_hint=//p' "$WORK/qr_send_b.log")"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/qr_send_b.json")"
+check "bob pushes the reply to qr node B -> 200" "200" "$code"
+QR_B_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/qr_send_b.json")"
+
+make_sync_body "$WORK/qr_mule_a2.json" "[\"$QR_A_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/qr_mule_a2.json")"
+check "mule pulls exactly 1 envelope (the reply) from qr node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/qr_mule_pull2.json"
+node "$ACK_E2E" carry "$WORK/qr_mule_pull2.json" "$WORK/qr_mule_push2.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/qr_mule_push2.json")"
+check "mule drops the reply at qr node A -> 200" "200" "$code"
+
+make_sync_body "$WORK/qr_alice_pull.json" "[\"$QR_A_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/qr_alice_pull.json")"
+check "alice pulls exactly the reply from qr node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/qr_alice_pull.json"
+node "$QR_E2E" receive "$WORK/qr_alice_identity.json" "$WORK/qr_alice_pull.json" "$((NOW_Q + 1))" >"$WORK/qr_receive_alice.log" 2>&1
+check "§4.7 receive (alice): the reply decrypts and verifies (inbox shows the message)" \
+    "ok" "$(sed -n 's/^decrypted=//p' "$WORK/qr_receive_alice.log")"
+check "§4.7 receive (alice): the reply text arrives intact" \
+    "reply from the contact exchange — still no directory" "$(sed -n 's/^m=//p' "$WORK/qr_receive_alice.log")"
+
+# The directory was NEVER used: still empty on both nodes afterwards.
+for PORT in "$PORT_D" "$PORT_E"; do
+    code="$(http GET "http://127.0.0.1:$PORT/api/v1/directory")"
+    check "directory on qr node (port $PORT) still EMPTY after the whole exchange" \
+        "0" "$({ grep -o '"alias"' "$WORK/last_body" || true; } | wc -l | tr -d ' ')"
+done
 
 stop_daemon "$DAEMON_D_PID"
 DAEMON_D_PID=""

@@ -60,6 +60,7 @@ ok(/<link rel="stylesheet" href="\/css\/app.css">/.test(html), "stylesheet linke
 console.log("== 3. script load order and DTN API surface ==");
 const expectedOrder = [
   "/js/vendor/nacl.min.js",
+  "/js/vendor/qrcode.js",
   "/js/constants.js",
   "/js/bytes.js",
   "/js/sha256.js",
@@ -67,6 +68,7 @@ const expectedOrder = [
   "/js/canonical.js",
   "/js/envelopes.js",
   "/js/prekeys.js",
+  "/js/qr.js",
   "/js/mule.js",
   "/js/chunking.js",
   "/js/acks.js",
@@ -116,6 +118,12 @@ const expectedApi = [
   "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire",
   // §15.6 store migrations chain
   "DB_VERSION", "IDB_MIGRATIONS", "runIdbMigrations",
+  // §4.7 identity QR — in-person contact exchange (issue #28)
+  "QR_PAYLOAD_PREFIX", "QR_PAYLOAD_VERSION", "QR_MAX_VERSION", "QR_ECC_LEVEL",
+  "QR_TS_SKEW_SECONDS", "QR_QUIET_ZONE_MODULES",
+  "qrCrc32", "qrCrc32Hex", "qrCanonicalPayloadString", "qrCanonicalObjectString",
+  "qrBuildPayload", "qrParsePayload", "qrContactRecord", "qrMergeRecipients", "qrMakeMatrix",
+  "STORE_CONTACTS", "saveContact", "listContacts",
 ];
 for (const member of expectedApi) {
   ok(DTN[member] !== undefined, `DTN.${member} is exported`);
