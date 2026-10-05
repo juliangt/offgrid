@@ -83,6 +83,8 @@ Each node broadcasts the open Wi-Fi network `offgrid-messages`. Anyone in range:
 
 That's the whole interaction: sending is leaving a note at one mailbox, receiving is walking past another. Envelopes expire via TTL and are swept every 15 minutes, so the network self-cleans.
 
+**For field pilots:** a printable, non-technical end-user guide lives in [`docs/quick-start.md`](docs/quick-start.md) and is served by every node itself at `http://offgrid.local:8080/guide` (linked as "Guide" from the portal footer) — hand it out on paper or show it on a phone.
+
 ### Keep an Offgrid icon on your home screen
 
 Instead of typing `http://offgrid.local:8080` every time, pin the portal — the node ships a web app manifest and an icon (all self-hosted, no internet needed). While on the node's Wi-Fi in your **full browser**:
@@ -105,9 +107,9 @@ cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev bina
 cd node && go test ./... -count=1 && cd ..
 node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
 node tests/qr_identity.mjs         # 72 assertions on the §4.7 identity QR (payload vectors, tamper rejection, QR encoder round-trips)
-node tests/spa_structure.mjs       # 195 assertions on the SPA layout, CSP and API surface
+node tests/spa_structure.mjs       # 261 assertions on the SPA layout, CSP, API surface and the /guide page
 node tests/pwa_assets.mjs          # 46 assertions on the §12.1 PWA-lite assets (manifest, icons, zero external URLs)
-bash tests/sync_e2e.sh             # 348 assertions: five real daemons + full mule walk (curl only)
+bash tests/sync_e2e.sh             # 383 assertions: five real daemons + full mule walk (curl only)
 ```
 
 `tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.
@@ -134,6 +136,7 @@ offgrid/
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
 | [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), upgrading a deployed node + rollback, escalation |
+| [`docs/quick-start.md`](docs/quick-start.md) | **End-user quick-start guide** (issue #23): the printable, translatable one-pager a field pilot hands out — join the Wi-Fi, open the full browser, register, back up the seed, send, be a mule — also served by every node at `http://offgrid.local:8080/guide` |
 | [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
 | [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
 
