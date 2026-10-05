@@ -27,6 +27,13 @@ const testIndexHTML = `<!DOCTYPE html><html><head><title>DTN Node</title>` +
 // members are asserted verbatim in TestStaticAssets (content type, body).
 const testManifest = `{"name":"Offgrid Messages","short_name":"Offgrid","start_url":"/","scope":"/","display":"standalone"}`
 
+// testGuideHTML is the /guide fixture (issue #23): the startup read requires
+// it exactly like index.html, so every handler test carries a stand-in.
+const testGuideHTML = `<!DOCTYPE html><html><head><title>Guide</title>` +
+	`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'">` +
+	`<link rel="stylesheet" href="/css/guide.css"></head>` +
+	`<body><img src="/img/guide/register.png" alt=""></body></html>`
+
 // testIconPNG is a byte-precise PNG stand-in for the embedded icons: the
 // handler must serve the embedded bytes verbatim (so the E2E's IHDR
 // dimension check on the REAL binary covers the real files; here the byte
@@ -52,12 +59,15 @@ var testIconPNG = []byte{
 // testWebFS stands in for the go:embed'ed web root of the main package.
 var testWebFS = fstest.MapFS{
 	"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+	"web/guide.html":         &fstest.MapFile{Data: []byte(testGuideHTML)},
 	"web/manifest.json":      &fstest.MapFile{Data: []byte(testManifest)},
 	"web/css/app.css":        &fstest.MapFile{Data: []byte("body { color: rebeccapurple; }")},
+	"web/css/guide.css":      &fstest.MapFile{Data: []byte("body { color: rebeccapurple; }")},
 	"web/js/app.js":          &fstest.MapFile{Data: []byte("var x = 1;")},
 	"web/js/vendor/x.js":     &fstest.MapFile{Data: []byte("var y = 2;")},
 	"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
 	"web/icons/icon-512.png": &fstest.MapFile{Data: testIconPNG},
+	"web/img/guide/x.png":    &fstest.MapFile{Data: testIconPNG},
 }
 
 // testBuild is the build identifier threaded through New in every test here;
@@ -218,6 +228,23 @@ func TestIndexServed(t *testing.T) {
 		t.Fatalf("index.html not served, body: %s", rec.Body.String())
 	}
 
+	// The /guide route (issue #23) serves its own embedded page the same way:
+	// §10.1 content type plus no-cache revalidation, and NOT reachable as the
+	// raw file name (no SPA fallback; TestStaticAssets covers that).
+	rec = do(t, h, http.MethodGet, "/guide", CanonicalHost, nil, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /guide: got %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Fatalf("guide Content-Type: got %q", ct)
+	}
+	if rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("guide must be revalidated on every load (Cache-Control: no-cache)")
+	}
+	if !strings.Contains(rec.Body.String(), "<title>Guide</title>") {
+		t.Fatalf("guide.html not served, body: %s", rec.Body.String())
+	}
+
 	rec = do(t, h, http.MethodGet, "/nope", CanonicalHost, nil, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown path: got %d, want 404", rec.Code)
@@ -240,11 +267,13 @@ func TestStaticAssets(t *testing.T) {
 		wantCT   string
 	}{
 		{"/css/app.css", "body { color: rebeccapurple; }", "text/css; charset=utf-8"},
+		{"/css/guide.css", "body { color: rebeccapurple; }", "text/css; charset=utf-8"},
 		{"/js/app.js", "var x = 1;", "text/javascript; charset=utf-8"},
 		{"/js/vendor/x.js", "var y = 2;", "text/javascript; charset=utf-8"},
 		{"/manifest.json", testManifest, "application/manifest+json; charset=utf-8"},
 		{"/icons/icon-192.png", string(testIconPNG), "image/png"},
 		{"/icons/icon-512.png", string(testIconPNG), "image/png"},
+		{"/img/guide/x.png", string(testIconPNG), "image/png"},
 	}
 	for _, tc := range cases {
 		t.Run("GET "+tc.path, func(t *testing.T) {
@@ -281,16 +310,25 @@ func TestStaticAssets(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown icon: got %d, want 404", rec.Code)
 	}
+	// Unknown guide screenshot: same JSON 404 (exact-path serving inside img/).
+	rec = do(t, h, http.MethodGet, "/img/guide/nope.png", CanonicalHost, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown guide image: got %d, want 404", rec.Code)
+	}
 
-	// Nothing outside css/, js/, icons/ and manifest.json is ever exposed
-	// (only index.html is HTML).
+	// Nothing outside css/, js/, icons/, img/ and manifest.json is ever
+	// exposed as a file (index.html and guide.html ride their own routes).
 	rec = do(t, h, http.MethodGet, "/index.html", CanonicalHost, nil, "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("/index.html must not be served directly, got %d", rec.Code)
 	}
+	rec = do(t, h, http.MethodGet, "/guide.html", CanonicalHost, nil, "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/guide.html must not be served directly (GET /guide is the route), got %d", rec.Code)
+	}
 
 	// Wrong method: JSON 405 with Allow: GET.
-	for _, path := range []string{"/css/app.css", "/js/app.js", "/manifest.json", "/icons/icon-192.png"} {
+	for _, path := range []string{"/css/app.css", "/js/app.js", "/manifest.json", "/icons/icon-192.png", "/img/guide/x.png", "/guide"} {
 		rec := do(t, h, http.MethodPost, path, CanonicalHost, nil, "application/json")
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("POST %s: got %d, want 405", path, rec.Code)
@@ -314,9 +352,10 @@ func TestNewFailsClosed(t *testing.T) {
 	if _, err := New(s, testBuild, fstest.MapFS{}); err == nil {
 		t.Fatalf("missing web/index.html must fail startup")
 	}
-	// (manifest + icons present so the walk reaches the unsupported file)
+	// (manifest + icons + guide present so the walk reaches the unsupported file)
 	broken := fstest.MapFS{
 		"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/guide.html":         &fstest.MapFile{Data: []byte(testGuideHTML)},
 		"web/manifest.json":      &fstest.MapFile{Data: []byte(testManifest)},
 		"web/css/app.css":        &fstest.MapFile{Data: []byte("/* ok */")},
 		"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
@@ -329,21 +368,36 @@ func TestNewFailsClosed(t *testing.T) {
 	// browser would resolve the manifest link (or an icon entry) into a 404.
 	noManifest := fstest.MapFS{
 		"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/guide.html":         &fstest.MapFile{Data: []byte(testGuideHTML)},
 		"web/css/app.css":        &fstest.MapFile{Data: []byte("/* ok */")},
 		"web/js/app.js":          &fstest.MapFile{Data: []byte("var x = 1;")},
 		"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
+		"web/img/guide/x.png":    &fstest.MapFile{Data: testIconPNG},
 	}
 	if _, err := New(s, testBuild, noManifest); err == nil || !strings.Contains(err.Error(), "manifest.json is missing") {
 		t.Fatalf("missing web/manifest.json must fail startup, got: %v", err)
 	}
 	noIcons := fstest.MapFS{
 		"web/index.html":    &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/guide.html":    &fstest.MapFile{Data: []byte(testGuideHTML)},
 		"web/manifest.json": &fstest.MapFile{Data: []byte(testManifest)},
 		"web/css/app.css":   &fstest.MapFile{Data: []byte("/* ok */")},
 		"web/js/app.js":     &fstest.MapFile{Data: []byte("var x = 1;")},
 	}
 	if _, err := New(s, testBuild, noIcons); err == nil || !strings.Contains(err.Error(), "scan embedded web/icons") {
 		t.Fatalf("missing web/icons tree must fail startup, got: %v", err)
+	}
+	// A missing /guide page is a half-shipped node too (issue #23): the
+	// portal footer's only visible link would be dead.
+	noGuide := fstest.MapFS{
+		"web/index.html":         &fstest.MapFile{Data: []byte(testIndexHTML)},
+		"web/manifest.json":      &fstest.MapFile{Data: []byte(testManifest)},
+		"web/css/app.css":        &fstest.MapFile{Data: []byte("/* ok */")},
+		"web/js/app.js":          &fstest.MapFile{Data: []byte("var x = 1;")},
+		"web/icons/icon-192.png": &fstest.MapFile{Data: testIconPNG},
+	}
+	if _, err := New(s, testBuild, noGuide); err == nil || !strings.Contains(err.Error(), "guide.html is missing") {
+		t.Fatalf("missing web/guide.html must fail startup, got: %v", err)
 	}
 }
 
@@ -360,6 +414,7 @@ func TestMethodNotAllowed(t *testing.T) {
 		{http.MethodPut, "/api/v1/sync", "POST"},
 		{http.MethodPost, "/", "GET"},
 		{http.MethodPost, "/generate_204", "GET"},
+		{http.MethodPost, "/guide", "GET"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.target, func(t *testing.T) {

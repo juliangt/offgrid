@@ -186,3 +186,9 @@
   dl { margin: 0; }
   dt { font-weight: 600; font-size: 0.85rem; color: var(--muted); margin-top: 10px; }
   dd { margin: 2px 0 0; }
+
+  /* Portal footer (issue #23): the one visible link added to the portal —
+     the printable end-user guide at /guide. The §10.7 operator view stays
+     unlinked from the portal, per its own rule. */
+  .portal-footer { text-align: center; margin: 18px 0 0; font-size: 0.9rem; }
+  .portal-footer a { color: var(--accent); }

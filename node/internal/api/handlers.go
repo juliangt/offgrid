@@ -67,6 +67,7 @@ type server struct {
 	store      Store
 	build      string
 	indexHTML  []byte
+	guideHTML  []byte
 	assets     map[string]staticAsset
 	postBudget *rateLimiter
 	pushQuota  *rateLimiter
@@ -106,7 +107,9 @@ const manifestContentType = "application/manifest+json; charset=utf-8"
 // document and the §10.7 diagnostics surface) into a single handler:
 //
 //	GET  /                      embedded index.html (text/html; charset=utf-8)
+//	GET  /guide                 embedded end-user quick-start guide (issue #23)
 //	GET  /css/…, GET /js/…      embedded same-origin static assets
+//	GET  /img/…                 embedded guide screenshots (issue #23, PNG)
 //	GET  /manifest.json         embedded web app manifest (§12.1)
 //	GET  /icons/…               embedded PNG icons (§12.1)
 //	GET  /generate_204          302 → canonical portal (Android probe; never 204)
@@ -124,8 +127,9 @@ const manifestContentType = "application/manifest+json; charset=utf-8"
 // ldflags-stamped value through. An empty build falls back to "dev" so the
 // §15.5 non-empty invariant holds even for a mis-stamped binary. webAssets is
 // the embedded web root supplied by the main package (go:embed cannot cross
-// package directories); its index.html, manifest.json and every .css/.js
-// file under css/ and js/ plus every .png under icons/ are read once at
+// package directories); its index.html, guide.html (issue #23), manifest.json
+// and every .css/.js file under css/ and js/ plus every .png under icons/
+// and img/ are read once at
 // startup. Unknown paths yield a JSON 404 and wrong
 // methods a JSON 405 with an Allow header (§10.1). The whole mux is wrapped
 // with the canonical-host redirect and the body-size limiter; the two POST
@@ -161,6 +165,13 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	if err != nil {
 		return nil, fmt.Errorf("embedded web/index.html is missing: %w", err)
 	}
+	// The /guide page (issue #23) is embedded the same way as index.html and
+	// must fail startup when missing — a half-shipped node must not serve a
+	// portal whose only visible link (the "Guide" footer) is dead.
+	guideHTML, err := fs.ReadFile(webRoot, "guide.html")
+	if err != nil {
+		return nil, fmt.Errorf("embedded web/guide.html is missing: %w", err)
+	}
 	assets, err := loadStaticAssets(webRoot)
 	if err != nil {
 		return nil, err
@@ -171,6 +182,7 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 		store:        store,
 		build:        build,
 		indexHTML:    indexHTML,
+		guideHTML:    guideHTML,
 		assets:       assets,
 		postBudget:   postBudget,
 		pushQuota:    pushQuota,
@@ -181,8 +193,10 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /guide", s.handleGuide)
 	mux.HandleFunc("GET /css/", s.handleStatic)
 	mux.HandleFunc("GET /js/", s.handleStatic)
+	mux.HandleFunc("GET /img/", s.handleStatic)
 	mux.HandleFunc("GET /manifest.json", s.handleStatic)
 	mux.HandleFunc("GET /icons/", s.handleStatic)
 	mux.HandleFunc("GET /generate_204", s.handleProbe)
@@ -201,8 +215,10 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 
 	// Method-specific fallbacks: same paths, wrong method → JSON 405 + Allow.
 	mux.HandleFunc("/{$}", methodNotAllowed("GET"))
+	mux.HandleFunc("/guide", methodNotAllowed("GET"))
 	mux.HandleFunc("/css/", methodNotAllowed("GET"))
 	mux.HandleFunc("/js/", methodNotAllowed("GET"))
+	mux.HandleFunc("/img/", methodNotAllowed("GET"))
 	mux.HandleFunc("/manifest.json", methodNotAllowed("GET"))
 	mux.HandleFunc("/icons/", methodNotAllowed("GET"))
 	mux.HandleFunc("/generate_204", methodNotAllowed("GET"))
@@ -219,17 +235,18 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 }
 
 // loadStaticAssets reads every .css/.js file under css/ and js/ plus every
-// .png icon under icons/ of the embedded web root into memory, keyed by its
-// exact URL path ("/js/ui.js", "/icons/icon-192.png"). The allow-list is
-// derived from the embed itself: nothing outside those trees is ever served
-// (no directory listing, no traversal — requests are matched by exact path
-// after the mux's path cleaning). The §12.1 web app manifest lives at the
-// web root (outside every walked tree) and is read explicitly; a missing
-// manifest or icons tree fails startup — a manifest the browser cannot
-// resolve is a half-shipped UI.
+// .png under icons/ and img/ of the embedded web root into memory, keyed by
+// its exact URL path ("/js/ui.js", "/icons/icon-192.png",
+// "/img/guide/composer.png"). The allow-list is derived from the embed
+// itself: nothing outside those trees is ever served (no directory listing,
+// no traversal — requests are matched by exact path after the mux's path
+// cleaning). The img/ tree carries the guide screenshots (issue #23); the
+// §12.1 web app manifest lives at the web root (outside every walked tree)
+// and is read explicitly; a missing manifest or icons tree fails startup —
+// a manifest the browser cannot resolve is a half-shipped UI.
 func loadStaticAssets(webRoot fs.FS) (map[string]staticAsset, error) {
 	assets := make(map[string]staticAsset)
-	for _, dir := range []string{"css", "js", "icons"} {
+	for _, dir := range []string{"css", "js", "icons", "img"} {
 		err := fs.WalkDir(webRoot, dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -315,6 +332,21 @@ func (s *server) handleIndex(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(s.indexHTML)
+}
+
+// handleGuide serves the embedded end-user quick-start guide (issue #23): a
+// script-free HTML page (own stylesheet /css/guide.css, print layout for a
+// one-sheet core flow) rendering the same text as docs/quick-start.md, with
+// the real SPA screenshots under /img/guide/. It is PUBLIC and linked from
+// the portal footer ("Guide") — the one portal-visible addition of the
+// guide work; the operator view /status (§10.7) stays linked from nowhere.
+// no-cache like the other embedded assets: a node is updated as a whole
+// binary and captive clients must pick up the new guide immediately.
+func (s *server) handleGuide(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(s.guideHTML)
 }
 
 // handleStatic serves one embedded same-origin asset (css/js/manifest/icons)
