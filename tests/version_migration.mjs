@@ -17,7 +17,9 @@
 //       withholds envelopes above the node's ceiling, converts v1 copies
 //       only at a v2 node, and never mutates the stored forms
 //   (d) capabilities parsing (§15.5): the example document reduces to its
-//       max_envelope_version; anything malformed → null
+//       max_envelope_version; the additive §6.1 hint-epoch members (issue
+//       #26) ride along ignored, observedEpochFromCapabilities reads
+//       hint_epoch_current, anything malformed → null
 //   (e) pull path at v2 (§15.3): classification, shape validation and
 //       decryption accept envelopes of their stored version, never
 //       rejecting or rewriting v2
@@ -178,16 +180,34 @@ console.log("== (d) capabilities parsing — §15.5 ==");
     envelope_versions: [1, 2],
     min_envelope_version: 1,
     max_envelope_version: 2,
-    schema_version: 2,
-    build: "dtn-node-dev"
+    schema_version: 3,
+    build: "dtn-node-dev",
+    hint_epoch_seconds: 86400,
+    hint_epoch_current: 20730
   };
-  ok(DTN.maxAdvertisedEnvelopeVersion(capsDoc) === 2, "the §15.5 example document → ceiling 2");
+  ok(DTN.maxAdvertisedEnvelopeVersion(capsDoc) === 2, "the §15.5 document → ceiling 2");
   ok(DTN.maxAdvertisedEnvelopeVersion({ ...capsDoc, envelope_versions: [1], min_envelope_version: 1, max_envelope_version: 1 }) === 1,
      "a v1-only node advertises [1] → ceiling 1");
   ok(DTN.maxAdvertisedEnvelopeVersion({ ...capsDoc, envelope_versions: [1, 2, 3], min_envelope_version: 1, max_envelope_version: 3 }) === 3,
      "a longer ascending set → its last element");
   ok(DTN.maxAdvertisedEnvelopeVersion({ ...capsDoc, future_member: { whatever: 1 } }) === 2,
      "unknown members are ignored (§15.4 additive policy)");
+  // §6.1 (issue #26): the additive hint-epoch members ride along ignored by
+  // the ceiling reducer, and the §6.1 observer reads the current epoch.
+  ok(DTN.maxAdvertisedEnvelopeVersion({
+      api: "v1", envelope_versions: [1, 2], min_envelope_version: 1, max_envelope_version: 2, schema_version: 3, build: "b",
+      hint_epoch_seconds: 86400, hint_epoch_current: 20730 }) === 2,
+     "the §6.1 additive members change nothing for the ceiling (§15.4)");
+  ok(DTN.observedEpochFromCapabilities(capsDoc) === 20730,
+     "observedEpochFromCapabilities reads hint_epoch_current (§6.1)");
+  ok(DTN.observedEpochFromCapabilities({
+      api: "v1", envelope_versions: [1, 2], min_envelope_version: 1, max_envelope_version: 2, schema_version: 2, build: "old",
+    }) === null,
+     "a pre-1.6 capabilities document (no hint members) observes no epoch");
+  ok(DTN.observedEpochFromCapabilities({ ...capsDoc, hint_epoch_current: 0 }) === 0 &&
+     DTN.observedEpochFromCapabilities({ ...capsDoc, hint_epoch_current: -1 }) === null &&
+     DTN.observedEpochFromCapabilities({ ...capsDoc, hint_epoch_current: 1.5 }) === null,
+     "the observed epoch must be a non-negative integer");
 
   const malformed = [
     ["null document", null],

@@ -29,9 +29,10 @@
 #      fresh node C, v1 first on node A) and the FIRST stored version always
 #      wins; a v1 envelope carrying meta and a v: 3 envelope are refused 400
 #      with the batch failing closed (§15.3);
-#   10. GET /api/v1/capabilities (§15.5): the six-member advertisement — api,
-#       envelope_versions [1,2] ascending, min/max 1/2, schema_version 2,
-#       non-empty build — and POST → 405 with Allow: GET;
+#   10. GET /api/v1/capabilities (§15.5): the eight-member advertisement — api,
+#       envelope_versions [1,2] ascending, min/max 1/2, schema_version 3,
+#       non-empty build, plus the additive §6.1 hint-epoch members — and
+#       POST → 405 with Allow: GET;
 #   11. §15.7 a schema migration E2E: a hand-crafted schema-1 database (the
 #       §9 CREATE TABLE verbatim, user_version left at 0, one row inserted
 #       the old way, made with the sqlite3 CLI before its daemon ever
@@ -79,6 +80,22 @@
 #       §3.1 v1 envelope within the §8.2 bounds; acks are never acked
 #       (termination); and a mule tampering with the ack payload fails
 #       verification at Alice (state stays queued).
+#   15. §6.1 rotating dest_hint (issue #26): the full mail path with
+#       ROTATING hints, both endpoints on the SHIPPED SPA engine
+#       (tests/helpers/hint_e2e.mjs; INJECTED CLOCKS — the harness passes
+#       NOW and the observed epoch explicitly, so no leg depends on the
+#       wall clock except the honestly-flagged during-window legacy leg):
+#       the sender derives the hint from the SERVER-SET epoch of the
+#       recipient's directory entry (a spoofed client epoch member is
+#       ignored by the node); hint(E) mail is delivered and decrypted,
+#       survives a simulated epoch boundary (observed E+1) with no message
+#       loss (§15.7 g), hint(E-1) mail arrives during the window; a
+#       pre-1.6 STATIC-hint envelope is delivered inside the §6.1
+#       transition window (§15.7 h) and the SAME envelope is foreign
+#       cargo for a simulated post-deadline build (clock =
+#       HINT_TRANSITION_DEADLINE + 1 day; §15.7 i); directory GET carries
+#       the additive epoch member and capabilities the additive §6.1
+#       members.
 #
 # Determinism: the §3.2 example envelope is parsed VERBATIM out of
 # docs/protocol.md at runtime (so the test vector cannot drift from the
@@ -553,7 +570,13 @@ ENVELOPE_VERSIONS="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body
 check "capabilities envelope_versions is [1,2] (ascending supported set, §15.3)" "[1,2]" "$ENVELOPE_VERSIONS"
 check "capabilities min_envelope_version is 1 (first element)" "1" "$(caps_num min_envelope_version)"
 check "capabilities max_envelope_version is 2 (negotiation ceiling)" "2" "$(caps_num max_envelope_version)"
-check "capabilities schema_version is 2 (§15.3)" "2" "$(caps_num schema_version)"
+check "capabilities schema_version is 3 (§15.3)" "3" "$(caps_num schema_version)"
+check "capabilities hint_epoch_seconds is 86400 (§6.1 additive)" "86400" "$(caps_num hint_epoch_seconds)"
+HINT_CUR="$(caps_num hint_epoch_current)"
+check "capabilities hint_epoch_current is a non-negative integer (§6.1 additive)" \
+    "ok" "$([ "$HINT_CUR" -ge 0 ] 2>/dev/null && echo ok || echo bad)"
+check "capabilities hint_epoch_current matches floor(node now / 86400) (§6.1)" \
+    "$(( $(date +%s) / 86400 ))" "$HINT_CUR"
 if grep -q '"build":"' "$WORK/last_body"; then BUILD_ID="$(caps_str build)"; else BUILD_ID=""; fi
 check "capabilities build is non-empty (§15.5)" "non-empty" "$([ -n "$BUILD_ID" ] && echo non-empty || echo empty)"
 code="$(curl -sS -o /dev/null -D "$WORK/hdr_caps" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/api/v1/capabilities")"
@@ -594,6 +617,11 @@ CREATE TABLE directory (
 INSERT INTO envelopes (id, dest_hint, created_at, ttl, payload)
   VALUES ('$ENV_ID', '$ENV_HINT', $NOW, $ENV_TTL, '$ENV_PAYLOAD');
 
+-- A pre-1.6 directory row: its epoch column does not exist yet; the 2→3
+-- migration must backfill it to 0 (deliberately stale, §6.1).
+INSERT INTO directory (pubkey, x25519, alias, last_seen)
+  VALUES ('bGVnYWN5X3VzZXJfa2V5X2FhYWFhYWFhYWFhYWFhYWE=', 'bGVnYWN5X3VzZXJfa2V5X2FhYWFhYWFhYWFhYWFhYWE=', 'legacy_user', 1700000000);
+
 PRAGMA user_version = 0;
 SQL
 if [ "$(sqlite3 "$LEGACY_DB" 'PRAGMA user_version;')" = "0" ] && \
@@ -622,9 +650,13 @@ check "pre-existing envelope keeps its id through the migration" "$ENV_ID" "$(js
 check "pre-existing envelope is served as v1 (DEFAULT 1 backfill, §15.3)" "1" "$(json_v)"
 check "pre-existing payload is byte-identical through the migration (§15.3)" \
     "$(sha256_hex "$ENV_PAYLOAD")" "$(sha256_hex "$(json_payload)")"
-check "user_version migrated from 0 to 2 (§15.3)" "2" "$(sqlite3 "$LEGACY_DB" 'PRAGMA user_version;')"
+check "user_version migrated from 0 to 3 (§15.3 chain 1→2→3)" "3" "$(sqlite3 "$LEGACY_DB" 'PRAGMA user_version;')"
 if sqlite3 "$LEGACY_DB" 'PRAGMA table_info(envelopes);' | grep -q '|v|'; then VCOL=present; else VCOL=missing; fi
-check "envelopes table gained the v column (schema 2)" "present" "$VCOL"
+check "envelopes table gained the v column (chain step 1→2)" "present" "$VCOL"
+if sqlite3 "$LEGACY_DB" 'PRAGMA table_info(directory);' | grep -q '|epoch|'; then ECOL=present; else ECOL=missing; fi
+check "directory table gained the epoch column (chain step 2→3, §6.1)" "present" "$ECOL"
+LEG_EPOCH="$(sqlite3 "$LEGACY_DB" 'SELECT epoch FROM directory LIMIT 1;')"
+check "pre-existing directory row backfilled to epoch 0 (deliberately stale, §6.1)" "0" "$LEG_EPOCH"
 
 make_sync_body "$WORK/sync_legacy_v2.json" "[\"$ENV_ID\"]" "[$ENV2_V2]"
 code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/sync_legacy_v2.json")"
@@ -680,12 +712,12 @@ fi
 check "start against user_version 99 exits non-zero (§15.7 b downgrade refusal)" \
     "non-zero" "$([ "$REF_STATUS" != 0 ] && echo non-zero || echo zero)"
 check "downgrade-refused daemon never became ready" "1" "$REF_READY"
-if grep -q '99' "$WORK/node_refused.log" && grep -q '2' "$WORK/node_refused.log"; then
+if grep -q '99' "$WORK/node_refused.log" && grep -q '3' "$WORK/node_refused.log"; then
     NAMED=both
 else
     NAMED=missing
 fi
-check "refusal message names both schema versions (99 and 2)" "both" "$NAMED"
+check "refusal message names both schema versions (99 and 3)" "both" "$NAMED"
 check "refused start left the database byte-untouched, sidecars included (§15.3)" \
     "$FINGERPRINT_BEFORE" "$(db_fingerprint "$LEGACY_DB")"
 
@@ -710,7 +742,7 @@ if tr -d '\r' < "$WORK/hdr_health" | grep -qi '^Content-Type: application/json; 
 check "health Content-Type is application/json; charset=utf-8" "ok" "$CT"
 check "health status is \"ok\" (liveness, no invented judgment)" "ok" "$(caps_str status)"
 check "health api is \"v1\" (same source as capabilities)" "v1" "$(caps_str api)"
-check "health schema_version is 2 (same source as capabilities)" "2" "$(caps_num schema_version)"
+check "health schema_version is 3 (same source as capabilities)" "3" "$(caps_num schema_version)"
 ENVELOPE_VERSIONS_HEALTH="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body" | sed -E 's/^"envelope_versions"://')"
 check "health envelope_versions is [1,2] (same source as capabilities)" "[1,2]" "$ENVELOPE_VERSIONS_HEALTH"
 if grep -q '"build":"' "$WORK/last_body"; then BUILD_HEALTH="$(caps_str build)"; else BUILD_HEALTH=""; fi
@@ -1101,6 +1133,205 @@ check "§4.5 negative: no delivery signal — the state stays queued" \
 
 stop_daemon "$DAEMON_C_PID"
 DAEMON_C_PID=""
+
+# ---------------------------------------------------------------------------
+# 15. §6.1 rotating dest_hint (issue #26): the full Alice -> node A -> mule
+#     -> node B -> Bob path with ROTATING hints, both endpoints running the
+#     SHIPPED SPA engine headlessly (tests/helpers/hint_e2e.mjs; injected
+#     clocks everywhere a boundary matters, so the leg is wall-clock safe):
+#       - Alice derives the dest_hint from the SERVER-SET epoch of Bob's
+#         directory entry (the node stamps epoch = floor(now/86400) at
+#         upsert and IGNORES a spoofed client-supplied epoch member —
+#         blindness preserved);
+#       - GET /api/v1/directory carries the additive epoch member;
+#       - Bob's engine recognizes and DECRYPTS mail addressed to the
+#         current epoch (§15.7 h side: candidate set {legacy, E, E-1});
+#       - an envelope addressed to the PREVIOUS epoch's hint (minted just
+#         before a boundary) is still delivered (§15.7 g: one-boundary
+#         window, no message loss) — simulated by advancing Bob's observed
+#         epoch/clock one day;
+#       - an envelope with the pre-1.6 STATIC hint is delivered during the
+#         transition window (§15.7 h);
+#       - a simulated post-deadline build (clock = HINT_TRANSITION_DEADLINE
+#         + 1 day) no longer recognizes the static hint: the same legacy
+#         envelope classifies as FOREIGN cargo and is never decrypted
+#         (§15.7 i) — while the rotating candidates keep working.
+# ---------------------------------------------------------------------------
+HINT_E2E="$SCRIPT_DIR/helpers/hint_e2e.mjs"
+NOW_T="$(date +%s)"
+HINT_EPOCH_T="$((NOW_T / 86400))"
+HINT_DEADLINE=1795996800   # §6.1 HINT_TRANSITION_DEADLINE = 2026-11-30T00:00:00Z
+POST_DEADLINE_T="$((HINT_DEADLINE + 86400))"
+POST_DEADLINE_EPOCH="$((POST_DEADLINE_T / 86400))"
+# The during-window legacy leg is only assertable while the real clock is
+# inside the §6.1 window; past the deadline the static candidate is dropped
+# by design and the expectation flips (the post-deadline leg below stays
+# deterministic either way via its injected clock).
+LEGACY_EXPECTED_CLASS="mine"
+if [ "$NOW_T" -ge "$HINT_DEADLINE" ]; then LEGACY_EXPECTED_CLASS="foreign"; fi
+
+log "building the §6.1 rotating-hint fixture with the shipped SPA engine (clock = $NOW_T, epoch $HINT_EPOCH_T)"
+node "$HINT_E2E" fixture "$WORK/hint_fixture.json" "$NOW_T" >"$WORK/hint_fixture.log" 2>&1 || {
+    log "hint fixture build failed"; cat "$WORK/hint_fixture.log" >&2; exit 1;
+}
+FIX_EPOCH="$(sed -n 's/^epoch=//p' "$WORK/hint_fixture.log")"
+FIX_HINT_CUR="$(sed -n 's/^hint_current=//p' "$WORK/hint_fixture.log")"
+FIX_HINT_PREV="$(sed -n 's/^hint_prev=//p' "$WORK/hint_fixture.log")"
+FIX_HINT_LEGACY="$(sed -n 's/^hint_legacy=//p' "$WORK/hint_fixture.log")"
+check "§6.1 fixture epoch matches the harness epoch math" "$HINT_EPOCH_T" "$FIX_EPOCH"
+check "§6.1 fixture: the three Bob hints are pairwise distinct" \
+    "3" "$(printf '%s\n' "$FIX_HINT_CUR" "$FIX_HINT_PREV" "$FIX_HINT_LEGACY" | sort -u | wc -l | tr -d ' ')"
+
+# Registration: Bob's body carries a SPOOFED epoch member the node must
+# ignore (the epoch is server-set at upsert, §6.1/§10.3).
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.alice_reg))' "$WORK/hint_fixture.json" "$WORK/hint_reg_alice.json"
+node -e 'const fx=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));require("fs").writeFileSync(process.argv[2],JSON.stringify(fx.bob_reg))' "$WORK/hint_fixture.json" "$WORK/hint_reg_bob.json"
+
+log "starting the §6.1 hint node pair: 127.0.0.1:$PORT_D and 127.0.0.1:$PORT_E (fresh databases)"
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_D" -db "$WORK/node_hint_a.db" >"$WORK/node_hint_a.log" 2>&1 &
+DAEMON_D_PID=$!
+"$WORK/dtn-node" -addr "127.0.0.1:$PORT_E" -db "$WORK/node_hint_b.db" >"$WORK/node_hint_b.log" 2>&1 &
+DAEMON_E_PID=$!
+HINT_READY=0
+if wait_ready "$PORT_D" && wait_ready "$PORT_E"; then HINT_READY=1; fi
+check "hint node pair ready (§6.1 round trip)" "1" "$HINT_READY"
+if [ "$HINT_READY" -ne 1 ]; then
+    log "--- hint node A log ---"; cat "$WORK/node_hint_a.log" >&2 || true
+    log "--- hint node B log ---"; cat "$WORK/node_hint_b.log" >&2 || true
+    exit 1
+fi
+
+for PORT in "$PORT_D" "$PORT_E"; do
+    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/hint_reg_alice.json")"
+    check "register alice_hint on hint node (port $PORT) -> 200" "200" "$code"
+    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/hint_reg_bob.json")"
+    check "register bob_hint (with a spoofed epoch member) on hint node (port $PORT) -> 200" "200" "$code"
+done
+
+# Directory GET carries the additive epoch member, set from the NODE clock
+# and unaffected by the spoofed client member.
+code="$(http GET "http://127.0.0.1:$PORT_E/api/v1/directory")"
+check "GET directory on hint node B -> 200" "200" "$code"
+if grep -q '"epoch":' "$WORK/last_body"; then DEPOCH=present; else DEPOCH=absent; fi
+check "directory entries carry the additive epoch member (§6.1)" "present" "$DEPOCH"
+cp "$WORK/last_body" "$WORK/hint_dir_b.json"
+BOB_DIR_EPOCH="$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const e=d.find(x=>x&&x.alias==="bob_hint");process.stdout.write(e&&typeof e.epoch==="number"?String(e.epoch):"missing")' "$WORK/hint_dir_b.json")"
+check "bob's directory epoch is the SERVER-SET floor(node now / 86400), not the spoofed value" \
+    "$HINT_EPOCH_T" "$BOB_DIR_EPOCH"
+
+# Capabilities: the additive §6.1 members on a served document.
+code="$(http GET "http://127.0.0.1:$PORT_E/api/v1/capabilities")"
+check "GET capabilities on hint node B -> 200" "200" "$code"
+cp "$WORK/last_body" "$WORK/hint_caps.json"
+check "capabilities expose hint_epoch_seconds=86400 and an integer hint_epoch_current (§6.1)" \
+    "ok" "$(node "$HINT_E2E" caps "$WORK/hint_caps.json" | sed -n 's/^result=//p')"
+
+# ---- Leg 1 (current epoch): Alice addresses hint(entry.epoch); Bob
+#      recognizes and decrypts at observed epoch E. ----
+code="$(http GET "http://127.0.0.1:$PORT_D/api/v1/directory")"
+check "alice reads the hint node A directory -> 200 (sender derives the epoch from the entry, §6.1)" "200" "$code"
+cp "$WORK/last_body" "$WORK/hint_dir_a.json"
+node "$HINT_E2E" send "$WORK/hint_fixture.json" "$WORK/hint_dir_a.json" "$WORK/hint_send_cur.json" current "$NOW_T" >"$WORK/hint_send_cur.log" 2>&1
+check "§6.1 send (current): alice's engine used the entry's epoch" "$HINT_EPOCH_T" "$(sed -n 's/^used_epoch=//p' "$WORK/hint_send_cur.log")"
+check "§6.1 send (current): the envelope carries exactly the engine's hint(E)" \
+    "$FIX_HINT_CUR" "$(sed -n 's/^dest_hint=//p' "$WORK/hint_send_cur.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_send_cur.json")"
+check "alice pushes the rotating-hint envelope to hint node A -> 200" "200" "$code"
+CUR_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/hint_send_cur.json")"
+
+make_sync_body "$WORK/hint_mule_a1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_mule_a1.json")"
+check "mule pulls exactly 1 envelope (the current-epoch mail) from hint node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_mule_pull1.json"
+node "$ACK_E2E" carry "$WORK/hint_mule_pull1.json" "$WORK/hint_mule_push1.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_mule_push1.json")"
+check "mule drops the current-epoch envelope at hint node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/hint_bob_pull1.json" "[]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_bob_pull1.json")"
+check "bob pulls exactly the current-epoch envelope from hint node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_bob_pull1.json"
+BOB_CUR="$(node "$HINT_E2E" bob_check "$WORK/hint_fixture.json" "$WORK/hint_bob_pull1.json" "$HINT_EPOCH_T" "$NOW_T" 2>"$WORK/hint_bob_cur.log" || true)"
+check "§6.1 bob (current epoch): the envelope is classified as MINE" "mine" "$(printf '%s\n' "$BOB_CUR" | sed -n 's/^classified=//p')"
+check "§6.1 bob (current epoch): the envelope decrypts and verifies" "ok" "$(printf '%s\n' "$BOB_CUR" | sed -n 's/^decrypted=//p')"
+
+# ---- Leg 2 (epoch boundary, §15.7 g): Bob's session advances one day
+#      (observed epoch E+1, injected clock NOW+86400); the SAME envelope —
+#      minted for E and in flight across the boundary — must still arrive. ----
+BOB_BOUNDARY="$(node "$HINT_E2E" bob_check "$WORK/hint_fixture.json" "$WORK/hint_bob_pull1.json" "$((HINT_EPOCH_T + 1))" "$((NOW_T + 86400))" 2>"$WORK/hint_bob_boundary.log" || true)"
+check "§6.1 bob across the boundary (observed E+1): the E-addressed envelope is still MINE" \
+    "mine" "$(printf '%s\n' "$BOB_BOUNDARY" | sed -n 's/^classified=//p')"
+check "§6.1 bob across the boundary: no message loss — it decrypts" \
+    "ok" "$(printf '%s\n' "$BOB_BOUNDARY" | sed -n 's/^decrypted=//p')"
+
+# ---- Leg 3 (previous epoch): an envelope addressed to hint(E-1) — minted
+#      just before a boundary — is delivered while Bob observes E. ----
+node "$HINT_E2E" send "$WORK/hint_fixture.json" "$WORK/hint_dir_a.json" "$WORK/hint_send_prev.json" prev "$NOW_T" >"$WORK/hint_send_prev.log" 2>&1
+check "§6.1 send (prev): alice's engine used epoch E-1" "$((HINT_EPOCH_T - 1))" "$(sed -n 's/^used_epoch=//p' "$WORK/hint_send_prev.log")"
+check "§6.1 send (prev): the envelope carries exactly the engine's hint(E-1)" \
+    "$FIX_HINT_PREV" "$(sed -n 's/^dest_hint=//p' "$WORK/hint_send_prev.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_send_prev.json")"
+check "alice pushes the previous-epoch envelope to hint node A -> 200" "200" "$code"
+PREV_ID="$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).push_envelopes[0].id)' "$WORK/hint_send_prev.json")"
+
+make_sync_body "$WORK/hint_mule_a2.json" "[\"$CUR_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_mule_a2.json")"
+check "mule pulls exactly 1 envelope (the previous-epoch mail) from hint node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_mule_pull2.json"
+node "$ACK_E2E" carry "$WORK/hint_mule_pull2.json" "$WORK/hint_mule_push2.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_mule_push2.json")"
+check "mule drops the previous-epoch envelope at hint node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/hint_bob_pull2.json" "[\"$CUR_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_bob_pull2.json")"
+check "bob pulls exactly the previous-epoch envelope from hint node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_bob_pull2.json"
+BOB_PREV="$(node "$HINT_E2E" bob_check "$WORK/hint_fixture.json" "$WORK/hint_bob_pull2.json" "$HINT_EPOCH_T" "$NOW_T" 2>"$WORK/hint_bob_prev.log" || true)"
+check "§6.1 bob (previous epoch): hint(E-1) mail is classified as MINE during the window" \
+    "mine" "$(printf '%s\n' "$BOB_PREV" | sed -n 's/^classified=//p')"
+check "§6.1 bob (previous epoch): the envelope decrypts" \
+    "ok" "$(printf '%s\n' "$BOB_PREV" | sed -n 's/^decrypted=//p')"
+
+# ---- Leg 4 (legacy static hint, §15.7 h): a pre-1.6 sender addresses the
+#      §6.1 static hint; during the transition window it is delivered. ----
+node "$HINT_E2E" send "$WORK/hint_fixture.json" "$WORK/hint_dir_a.json" "$WORK/hint_send_legacy.json" legacy "$NOW_T" >"$WORK/hint_send_legacy.log" 2>&1
+check "§6.1 send (legacy): no epoch used — the pre-1.6 static derivation" \
+    "none" "$(sed -n 's/^used_epoch=//p' "$WORK/hint_send_legacy.log")"
+check "§6.1 send (legacy): the envelope carries exactly the static hint" \
+    "$FIX_HINT_LEGACY" "$(sed -n 's/^dest_hint=//p' "$WORK/hint_send_legacy.log")"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_send_legacy.json")"
+check "the pre-1.6 sender pushes the static-hint envelope to hint node A -> 200" "200" "$code"
+
+make_sync_body "$WORK/hint_mule_a3.json" "[\"$CUR_ID\",\"$PREV_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_D/api/v1/sync" "$WORK/hint_mule_a3.json")"
+check "mule pulls exactly 1 envelope (the static-hint mail) from hint node A" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_mule_pull3.json"
+node "$ACK_E2E" carry "$WORK/hint_mule_pull3.json" "$WORK/hint_mule_push3.json" >/dev/null 2>&1
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_mule_push3.json")"
+check "mule drops the static-hint envelope at hint node B -> 200" "200" "$code"
+
+make_sync_body "$WORK/hint_bob_pull3.json" "[\"$CUR_ID\",\"$PREV_ID\"]" "[]"
+code="$(http POST "http://127.0.0.1:$PORT_E/api/v1/sync" "$WORK/hint_bob_pull3.json")"
+check "bob pulls exactly the static-hint envelope from hint node B" "1" "$(json_count_envelopes)"
+cp "$WORK/last_body" "$WORK/hint_bob_pull3.json"
+BOB_LEGACY="$(node "$HINT_E2E" bob_check "$WORK/hint_fixture.json" "$WORK/hint_bob_pull3.json" "$HINT_EPOCH_T" "$NOW_T" 2>"$WORK/hint_bob_legacy.log" || true)"
+check "§6.1 bob (legacy, during the window): expectation honors the real clock vs the deadline" \
+    "$LEGACY_EXPECTED_CLASS" "$(printf '%s\n' "$BOB_LEGACY" | sed -n 's/^classified=//p')"
+
+# ---- Leg 5 (post-deadline, §15.7 i): a simulated build AFTER
+#      HINT_TRANSITION_DEADLINE (injected clock = deadline + 1 day) no
+#      longer recognizes the static hint: the SAME envelope is foreign
+#      cargo, never decrypted — while the rotating candidates keep working. ----
+BOB_POSTDEADLINE="$(node "$HINT_E2E" bob_check "$WORK/hint_fixture.json" "$WORK/hint_bob_pull3.json" "$POST_DEADLINE_EPOCH" "$POST_DEADLINE_T" 2>"$WORK/hint_bob_postdeadline.log" || true)"
+check "§6.1 bob after the simulated deadline: the legacy envelope is FOREIGN cargo" \
+    "foreign" "$(printf '%s\n' "$BOB_POSTDEADLINE" | sed -n 's/^classified=//p')"
+check "§6.1 bob after the simulated deadline: never decrypted (silently not mine, §6.1)" \
+    "fail" "$(printf '%s\n' "$BOB_POSTDEADLINE" | sed -n 's/^decrypted=//p')"
+
+stop_daemon "$DAEMON_D_PID"
+DAEMON_D_PID=""
+stop_daemon "$DAEMON_E_PID"
+DAEMON_E_PID=""
 
 # ---------------------------------------------------------------------------
 # Summary.
