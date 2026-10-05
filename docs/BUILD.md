@@ -7,7 +7,7 @@ Step-by-step instructions to build, test, run and deploy the off-grid DTN node (
 | Tool | Version | Used for |
 |---|---|---|
 | Go | ≥ 1.22 (verified with go1.27.1) | node daemon build and unit tests |
-| Node.js | ≥ 18 (verified with v22.19.0) | `tests/crypto_roundtrip.mjs`, `tests/spa_structure.mjs` and `tests/version_migration.mjs` only; nothing in the product needs Node |
+| Node.js | ≥ 18 (verified with v22.19.0) | the headless SPA suites (`tests/*.mjs`) only; nothing in the product needs Node |
 | bash | ≥ 3.2 (any) | `node/build.sh`, `tests/sync_e2e.sh`, `tests/hardening_structure.sh`, the chaos suite (`tests/chaos/`), `raspberry/provision.sh`, `raspberry/install.sh` |
 | make | any | the one-command entries `make test` / `make chaos` / `make build` (optional: every recipe is a plain shell command listed below) |
 | curl | any | `tests/sync_e2e.sh`, the chaos suite, deployment verification |
@@ -104,11 +104,18 @@ node tests/chunking.mjs
 #    sender-side bind
 node tests/acks.mjs
 
-# 9. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
-#    legs included (starts/stops its own servers)
+# 9. §4.7 identity QR: worked vector (canonical string, CRC-32, Ed25519
+#    signature), every tamper class with its reason, encoder round-trip
+#    through an independent QR decoder across versions 1-15, recipient
+#    merge (contacts ∪ directory), the §15.6 migration v5 step
+node tests/qr_identity.mjs
+
+# 10. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
+#     and §4.7 offline contact-exchange legs included (starts/stops its own
+#     servers)
 bash tests/sync_e2e.sh
 
-# 10. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
+# 11. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
 #     assertions on the generated firewall ruleset, tc shaping stream and
 #     shield scripts (no hardware, no root)
 bash tests/hardening_structure.sh
@@ -149,13 +156,13 @@ matters):
 5. The structural test ends with:
 
    ```
-   PASS: 161 structural assertions on the SPA layout
+   PASS: 185 structural assertions on the SPA layout
    ```
 
 6. The versioning test ends with:
 
    ```
-   PASS: 77 assertions on the SPA §15 versioning policy (index.html script order)
+   PASS: 78 assertions on the SPA §15 versioning policy (index.html script order)
    ```
 
 7. The chunking test ends with:
@@ -170,16 +177,22 @@ matters):
    PASS: 54 assertions on the §4.5 delivery-acknowledgment convention (index.html script order)
    ```
 
-9. The E2E script ends with:
+9. The identity-QR test ends with:
 
    ```
-   e2e: summary: 289 passed, 0 failed
+   PASS: 72 assertions on the §4.7 identity QR, contacts and offline exchange (index.html script order)
+   ```
+
+10. The E2E script ends with:
+
+   ```
+   e2e: summary: 321 passed, 0 failed
    e2e: RESULT: PASS
    ```
 
-   It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), and the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m).
+   It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m), and the §4.7 identity-QR legs: a two-way OFFGRID1 payload exchange into the contacts (the directory endpoints stay EMPTY the whole time), the tampered-payload visible rejection storing nothing, the offline static-hint contact delivery in both directions and both inboxes verified.
 
-10. The Pi hardening test ends with 197 assertions and:
+11. The Pi hardening test ends with 197 assertions and:
 
    ```
    hardening: summary: 197 passed, 0 failed
