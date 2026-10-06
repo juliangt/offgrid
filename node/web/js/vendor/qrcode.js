@@ -11,6 +11,13 @@
 // captive-portal WebView has no CommonJS/AMD loader). Do not edit; refresh
 // via: curl -o node/web/js/vendor/qrcode.js \
 //        https://unpkg.com/qrcode-generator@1.4.4/qrcode.js
+// Integrity (recorded 2026-10-06, issue #14 Phase 2 audit): the upstream
+// original — this file minus the three documented adaptations (drop the
+// marker/header block, drop the leading "use strict" line, drop the
+// trailing adaptation comment + self.qrcode block) — hashes to
+//   SHA-256 = 18ae399f81182bc9de916e9c77b195df20cc58d6f2d55a62b085a299f1bf1780
+// which is the byte hash of https://unpkg.com/qrcode-generator@1.4.4/qrcode.js
+// (56694 bytes). Offline re-verification: node tests/spa_security.mjs.
 // Consumer: node/web/js/qr.js (§4.7 identity QR) — byte mode only, matrix
 // rendered to a <canvas>; §4.7 caps the payload at QR version 15, ECC M.
 /* === QRCODE_GENERATOR_EMBED_END === */

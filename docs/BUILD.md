@@ -116,17 +116,26 @@ node tests/acks.mjs
 #     merge (contacts ∪ directory), the §15.6 migration v5 step
 node tests/qr_identity.mjs
 
-# 11. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
+# 11. SPA security hardening (issue #14 Phase 2): offline re-verification of
+#     the vendored-tweetnacl/qrcode provenance hashes, nonce/ephemeral
+#     freshness, the receive-path §6.2 envelope-id check (outer-field tamper
+#     detection), the hostile-envelope battery (no crash, no store, no own-
+#     classification), no key material on any wire object, and the static
+#     source-hygiene contract (no XSS sink, no storage/logging/exfil
+#     channel, fixed same-origin routes, closed CSP without data:)
+node tests/spa_security.mjs
+
+# 12. Full E2E: five daemons + mule walks with curl, §4.6 forward-secrecy
 #     and §4.7 offline contact-exchange legs included (starts/stops its own
 #     servers)
 bash tests/sync_e2e.sh
 
-# 12. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
+# 13. Pi hardening structure (issue #16 Track 1): rootless --print/--dry-run
 #     assertions on the generated firewall ruleset, tc shaping stream and
 #     shield scripts (no hardware, no root)
 bash tests/hardening_structure.sh
 
-# 13. Node upgrade + rollback E2E (issue #22): the real raspberry/upgrade.sh
+# 14. Node upgrade + rollback E2E (issue #22): the real raspberry/upgrade.sh
 #     library — the code `install.sh --upgrade` / `--rollback` run on a Pi —
 #     driven rootlessly against a temp "node" with a REAL populated store:
 #     v1-era store migration on populated data, backup generation rotation,
@@ -134,7 +143,7 @@ bash tests/hardening_structure.sh
 #     envelope loss at every phase
 bash tests/upgrade_e2e.sh
 
-# 14. Issue-#20 field equivalents: the software-verifiable half of
+# 15. Issue-#20 field equivalents: the software-verifiable half of
 #     docs/field-test.md — seed backup/restore round trip, one store across
 #     two nodes (identity + inbox + transit survive), health/status agreement
 #     within the documented cache window, and the fabrication guard on the
@@ -142,7 +151,7 @@ bash tests/upgrade_e2e.sh
 #     127.0.0.1:18201-18202.
 node tests/field_equiv.mjs
 
-# 15. docs/install-node.md structure (issue #35): the builder's guide exists
+# 16. docs/install-node.md structure (issue #35): the builder's guide exists
 #     with all 10 required sections, the TOC anchors match the real headings
 #     (GitHub's anchor algorithm), every relative doc link resolves to a file
 #     and every cross-file heading fragment matches the target file, the
@@ -152,6 +161,15 @@ node tests/field_equiv.mjs
 #     floor), every environment subsection carries its ASCII diagram, and the
 #     glossary covers the unavoidable terms
 node tests/install_node_structure.mjs
+
+# 17. Audit-deliverables docs structure (issue #14): the security-audit
+#     report is FINAL (v1.0.0) with its executive summary, the complete
+#     30-finding index and the deliverables-traceability/deferred sections;
+#     known-limitations.md exists, is dated and covers every accepted
+#     residual with its source citations; the README links both docs,
+#     records the audit as complete and carries the corrected
+#     hint-linkability claim with the pre-audit overclaim wording gone
+node tests/docs_structure.mjs
 ```
 
 Expected outputs (assertion counts move as suites grow — the shape is what
@@ -225,7 +243,13 @@ matters):
     PASS: 72 assertions on the §4.7 identity QR, contacts and offline exchange (index.html script order)
     ```
 
-11. The E2E script ends with:
+11. The security-hardening test (issue #14 Phase 2) ends with:
+
+    ```
+    PASS: 277 security-hardening assertions on the SPA engine and sources
+    ```
+
+12. The E2E script ends with:
 
     ```
     e2e: summary: 348 passed, 0 failed
@@ -234,7 +258,7 @@ matters):
 
     It builds the dev binary itself, starts its daemons on `127.0.0.1:18091`-`18095` (override with `PORT_A` / `PORT_B` / `PORT_C` / `PORT_E` / `PORT_D`, defaults `18091` / `18092` / `18093` / `18094` / `18095`) inside a temporary workdir which is always cleaned up. It simulates the complete mule journey — Alice → node A → mule → node B → Bob — and asserts payload byte integrity via sha256, dedup, TTL filtering, limit rejections and the canonical-host/captive-probe redirect pair, plus the §15 coverage: versioned admission and version-agnostic dedup in both orders (§15.7 c/d/e), the capabilities document (§15.5), schema migration of a crafted schema-1 database through the full chain to version 4 (§15.7 a) and downgrade refusal with a byte fingerprint (§15.7 b — these last two need the `sqlite3` CLI and `shasum`/`sha256sum`), the §4.6 prekey legs: bundle registration and verbatim directory round-trip, prekey-addressed delivery with wipe-on-use, the captured-traffic forward-secrecy proof, both legacy interop directions and the stale-SPK replenish (§15.7 j–m), the §4.7 identity-QR legs: a two-way OFFGRID1 payload exchange into the contacts (the directory endpoints stay EMPTY the whole time), the tampered-payload visible rejection storing nothing, the offline static-hint contact delivery in both directions and both inboxes verified — and the §12.1 PWA-lite legs (§15.7 o): the manifest's exact members with a relative `start_url`, the icons' PNG magic + IHDR dimensions, the portal HTML's manifest link + iOS meta tags + honest no-offline note, and zero external URLs anywhere.
 
-12. The Pi hardening test ends with 197 assertions and:
+13. The Pi hardening test ends with 197 assertions and:
 
    ```
    hardening: summary: 197 passed, 0 failed
@@ -245,7 +269,7 @@ matters):
 
    The design behind these artifact assertions — the adversarial assumptions, the per-defense mapping with regression tests, the deliberate non-defenses and the shed → survive → self-recover contract — is `docs/hardening.md`.
 
-13. The node upgrade E2E ends with:
+14. The node upgrade E2E ends with:
 
     ```
     upgrade: summary: 67 passed, 0 failed
@@ -254,7 +278,13 @@ matters):
 
     It sources `raspberry/upgrade.sh` — the very library `install.sh --upgrade` and `--rollback` execute on a Pi — binds every `DTN_*` path into a temporary "node" and overrides the three `upgrade_svc_*` systemd seams with plain background-process management, so the exact field code runs here rootlessly against real files and real daemons (on `127.0.0.1:18101`, disjoint from the E2E's `18091-18095` and the chaos suite's `18095-18099`). It needs `go`, `curl` and the `sqlite3` CLI. The legs: structural pins on the field wiring (`install.sh` modes, the binding stop → backup → swap → start → gate order, the provision.sh `STEPS` subset selector, the Makefile + docs wiring); two binaries from the current tree with distinct `-ldflags -X main.build=` ids; a v1-era store crafted with the §9 schema verbatim (`user_version` 0, no `envelopes.v` / `directory.epoch` / `directory.prekeys`) populated with 3 envelopes + 2 directory rows; the deployed release migrating that populated store through the real §15.3 chain (everything keeps being served: ids, byte-identical payloads, epoch-0 directory backfill); the upgrade success path through the library (backup generation with db + previous binary + `MANIFEST.txt`, prune, binary swap, health gate on build identity + schema_version, zero envelope loss, the write path accepts new mail); backup rotation (4 generations → keep 3, explicit `KEEP=1`); the FAILED-migration rollback (store marker forced to 99, the swapped daemon refuses to start naming both versions, the gate fails, `upgrade_auto_rollback` restores the previous binary + db backup and the node serves the full ledger again with the refused store kept as `pre-restore-<UTC>` evidence); and the negative gates (wrong expected build / schema fail an otherwise healthy node).
 
-14. The install-node guide structure test (issue #35) ends with:
+15. The field-equivalents test (issue #20) ends with:
+
+    ```
+    PASS: 62 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
+    ```
+
+16. The install-node guide structure test (issue #35) ends with:
 
     ```
     PASS: <n> assertions on docs/install-node.md structure, anchors and cross-links
@@ -268,6 +298,23 @@ matters):
     forward-pointer wiring, the number-consistency pins against
     `docs/hardware.md` (1 W, 0.90, 0.80, 12.8 V, 14.6 V, 20 W, 5.1 V, 15 A,
     2 A, 0 °C, 30%), the per-environment ASCII diagrams and the glossary.
+
+17. The audit-deliverables docs structure test (issue #14) ends with:
+
+    ```
+    PASS: <n> assertions on the security-audit and known-limitations docs and the README wiring
+    ```
+
+    It is pure file-structure checking (no daemon, no network): the
+    security-audit report is FINAL (v1.0.0) with its executive summary, the
+    complete 30-finding index (NODE/SPA/PROTO/PI/SUPPLY) and the
+    deliverables-traceability + deferred/follow-up sections, with no stale
+    DRAFT wording; `docs/known-limitations.md` is dated, tied to issue #14
+    and covers every accepted residual section with its source citations;
+    the README links both docs, records the audit as complete and carries
+    the corrected hint-linkability claim with the pre-audit overclaim gone;
+    and the suite wiring itself (Makefile `test`, the §4 step list with
+    consistent numbering) is pinned.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
@@ -405,7 +452,7 @@ verify trio below. `--reboot` is a fresh-install-only flag: the service
 restart IS the activation step of an upgrade.
 
 The automated acceptance test of all of the above is `bash
-tests/upgrade_e2e.sh` (step 13 of §4): it sources `raspberry/upgrade.sh`,
+tests/upgrade_e2e.sh` (step 14 of §4): it sources `raspberry/upgrade.sh`,
 drives the very same functions rootlessly against a temp "node" and asserts
 migration-on-populated-store, backup rotation, gate success, forced-failure
 rollback and ZERO envelope loss at every phase.

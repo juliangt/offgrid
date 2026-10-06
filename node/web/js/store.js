@@ -627,6 +627,12 @@ function toEnvelopeWire(rec) {
 
 function transitRecordOf(env, nowSec) {
   if (!validEnvelopeShape(env)) return null;
+  /* §6.2 receive-path id check (issue #14 Phase 2): an envelope whose id
+   * does not recompute over its outer fields is corrupt or tampered — it
+   * never enters the transit queue (a mule slot is a shared, bounded
+   * resource; carrying provably-inconsistent bytes wastes it). Same
+   * silent-skip class as the shape rejection above. */
+  if (!envelopeIdMatches(env)) return null;
   return {
     v: env.v,
     id: env.id,

@@ -77,6 +77,48 @@ var build = "dev"
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
 
+// HTTP server timeouts (issue #14, NODE-02). ReadHeaderTimeout was always
+// set; the remaining three bound the connection-lifetime attacks the
+// MaxBytesReader body cap cannot (it bounds SIZE, not TIME) and that
+// net/http otherwise leaves at "no timeout":
+//
+//   - ReadTimeout caps the whole request lifetime (headers + body): a
+//     slowloris client can no longer drip a ≤ 1 MiB body indefinitely,
+//     holding a connection and its goroutine. 60 s is orders of magnitude
+//     above any legitimate phone interaction on the node's own AP (a full
+//     1 MiB push is well under 5 s at Wi-Fi speeds).
+//   - WriteTimeout caps the response write: a client that never reads cannot
+//     pin a writer goroutine. 60 s covers the largest legal response (the
+//     ~1 MiB worst-case directory GET, §8.1 NOTE) at captive-portal speeds.
+//   - IdleTimeout reaps keep-alive sockets between requests: without it a
+//     handful of hoarded idle connections linger forever. 120 s is well
+//     above browser keep-alive habits, so honest clients never see a race.
+//
+// Defense in depth, same spirit as the Track 2 budgets of ratelimit.go: the
+// reference deployment's firewall connlimits (32/source, hardening.md §2)
+// remain the first brake; the daemon no longer assumes they exist.
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 60 * time.Second
+	writeTimeout      = 60 * time.Second
+	idleTimeout       = 120 * time.Second
+)
+
+// newHTTPServer builds the daemon's http.Server with the full timeout set
+// above. Kept as a function (not an inline literal) so the timeout contract
+// is assertable by TestNewHTTPServerTimeouts — a regression that silently
+// drops one of these fields must fail the suite, not just code review.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
 // recordingJanitor adapts *storage.Store to cleanup.Janitor, recording every
 // COMPLETED TTL sweep in the shared health counters (issue #31): ttl_sweeps,
 // ttl_swept_envelopes and the last_cleanup_unix / last_cleanup_envelopes_deleted
@@ -216,11 +258,11 @@ func main() {
 	defer cancelStatus()
 	statusEngine.Run(statusCtx, 0) // 0 → the default one-minute cadence
 
-	srv := &http.Server{
-		Addr:              *addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	// Bound every phase of a connection's life (see the timeout consts and
+	// newHTTPServer above): the bare inline literal with only
+	// ReadHeaderTimeout let slow-body drips and idle keep-alive sockets hold
+	// connections forever (issue #14, NODE-02).
+	srv := newHTTPServer(*addr, handler)
 
 	// Bind before serving so readiness is a hard fact: the sd_notify READY=1
 	// below must only be sent once the socket truly accepts connections.

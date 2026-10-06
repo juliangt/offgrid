@@ -65,10 +65,15 @@ function forgedWithMutatedInner(env, bob, mutate) {
   const eph = DTN.nacl.box.keyPair();
   const nonce = DTN.randomBytes(24);
   const box = DTN.nacl.box(DTN.utf8Encode(rebuilt), nonce, bob.boxPublic, eph.secretKey);
+  const payload = DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box));
   return {
-    v: 1, id: env.id, dest_hint: env.dest_hint,
+    v: 1,
+    /* the strongest forger recomputes the PUBLIC §6.2 id over the doctored
+     * payload — what must still stop this tamper is the inner SIGNATURE */
+    id: DTN.computeEnvelopeId(1, env.dest_hint, env.created_at, env.ttl, payload),
+    dest_hint: env.dest_hint,
     created_at: env.created_at, ttl: env.ttl,
-    payload: DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box))
+    payload
   };
 }
 
@@ -254,7 +259,8 @@ console.log("== (c3) malformed chunk inners are structurally rejected (§4.4) ==
     const eph = DTN.nacl.box.keyPair();
     const nonce = DTN.randomBytes(24);
     const box = DTN.nacl.box(DTN.utf8Encode(innerJsonString), nonce, bob.boxPublic, eph.secretKey);
-    return { v: 1, id: env.id, dest_hint: env.dest_hint, created_at: env.created_at, ttl: env.ttl, payload: DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box)) };
+    const payload = DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box));
+    return { v: 1, id: DTN.computeEnvelopeId(1, env.dest_hint, env.created_at, env.ttl, payload), dest_hint: env.dest_hint, created_at: env.created_at, ttl: env.ttl, payload };
   };
   const rawInnerTextOf = (env) => {
     const raw = DTN.b64decode(env.payload);
@@ -280,7 +286,8 @@ console.log("== (c3) malformed chunk inners are structurally rejected (§4.4) ==
     const eph = DTN.nacl.box.keyPair();
     const nonce = DTN.randomBytes(24);
     const box = DTN.nacl.box(DTN.utf8Encode(DTN.canonicalChunkedInnerJson(inner.m, inner.a, inner.k, inner.s, inner.t, inner.w, inner.g, inner.i, inner.n)), nonce, bob.boxPublic, eph.secretKey);
-    return { v: 1, id: env.id, dest_hint: env.dest_hint, created_at: env.created_at, ttl: env.ttl, payload: DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box)) };
+    const payload = DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box));
+    return { v: 1, id: DTN.computeEnvelopeId(1, env.dest_hint, env.created_at, env.ttl, payload), dest_hint: env.dest_hint, created_at: env.created_at, ttl: env.ttl, payload };
   };
   ok(DTN.decryptEnvelope(mk({ w: "chunk2" }, null), bob, NOW).reason === "bad_inner",
     'an unknown w tag ("chunk2") is corrupt by definition (§4.4 versioned tag)');

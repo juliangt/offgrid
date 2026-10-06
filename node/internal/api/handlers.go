@@ -165,7 +165,8 @@ const manifestContentType = "application/manifest+json; charset=utf-8"
 // and img/ are read once at
 // startup. Unknown paths yield a JSON 404 and wrong
 // methods a JSON 405 with an Allow header (§10.1). The whole mux is wrapped
-// with the canonical-host redirect and the body-size limiter; the two POST
+// with the baseline security headers, the canonical-host redirect and the
+// body-size limiter; the two POST
 // endpoints additionally sit behind the per-IP admission-control budgets of
 // ratelimit.go (issue #16 Phase 2): exhaustion answers 429 rate_limited with
 // a Retry-After header before the body is read. GET endpoints stay unlimited
@@ -267,7 +268,10 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	// Everything else → JSON 404 (no SPA fallback; only GET / serves HTML).
 	mux.HandleFunc("/", handleNotFound)
 
-	return canonicalHost(limitBody(mux)), nil
+	// secureHeaders outermost: even the 301 canonical redirect and the 302
+	// captive-probe answer carry the baseline security headers (issue #14,
+	// NODE-03); then the canonical-host redirect, then the body cap.
+	return secureHeaders(canonicalHost(limitBody(mux))), nil
 }
 
 // loadStaticAssets reads every .css/.js file under css/ and js/ plus every
@@ -575,7 +579,13 @@ func validatePrekeysBundle(raw json.RawMessage) ([]byte, error) {
 // set from the NODE clock (§10.3, §6.1: the server, never the client, owns
 // the time reference). Invalid alias or keys → 400; an invalid §4.6 prekeys
 // member → 400 invalid_prekeys (blind shape validation only — the node
-// never verifies the bundle signature, §1/§4.6). The POST body shape is
+// never verifies the bundle signature, §1/§4.6). At the storage layer's
+// directory cap (storage.MaxDirectoryEntries, issue #14 NODE-01) a NEW
+// pubkey is shed with 429 node_full — the same capacity class the sync
+// endpoint answers at envelope capacity, and a status this endpoint already
+// answers under the §10.1 request budget — while a refresh of an entry
+// already present always succeeds (issue #14: a full directory must never
+// lock existing users out of republication). The POST body shape is
 // otherwise unchanged since pre-1.6 builds (epoch is additive in the GET
 // response only, §15.4; prekeys is additive since 1.7.0 and its absence
 // clears any stored bundle, §9).
@@ -603,6 +613,10 @@ func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 	now := timeNow().Unix()
 	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds, prekeys); err != nil {
+		if errors.Is(err, storage.ErrCapacity) {
+			writeError(w, http.StatusTooManyRequests, codeNodeFull)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
 	}

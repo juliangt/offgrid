@@ -125,8 +125,28 @@ const knownIDChunkSize = 900
 var maxEnvelopes = 5000
 
 // ErrCapacity is returned by InsertEnvelopes when the node is at or over its
-// envelope capacity (maxEnvelopes). Callers should surface it as HTTP 429.
+// envelope capacity (maxEnvelopes), and by UpsertDirectory when a NEW entry
+// would exceed the directory capacity (maxDirectoryEntries). Callers should
+// surface it as HTTP 429.
 var ErrCapacity = errors.New("storage: envelope capacity reached")
+
+// maxDirectoryEntries is the per-node hard cap on directory rows (5000, the
+// §8.1 envelope-cap class): POST /api/v1/directory is UNAUTHENTICATED and the
+// directory table is the one store surface the §10.6 janitor never reaps, so
+// without a ceiling it is an unbounded disk-fill vector — the pre-fix audit
+// finding NODE-01 (issue #14): 30 registrations/min per IP (the §10.1 request
+// budget's refill) × ~2.2 KiB per max-size entry, forever, across any number
+// of colluding stations, until the SD card fills and every push sheds 507.
+// At or over the cap, a registration for a NEW pubkey is rejected with
+// ErrCapacity (the API maps it to 429 node_full, the same shed class the
+// sync endpoint answers at envelope capacity); an upsert for a pubkey
+// ALREADY PRESENT always succeeds, so a full directory never locks existing
+// users out of refreshing their own entry — rejection targets only new
+// rows, mirroring the envelope store's "reject newest, keep oldest" policy.
+//
+// It is a var instead of a const purely as a test hook (the maxEnvelopes
+// pattern); production code must never reassign it.
+var maxDirectoryEntries = 5000
 
 // DirectoryEntry is one registered identity in the node's public directory,
 // served as JSON by GET /api/v1/directory with exactly these field names
@@ -439,10 +459,17 @@ func (s *Store) Close() error {
 
 // MaxEnvelopes reports the per-node envelope cap (§8.1, 5000). It is an
 // exported accessor so the health snapshot (issue #31) can advertise
-// envelope_capacity from the same source the admission guard enforces,
-// instead of copying the constant.
+// envelope_capacity from the same source admission enforces, instead of
+// copying the constant.
 func MaxEnvelopes() int {
 	return maxEnvelopes
+}
+
+// MaxDirectoryEntries reports the per-node directory-row cap (5000, see
+// maxDirectoryEntries). Exported so tests and operators read the same bound
+// admission enforces.
+func MaxDirectoryEntries() int {
+	return maxDirectoryEntries
 }
 
 // EnvelopeCount returns the number of envelopes currently stored (§9). The
@@ -670,7 +697,33 @@ func placeholders(n int) string {
 // downgrade self-heal: a legacy republication clears any stale bundle, §9).
 // The POST body shape is otherwise unchanged: clients cannot influence the
 // epoch, only observe it.
+//
+// Capacity guard (issue #14, NODE-01): a registration for a pubkey NOT yet
+// present is rejected with ErrCapacity once maxDirectoryEntries rows exist —
+// the unauthenticated directory must not be an unbounded disk-fill vector.
+// An entry that already exists always refreshes, cap or no cap: a full
+// directory sheds only NEW rows, never an existing user's republication
+// (the envelope store's reject-newest policy applied to rows). The
+// exists-then-count order makes the refresh path a cheap index lookup, and
+// pays the COUNT only for genuinely new registrations. As with the envelope
+// cap, the check and the insert are separate statements on the single
+// connection, so a cap-legal batch racing another writer may overshoot the
+// cap by at most a handful of rows — the same accepted tolerance as
+// InsertEnvelopes (≤ 100 there), and irrelevant at a 5000-row bound.
 func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error {
+	var exists int
+	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM directory WHERE pubkey = ?)`, pubkey).Scan(&exists); err != nil {
+		return fmt.Errorf("storage: check directory %s: %w", pubkey, err)
+	}
+	if exists == 0 {
+		var current int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM directory`).Scan(&current); err != nil {
+			return fmt.Errorf("storage: count directory: %w", err)
+		}
+		if current >= maxDirectoryEntries {
+			return ErrCapacity
+		}
+	}
 	var stored any
 	if len(prekeys) > 0 {
 		stored = string(prekeys)

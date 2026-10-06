@@ -1078,3 +1078,89 @@ PRAGMA user_version = 3;`); err != nil {
 		}
 	}
 }
+
+// TestDirectoryUpsertCapacityGuard verifies the directory cap of issue #14
+// (NODE-01): the unauthenticated directory table is the one store surface the
+// TTL janitor never reaps, so a NEW registration at/over the cap is rejected
+// with ErrCapacity (fail closed) while an upsert for a pubkey ALREADY present
+// always succeeds — a full directory sheds new rows only, never an existing
+// user's republication (the envelope store's reject-newest policy).
+func TestDirectoryUpsertCapacityGuard(t *testing.T) {
+	s := newTestStore(t)
+
+	old := maxDirectoryEntries
+	maxDirectoryEntries = 3
+	t.Cleanup(func() { maxDirectoryEntries = old })
+
+	key := func(n int) string { return strings.Repeat(string(rune('A'+n)), 44) }
+
+	for i := 0; i < 3; i++ {
+		if err := s.UpsertDirectory(key(i), key(i), "user", 100, 0, nil); err != nil {
+			t.Fatalf("upsert %d below cap: %v", i, err)
+		}
+	}
+
+	// At the cap: a NEW pubkey is rejected with the typed error.
+	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 100, 0, nil); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("new registration at cap: want ErrCapacity, got %v", err)
+	}
+
+	// Fail closed: the rejected row must not exist.
+	entries, err := s.GetDirectory(10)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("rejected registration must store nothing, got %d entries err=%v", len(entries), err)
+	}
+
+	// An EXISTING pubkey keeps refreshing at the cap: new alias/keys/prekeys
+	// land, last_seen moves — never locked out.
+	if err := s.UpsertDirectory(key(0), key(1), "alice_prime", 200, 0, []byte(`{"v":1}`)); err != nil {
+		t.Fatalf("existing-pubkey refresh at cap: %v", err)
+	}
+	entries, err = s.GetDirectory(10)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("refresh must not add a row, got %d entries err=%v", len(entries), err)
+	}
+	for _, e := range entries {
+		if e.Pubkey == key(0) {
+			if e.Alias != "alice_prime" || e.X25519 != key(1) || e.LastSeen != 200 {
+				t.Fatalf("refreshed entry drifted: %+v", e)
+			}
+			if string(e.Prekeys) != `{"v":1}` {
+				t.Fatalf("refresh must update the bundle verbatim, got %s", string(e.Prekeys))
+			}
+		}
+	}
+
+	// Below the cap again after the janitor-style thought experiment: the cap
+	// is on rows, so deleting one row makes room (nothing sticky).
+	if _, err := s.db.Exec(`DELETE FROM directory WHERE pubkey = ?`, key(2)); err != nil {
+		t.Fatalf("delete row: %v", err)
+	}
+	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 300, 0, nil); err != nil {
+		t.Fatalf("new registration under the cap after a delete must succeed: %v", err)
+	}
+}
+
+// TestDirectoryUpsertDefaultCap pins the real default (5000, the §8.1
+// envelope-cap class): 5000 distinct registrations are accepted, the 5001st
+// is rejected with ErrCapacity, and a refresh of an existing entry still
+// succeeds at the full cap.
+func TestDirectoryUpsertDefaultCap(t *testing.T) {
+	s := newTestStore(t)
+
+	keyAt := func(n int) string { return fmt.Sprintf("%044d", n) }
+	for i := 0; i < maxDirectoryEntries; i++ {
+		if err := s.UpsertDirectory(keyAt(i), keyAt(i), "user", 100, 0, nil); err != nil {
+			t.Fatalf("registration %d below default cap: %v", i, err)
+		}
+	}
+	if err := s.UpsertDirectory(keyAt(maxDirectoryEntries), keyAt(maxDirectoryEntries), "over", 100, 0, nil); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("registration past the default cap: want ErrCapacity, got %v", err)
+	}
+	if err := s.UpsertDirectory(keyAt(0), keyAt(0), "refresh", 200, 0, nil); err != nil {
+		t.Fatalf("existing-pubkey refresh at the full cap must succeed: %v", err)
+	}
+	if got := MaxDirectoryEntries(); got != 5000 {
+		t.Fatalf("MaxDirectoryEntries must report the enforced bound, got %d", got)
+	}
+}

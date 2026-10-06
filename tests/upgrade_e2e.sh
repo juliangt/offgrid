@@ -252,6 +252,31 @@ check "upgrade.sh keeps a bounded generation window (default 3)" \
 check "provision.sh carries the STEPS subset selector (issue #22 upgrade path)" \
     "1" "$({ grep -cE '^STEPS=' "$ROOT/raspberry/provision.sh" || true; })"
 
+# AUDIT pins (docs/security-audit.md §5, SUPPLY-01/SUPPLY-03): the release
+# verification chain. Every release asset install.sh USES must be verified
+# against the release SHA256SUMS BEFORE it runs — the provisioning tarball is
+# root-executed code — and the unverified local-checkout binary must warn.
+IL="$ROOT/raspberry/install.sh"
+LN_VDEF="$(grep -nF 'verify_sum()' "$IL" | head -n 1 | cut -d: -f1)"
+LN_VBIN="$(grep -nF 'verify_sum "dtn-node-linux-$BINARCH"' "$IL" | head -n 1 | cut -d: -f1)"
+LN_VTAR="$(grep -nF 'verify_sum "$(basename "$TARBALL")"' "$IL" | head -n 1 | cut -d: -f1)"
+LN_UNTAR="$(grep -nF 'tar -xzf "$TARBALL"' "$IL" | head -n 1 | cut -d: -f1)"
+if [ -n "$LN_VDEF" ] && [ -n "$LN_VBIN" ] && [ -n "$LN_VTAR" ] && [ -n "$LN_UNTAR" ] \
+    && [ "$LN_VBIN" -gt "$LN_VDEF" ] && [ "$LN_VTAR" -gt "$LN_VBIN" ] \
+    && [ "$LN_UNTAR" -gt "$LN_VTAR" ]; then
+    VORDER=ok
+else
+    VORDER="broken (def=$LN_VDEF bin=$LN_VBIN tar=$LN_VTAR untar=$LN_UNTAR)"
+fi
+check "install.sh verification order: define verify_sum -> verify binary -> verify tarball -> only then extract" \
+    "ok" "$VORDER"
+check "install.sh fails closed on a missing SHA256SUMS entry AND on a hash mismatch" \
+    "ok" "$([ "$(grep -cF 'die "no checksum for' "$IL")" -ge 1 ] && [ "$(grep -cF 'die "checksum mismatch for' "$IL")" -ge 1 ] && echo ok || echo missing)"
+check "install.sh checksum match is exact-field (a substring of another asset's name cannot verify)" \
+    "ok" "$({ grep -qF 'substr($NF, length($NF) - length(n)) == "/" n' "$IL" && echo ok || echo missing; })"
+check "install.sh warns the local-checkout binary is unverified (SUPPLY-03)" \
+    "2" "$({ grep -cF 'log "WARNING:' "$IL" || true; })"
+
 # The binding order of upgrade_node(): stop -> BACK UP -> only then the
 # provisioning subset (binary swap) -> start -> health gate.
 sed -n '/^upgrade_node() {/,/^}/p' "$ROOT/raspberry/upgrade.sh" > "$WORK/unode.txt"

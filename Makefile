@@ -6,9 +6,10 @@
 #   make build       host dev binary (node/dtn-node-dev, the go:embeded SPA inside)
 #   make build-all   the full cross-compile matrix of node/build.sh (arm64/armv7/armv6 + dev)
 #   make test        the full suite: go test, the headless SPA tests, the
-#                    docs structure test (install-node guide, issue #35),
-#                    the curl E2E, the node upgrade/rollback E2E (issue #22)
-#                    and the Pi hardening structure test
+#                    docs structure tests (install-node guide, issue #35;
+#                    audit deliverables, issue #14), the curl E2E, the node
+#                    upgrade/rollback E2E (issue #22) and the Pi hardening
+#                    structure test
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
 #                    purpose, assert degrade + auto-recover; see
@@ -50,8 +51,10 @@ test:
 	node tests/chunking.mjs
 	node tests/acks.mjs
 	node tests/qr_identity.mjs
+	node tests/spa_security.mjs
 	node tests/field_equiv.mjs
 	node tests/install_node_structure.mjs
+	node tests/docs_structure.mjs
 	bash tests/sync_e2e.sh
 	bash tests/upgrade_e2e.sh
 	bash tests/hardening_structure.sh

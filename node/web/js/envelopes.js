@@ -375,6 +375,28 @@ function validEnvelopeShape(env) {
     typeof env.payload === "string";
 }
 
+/* §6.2 id consistency on the RECEIVE path (issue #14 Phase 2 hardening).
+ * The id is a plain SHA-256 over the outer fields — public data, so this is
+ * corruption/tamper DETECTION, not authentication — but every conforming
+ * sender computes it over the exact outer fields it emits (§6.2), and the
+ * §15.1 blind v1→v2 conversion copies it untouched (id stability). Nothing
+ * legitimate ever changes dest_hint/created_at/ttl/payload without
+ * recomputing, so an envelope whose id does not recompute is corrupt (or
+ * doctored) by definition: the recipient and the mule drop it silently,
+ * the same way a Poly1305 failure is dropped. Creation version rule (the
+ * string carries "v":<creation version> per §5.2): v1 envelopes were minted
+ * with 1; a v2 envelope's id was computed ONCE at creation (§15.1) — over
+ * 1 when meta.orig_v === 1 (the only version the blind transform produces),
+ * over its own v otherwise (a future native-v2 sender). */
+function envelopeIdMatches(env) {
+  var creationV = (env.v === 2 && env.meta && env.meta.orig_v === 1) ? 1 : env.v;
+  try {
+    return computeEnvelopeId(creationV, env.dest_hint, env.created_at, env.ttl, env.payload) === env.id;
+  } catch (e) {
+    return false;
+  }
+}
+
 /*
  * Recipient procedure §4.3 + §11 (+ §4.6): classify by dest_hint, open the
  * box, validate the inner fields, verify the detached signature. ANY failure
@@ -406,6 +428,7 @@ function decryptEnvelope(env, identity, now, ownHints, prekeySecrets) {
   try {
     var nacl = requireNacl();
     if (!validEnvelopeShape(env)) return { ok: false, reason: "bad_envelope" };
+    if (!envelopeIdMatches(env)) return { ok: false, reason: "bad_id" }; /* §6.2 receive-path check */
     var hints;
     if (typeof ownHints === "string") hints = [ownHints];
     else if (ownHints && ownHints.length) hints = ownHints;

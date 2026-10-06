@@ -152,6 +152,18 @@ check "hostapd.conf: ctrl_interface present (dtn-station-shield hostapd_cli depe
     "1" "$(count_regex '^ctrl_interface=/var/run/hostapd$' "$HOSTAPD_CONF")"
 check "hostapd.conf: no bridge= line (bridging would leak L2 frames off the island)" \
     "0" "$(count_regex '^bridge=' "$HOSTAPD_CONF")"
+# Audit pins (docs/security-audit.md §4): the open-AP stance is explicit and
+# stays free of link-layer secrets and WPS push-button surface.
+check "hostapd.conf: explicitly open (wpa=0 + auth_algs=1, exactly once each)" \
+    "2" "$(count_regex '^wpa=0$|^auth_algs=1$' "$HOSTAPD_CONF")"
+check "hostapd.conf: no WPS anywhere (wps_state/wps_pbc/eap_server would add a virtual push-button to an open AP)" \
+    "0" "$(count_regex '^wps_state=|^wps_pbc=|^eap_server=' "$HOSTAPD_CONF")"
+check "hostapd.conf: no wpa_passphrase (open by design — a committed PSK would be a shared secret pretending to be one)" \
+    "0" "$(count_regex '^wpa_passphrase' "$HOSTAPD_CONF")"
+check "hostapd.conf: SSID broadcast on (a hidden SSID breaks captive detection, adds zero security)" \
+    "1" "$(count_regex '^ignore_broadcast_ssid=0$' "$HOSTAPD_CONF")"
+check "hostapd.conf: association ceiling max_num_sta=20 (L2 backstop for every per-source shield)" \
+    "1" "$(count_regex '^max_num_sta=20$' "$HOSTAPD_CONF")"
 
 # ---------------------------------------------------------------------------
 # 3. dnsmasq.conf: authoritative wildcard for the portal only + tmpfs query
@@ -175,6 +187,27 @@ check "dnsmasq.conf: query log goes to tmpfs /dev/shm (names never hit disk, §1
     "1" "$(count_regex '^log-facility=/dev/shm/' "$DNSMASQ_CONF")"
 check "dnsmasq.conf: explicit dhcp-leasefile (station-shield MAC<->IP source)" \
     "1" "$(count_regex '^dhcp-leasefile=/var/lib/misc/dnsmasq\.leases$' "$DNSMASQ_CONF")"
+
+# ---------------------------------------------------------------------------
+# 3b. provision.sh static_ip: IPv6 disabled on the client-facing interfaces
+#     (audit PI-01, docs/security-audit.md §4 — the Track-1 shields are
+#     iptables/IPv4-only; a live link-local address on wlan0 would be a side
+#     door around every per-source hashlimit, the connlimit and DTN_DNSBL).
+# ---------------------------------------------------------------------------
+log "section 3b: provision.sh IPv6 island sysctl (PI-01)"
+PROVISION="$ROOT/raspberry/provision.sh"
+check "provision.sh: installs the island sysctl file at /etc/sysctl.d/99-dtn-island.conf" \
+    "1" "$(count_regex 'install_file "\$tmp" /etc/sysctl\.d/99-dtn-island\.conf 0644' "$PROVISION")"
+check "provision.sh: IPv6 disabled on wlan0 (the AP interface itself)" \
+    "1" "$(count_regex '^net\.ipv6\.conf\.wlan0\.disable_ipv6 = 1$' "$PROVISION")"
+check "provision.sh: IPv6 disabled on eth0 (the wired side)" \
+    "1" "$(count_regex '^net\.ipv6\.conf\.eth0\.disable_ipv6 = 1$' "$PROVISION")"
+check "provision.sh: IPv6 disabled by default for interfaces created later" \
+    "1" "$(count_regex '^net\.ipv6\.conf\.default\.disable_ipv6 = 1$' "$PROVISION")"
+check "provision.sh: loopback keeps its IPv6 (no conf.all hammer — the daemon's dual-stack bind stays valid)" \
+    "0" "$(count_regex 'conf\.all\.disable_ipv6' "$PROVISION")"
+check "provision.sh: applies the sysctl file immediately (closes the pre-reboot window)" \
+    "1" "$(count_regex 'sysctl -q -p /etc/sysctl\.d/99-dtn-island\.conf' "$PROVISION")"
 
 # ---------------------------------------------------------------------------
 # 4. iptables.sh --print: the generated ruleset IS the security surface.

@@ -88,6 +88,7 @@ DTN.computeEnvelopeId = computeEnvelopeId;
 DTN.buildEnvelope = buildEnvelope;
 DTN.decryptEnvelope = decryptEnvelope;
 DTN.validEnvelopeShape = validEnvelopeShape;
+DTN.envelopeIdMatches = envelopeIdMatches;
 DTN.canonicalPrekeyBundleString = canonicalPrekeyBundleString;
 DTN.prekeySignBundle = prekeySignBundle;
 DTN.prekeyBundleShapeOk = prekeyBundleShapeOk;

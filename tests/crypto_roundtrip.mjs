@@ -181,7 +181,14 @@ console.log("== (d) tamper resistance and wrong-recipient rejection ==");
   const raw = DTN.b64decode(envelope.payload);
   const flipped = Uint8Array.from(raw);
   flipped[60] ^= 0xff; // corrupt inside the box (ciphertext/MAC region)
-  const tampered = { ...envelope, payload: DTN.b64encode(flipped) };
+  const flippedPayload = DTN.b64encode(flipped);
+  // The strongest forger recomputes the PUBLIC §6.2 id over the doctored
+  // payload — what must still stop this tamper is the Poly1305 MAC.
+  const tampered = {
+    ...envelope,
+    payload: flippedPayload,
+    id: DTN.computeEnvelopeId(1, envelope.dest_hint, envelope.created_at, envelope.ttl, flippedPayload)
+  };
   const res = DTN.decryptEnvelope(tampered, bob, nowSec);
   ok(res.ok === false && res.reason === "crypto",
      "flipped payload byte is rejected by the Poly1305 MAC, silently");
@@ -234,13 +241,14 @@ console.log("== (d) tamper resistance and wrong-recipient rejection ==");
   const box2 = DTN.nacl.box(DTN.utf8Encode(DTN.canonicalInnerJson(
     innerJson.m, innerJson.a, innerJson.k, innerJson.s, innerJson.t)),
     nonce2, bob.boxPublic, eph2.secretKey);
+  const forged2Payload = DTN.b64encode(DTN.concatBytes(eph2.publicKey, nonce2, box2));
   const forged2 = {
     v: 1,
-    id: victim.id,
+    id: DTN.computeEnvelopeId(1, victim.dest_hint, nowSec, 604800, forged2Payload),
     dest_hint: victim.dest_hint,
     created_at: nowSec,
     ttl: 604800,
-    payload: DTN.b64encode(DTN.concatBytes(eph2.publicKey, nonce2, box2))
+    payload: forged2Payload
   };
   const res2 = DTN.decryptEnvelope(forged2, bob, nowSec);
   ok(res2.ok === false && res2.reason === "bad_signature",
