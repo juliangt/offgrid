@@ -13,8 +13,8 @@
 #     | sudo bash -s -- --country AR
 #
 #   The script detects the board architecture, downloads the matching release
-#   binary (checksum-verified against the release SHA256SUMS) plus the
-#   raspberry/ tree of the same release tag, and runs provisioning.
+#   binary plus the raspberry/ tree of the same release tag — both
+#   checksum-verified against the release SHA256SUMS before anything runs.
 #
 # OFFLINE — no Internet on the Pi (the usual case for a field deployment):
 #
@@ -195,18 +195,25 @@ if [ -n "$OFFLINE_DIR" ]; then
     for f in "dtn-node-linux-$BINARCH" "SHA256SUMS"; do
         [ -f "$OFFLINE_DIR/$f" ] || die "release bundle incomplete: $OFFLINE_DIR/$f missing"
     done
-    ls "$OFFLINE_DIR"/raspberry-*.tar.gz >/dev/null 2>&1 \
-        || die "release bundle incomplete: raspberry-<tag>.tar.gz missing in $OFFLINE_DIR"
+    TARBALL=""
+    for f in "$OFFLINE_DIR"/raspberry-*.tar.gz; do
+        if [ -f "$f" ]; then TARBALL="$f"; break; fi
+    done
+    [ -n "$TARBALL" ] || die "release bundle incomplete: raspberry-<tag>.tar.gz missing in $OFFLINE_DIR"
     log "offline mode: reading release bundle from $OFFLINE_DIR"
     TMP="$(mktemp -d /tmp/dtn-install.XXXXXX)"
     SRCDIR="$TMP/src"
     mkdir -p "$SRCDIR/node"
     install -m 0755 "$OFFLINE_DIR/dtn-node-linux-$BINARCH" "$SRCDIR/node/dtn-node-linux-$BINARCH"
     cp "$OFFLINE_DIR/SHA256SUMS" "$TMP/SHA256SUMS"
-    tar -xzf "$OFFLINE_DIR"/raspberry-*.tar.gz -C "$SRCDIR"
 else
     if [ -f "$SCRIPT_DIR/provision.sh" ] && [ -f "$SCRIPT_DIR/../node/dtn-node-linux-$BINARCH" ]; then
         log "local checkout with a prebuilt binary detected: nothing to download"
+        # AUDIT (SUPPLY-03, docs/security-audit.md §5): this path installs a
+        # binary that no release SHA256SUMS can vouch for, and a stale local
+        # build is invisible — say so loudly, twice, before it runs as root.
+        log "WARNING: the LOCAL binary is installed AS IS — there is no SHA256SUMS here to verify it against."
+        log "WARNING: confirm it is a current node/build.sh output; after activation check its build identity via GET /api/v1/health."
         LOCAL_TREE=1
         SRCDIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     else
@@ -224,18 +231,33 @@ else
         fetch "$BASE/dtn-node-linux-$BINARCH" "$SRCDIR/node/dtn-node-linux-$BINARCH"
         chmod 0755 "$SRCDIR/node/dtn-node-linux-$BINARCH"
         fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS"
-        fetch "$BASE/raspberry-$TAG.tar.gz" "$TMP/raspberry.tar.gz"
-        tar -xzf "$TMP/raspberry.tar.gz" -C "$SRCDIR"
+        TARBALL="$TMP/raspberry-$TAG.tar.gz"
+        fetch "$BASE/raspberry-$TAG.tar.gz" "$TARBALL"
     fi
 fi
 
 # --- checksum verification (online and offline; the local build has no sums) --
+# AUDIT (SUPPLY-01, docs/security-audit.md §5): EVERY release asset this
+# script USES is verified against the release SHA256SUMS before any of it
+# runs — the daemon binary AND raspberry-<tag>.tar.gz, whose contents are
+# the root-executed provisioning scripts below. (The SHA256SUMS file itself
+# arrives over the same channel as the artifacts it pins — its designed
+# successor, the signed release capsule, is docs/offline-maintenance.md §2.)
+verify_sum() {
+    local name="$1" file="$2" expected actual
+    # SHA256SUMS fields end in the asset name; the binary is recorded with
+    # its repository path prefix ("node/dtn-node-linux-..."), so match on
+    # the exact last field or an exact "/<name>" suffix (never a substring).
+    expected="$(awk -v n="$name" '$NF == n || substr($NF, length($NF) - length(n)) == "/" n { print $1; exit }' "$TMP/SHA256SUMS")"
+    [ -n "$expected" ] || die "no checksum for $name in SHA256SUMS"
+    actual="$(sha256sum "$file" | cut -d' ' -f1)"
+    [ "$expected" = "$actual" ] || die "checksum mismatch for $name (expected $expected, got $actual)"
+    log "checksum OK for $name"
+}
 if [ "$LOCAL_TREE" != "1" ]; then
-    expected="$(grep "dtn-node-linux-$BINARCH" "$TMP/SHA256SUMS" | cut -d' ' -f1 | head -n 1)"
-    [ -n "$expected" ] || die "no checksum for dtn-node-linux-$BINARCH in SHA256SUMS"
-    actual="$(sha256sum "$SRCDIR/node/dtn-node-linux-$BINARCH" | cut -d' ' -f1)"
-    [ "$expected" = "$actual" ] || die "checksum mismatch for dtn-node-linux-$BINARCH (expected $expected, got $actual)"
-    log "checksum OK for dtn-node-linux-$BINARCH"
+    verify_sum "dtn-node-linux-$BINARCH" "$SRCDIR/node/dtn-node-linux-$BINARCH"
+    verify_sum "$(basename "$TARBALL")" "$TARBALL"
+    tar -xzf "$TARBALL" -C "$SRCDIR"
 fi
 
 # --- upgrade mode: backup -> swap -> health gate -> rollback-on-failure -----------

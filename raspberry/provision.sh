@@ -254,6 +254,41 @@ EOF
     rm -f "$tmp"
     verify "interfaces sources .d directory" grep -q "source /etc/network/interfaces.d" /etc/network/interfaces
 
+    # IPv6 is DISABLED on the client-facing interfaces (audit finding PI-01,
+    # docs/security-audit.md §4). The canonical origin is IPv4 by design
+    # (10.42.0.1, docs/protocol.md §12) and the entire Track-1 shield set —
+    # the per-source DNS/ICMP/portal hashlimits, the connlimit and the
+    # DTN_DNSBL shed chain — is iptables (IPv4) only. With IPv6 left enabled,
+    # wlan0 auto-configures a link-local address and an associated station
+    # could reach dnsmasq and the portal daemon over fe80::/10, which NO
+    # firewall rule sees: every per-source shed bypassable. `default` covers
+    # interfaces created after this file loads; wlan0/eth0 are named because
+    # they typically already exist (per-interface settings win at load time).
+    # Loopback keeps its IPv6 (nothing in this repo uses ::1, but disabling
+    # the whole stack is a bigger hammer than the finding needs).
+    tmp="$(mktemp)"
+    cat > "$tmp" <<'EOF'
+# Managed by provision.sh (off-grid DTN node) — audit finding PI-01.
+# IPv6 off on every client-facing interface: the island is IPv4-only
+# (canonical origin 10.42.0.1, protocol §12) and the Track-1 shields are
+# IPv4-only, so a live link-local address would be an unaudited side door.
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.wlan0.disable_ipv6 = 1
+net.ipv6.conf.eth0.disable_ipv6 = 1
+EOF
+    install_file "$tmp" /etc/sysctl.d/99-dtn-island.conf 0644
+    rm -f "$tmp"
+    verify "sysctl: IPv6 disabled on wlan0 (no unshielded v6 side door)" \
+        grep -q '^net\.ipv6\.conf\.wlan0\.disable_ipv6 = 1$' /etc/sysctl.d/99-dtn-island.conf
+    verify "sysctl: IPv6 disabled by default for future interfaces" \
+        grep -q '^net\.ipv6\.conf\.default\.disable_ipv6 = 1$' /etc/sysctl.d/99-dtn-island.conf
+    # Apply now when the interfaces already exist (the reboot would load the
+    # file anyway; loading early closes the pre-reboot window). Missing
+    # interfaces (a Pi without Ethernet) are tolerated: the file persists and
+    # applies at boot for the ones that exist.
+    sysctl -q -p /etc/sysctl.d/99-dtn-island.conf >/dev/null 2>&1 || \
+        log "sysctl apply deferred (an interface may not exist yet): the file loads at reboot"
+
     # wpa_supplicant must not grab wlan0 back (client mode or wpa-roam hooks).
     if systemctl cat 'wpa_supplicant@.service' >/dev/null 2>&1; then
         systemctl disable wpa_supplicant.service >/dev/null 2>&1 || true
