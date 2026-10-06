@@ -2,21 +2,27 @@
 
 | | |
 |---|---|
-| **Version** | 0.4.0 (Phase 4 appended) |
+| **Version** | 1.0.0 (final — all 5 phases complete) |
 | **Date** | 2026-10-06 |
-| **Status** | DRAFT — the final consolidation pass is pending; this document is the master report that each audit phase appends to. Phase 1 (node daemon), Phase 2 (SPA and client crypto engine), Phase 3 (protocol and threat model) and Phase 4 (Raspberry Pi / network configuration AND supply chain / build, scope areas 4+5 audited together) are complete as of this revision. |
+| **Status** | **FINAL** — this document is the master report that each audit phase appended to; Phase 5 (final consolidation) appended §6 and is the last revision. Phases 1–5 are complete: Phase 1 (node daemon), Phase 2 (SPA and client crypto engine), Phase 3 (protocol and threat model), Phase 4 (Raspberry Pi / network configuration AND supply chain / build, scope areas 4+5 audited together), Phase 5 (final consolidation — executive summary, deliverables traceability, `docs/known-limitations.md`, README corrections, docs structure test). |
 | **Tracker** | GitHub issue #14 ("Security audit"), branch `feat/14-security-audit` |
 | **Normative baseline** | `docs/protocol.md` (wire contract — nothing here overrides it), `docs/hardening.md` (defense tracks A1–A8), `tests/chaos/FAILURE_MATRIX.md` (failure contract) |
+
+## Executive summary
+
+The architecture's core claim — **nodes and mules only ever handle opaque envelopes; all cryptography happens on the client** — holds end to end: it was verified in the daemon (§1.1: no crypto exists server-side, admission is shape-only, storage is verbatim), in the shipped client engine (§2.1: no egress beyond three fixed endpoints carrying public/ciphertext data, secrets confined to IndexedDB), and claim-by-claim against the protocol's own threat model (§3.3: no §13 claim remains that the code does not uphold). The audit produced **30 findings: 0 critical, 0 high, 6 medium, 10 low, 14 info**. Of these, **17 were fixed or corrected in this PR** — 9 code/verification fixes (NODE-01/02/03, SPA-01/02/06, PI-01, SUPPLY-01/03), 7 normative-spec corrections (PROTO-01..07, protocol.md 1.12.2, documentation-only) and PROTO-08 partially (§-contract amendment deferred) — **12 are documented accepted risks or documentation records** (NODE-04/05/06, SPA-03/04/05, PI-02/03/04, SUPPLY-02/04/05), and **1 was already mitigated** by the protocol-assigned Track 1 shields (NODE-07). The headline corrections: **PROTO-01** — the spec's claim that hint rotation decays directory-holder linkability was wrong: the epoch is a public counter and `created_at` rides plaintext in every envelope, so a directory holder can recompute any epoch's hint and link envelopes to aliases permanently (protocol §13.3/§6.1 corrected, spec 1.12.2; an accepted residual, not a closure); **NODE-01** — the directory table was the one unbounded, attacker-writable disk resource on the node; it is now capped (5000 rows, `429 node_full` shed on new registrations at cap); **PI-01** — IPv6 was unaddressed by every Track 1 shield, leaving a live link-local address as a side door around the per-source limits; it is now disabled on the client-facing interfaces. Disclosure note: all fixes and this report land in the same merge — there is no window between fix and disclosure.
 
 ## Scope and phase status
 
 | # | Audit area | Primary material | Phase status |
 |---|---|---|---|
-| 1 | **Node daemon** — Go HTTP API + SQLite storage (`node/main.go`, `node/internal/…`) | this document, §1 | **Phase 1 — complete** |
-| 2 | SPA / client crypto (`node/web/` — tweetnacl usage, IndexedDB, CSP, key handling, §4.6/§4.7 verification duties) | this document, §2 | **Phase 2 — complete (this revision)** |
-| 3 | Protocol / crypto design (envelope format, §5 canonical forms, §6 derivations, §13 threat model, forward secrecy) | this document, §3 | **Phase 3 — complete (this revision)** |
-| 4 | Raspberry Pi / network (`raspberry/` — hostapd, dnsmasq, iptables, systemd, hardening scripts) | this document, §4 | **Phase 4 — complete (this revision)** |
-| 5 | Supply chain / build (`go.mod`/`go.sum` in depth, vendored JS provenance, `node/build.sh`, release stamping) | this document, §5 | **Phase 4 — complete (this revision)** (the vendored-JS provenance chain — the §5 item that lives inside `node/web/` — was discharged by Phase 2, §2.3 item 1 (SPA-01); Phase 4 completed the Go module depth started in §1.4 item 9, the release/install verification chain and the committed-binary question) |
+| 1 | **Node daemon** — Go HTTP API + SQLite storage (`node/main.go`, `node/internal/…`) | this document, §1 | **Complete** (Phase 1) |
+| 2 | SPA / client crypto (`node/web/` — tweetnacl usage, IndexedDB, CSP, key handling, §4.6/§4.7 verification duties) | this document, §2 | **Complete** (Phase 2) |
+| 3 | Protocol / crypto design (envelope format, §5 canonical forms, §6 derivations, §13 threat model, forward secrecy) | this document, §3 | **Complete** (Phase 3) |
+| 4 | Raspberry Pi / network (`raspberry/` — hostapd, dnsmasq, iptables, systemd, hardening scripts) | this document, §4 | **Complete** (Phase 4) |
+| 5 | Supply chain / build (`go.mod`/`go.sum` in depth, vendored JS provenance, `node/build.sh`, release stamping) | this document, §5 | **Complete** (Phase 4 — the vendored-JS provenance chain, the §5 item that lives inside `node/web/`, was discharged by Phase 2, §2.3 item 1 (SPA-01); Phase 4 completed the Go module depth started in §1.4 item 9, the release/install verification chain and the committed-binary question) |
+
+Phase 5 (final consolidation, this revision, v1.0.0) added no new findings: it appended the executive summary, §6 (deliverables traceability + the consolidated deferred/follow-up register), the operator-facing residual-risk digest `docs/known-limitations.md` (the issue's deliverable d), the README corrections the audit's results make binding, and the docs structure test `tests/docs_structure.mjs` that pins all of it.
 
 ## Methodology
 
@@ -74,7 +80,7 @@
 | SUPPLY-04 | Info | node/go.mod, node/go.sum | Module inventory + hygiene dossier: 2 direct deps, both current (no updates on the proxy 2026-10-06), sumdb-verified, no vendor | Documented |
 | SUPPLY-05 | Info | .github/workflows/release.yml (READ-ONLY) | Release workflow: CI-generated SHA256SUMS over all five assets; actions tag-pinned (not SHA-pinned); no third-party build steps | Documented |
 
-Note on disclosure: the three fixed findings (NODE-01..03) and this report land in the same merge, so there is no window between fix and disclosure.
+Note on disclosure: every fixed finding (NODE-01/02/03, SPA-01/02/06, PI-01, SUPPLY-01/03) and this report land in the same merge, so there is no window between fix and disclosure.
 
 ---
 
@@ -615,8 +621,40 @@ Audited: `node/build.sh`, `node/go.mod` + `node/go.sum` (the deep review §1.4 i
 
 ### 5.4 Phase 4 quality gates (executed at this revision)
 
-Same revision and same runs as §4.4 — the two halves of this phase landed together: `tests/hardening_structure.sh` PASS (208 assertions), `tests/upgrade_e2e.sh` PASS (70 assertions), `tests/sync_e2e.sh` PASS (383), `node && go test ./... -count=1` + `go vet` + `gofmt` PASS (10/10 packages), `tests/install_node_structure.mjs` PASS, `tests/spa_security.mjs` + `tests/spa_structure.mjs` PASS.
+Same revision and same runs as §4.4 — the two halves of this phase landed together: `tests/hardening_structure.sh` PASS (208 assertions), `tests/upgrade_e2e.sh` PASS (71 assertions), `tests/sync_e2e.sh` PASS (383), `node && go test ./... -count=1` + `go vet` + `gofmt` PASS (10/10 packages), `tests/install_node_structure.mjs` PASS, `tests/spa_security.mjs` + `tests/spa_structure.mjs` PASS.
 
 ---
 
-*(The final consolidation phase appends below.)*
+## 6. Phase 5 — final consolidation
+
+No new findings. This phase made the audit's output coherent for a reader landing on the repository: this document was finalized (executive summary, v1.0.0 FINAL header, this section), the issue's deliverable (d) shipped as the operator-facing digest [`docs/known-limitations.md`](known-limitations.md), the README was corrected where the audit's results prove its wording wrong (the hint-rotation overclaim, PROTO-01) and given the Documentation-table and status entries, and the whole deliverable set is pinned by the new structure test `tests/docs_structure.mjs` (wired into `make test` and `docs/BUILD.md` §4 step 17). One stale echo outside this document was fixed as part of the consolidation: `docs/offline-maintenance.md` §3.6's prose (intro paragraph and mitigation 1) still repeated the disproved "linkage decays / within an epoch" claim that PROTO-01 corrected — its §3.5 note and the §3.6 table row had been fixed in the Phase 3 commit, the surrounding prose had not.
+
+### 6.1 Deliverables traceability — the issue's four deliverables
+
+| Deliverable (issue #14) | Where it lives |
+|---|---|
+| (a) Written report: every finding with severity, component, reproduction and fix | This document — the findings index plus the per-phase finding sections §1.2 (NODE-01..07), §2.2 (SPA-01..06), §3.2 (PROTO-01..08), §4.2 (PI-01..04), §5.2 (SUPPLY-01..05), each with severity, affected component, description, reproduction and fix/status |
+| (b) Threat-model review | §3.3 — the 27-row claim-by-claim verdict table over `docs/protocol.md` §13 and `docs/hardening.md` A1–A8 (Confirmed / Corrected / Gap, with evidence); the Corrected rows are the protocol.md 1.12.2 rewrites recorded in its changelog |
+| (c) Regression tests per confirmed vulnerability class | The per-finding "Regression tests" lines throughout §1–§5; the new/extended files: `node/internal/api/security_test.go`, `node/internal/api/unknown_recipient_test.go`, `node/internal/storage/storage_test.go`, `node/main_test.go`, `tests/spa_security.mjs`, `tests/qr_identity.mjs` (the PROTO-05 precedence pin), `tests/hardening_structure.sh` (incl. the §3b IPv6 pins), `tests/upgrade_e2e.sh` (the install verification-chain pins) |
+| (d) Known-limitations section in the docs (residual risks accepted by design) | [`docs/known-limitations.md`](known-limitations.md) — plain-English digest of every accepted residual, each citing its authoritative source; linked from the README's Documentation table |
+
+### 6.2 Deferred and follow-up — everything deliberately not done in this audit
+
+| Item | What is deferred, and who owns it |
+|---|---|
+| PROTO-08 | Write the shipped NODE-01 directory cap (5000 rows, `429 node_full` on new registrations at cap, refresh-always) into the protocol.md §8.1/§9/§10.3/§13.5 contract — a §-numbered spec amendment needing its own revision plus the `DEVELOPMENT_PLAN.md` §1.7 update the spec footer requires. Owner: §3.2 PROTO-08; the protocol.md 1.12.2 changelog entry records the deferral |
+| PROTO-05 | Change the client's QR-vs-directory precedence to the designed pin-and-warn (today a directory entry's `x25519` silently overrides a QR-pinned contact's `x`). Owner: `docs/offline-maintenance.md` §3.5 (lands with the federation follow-up issues); the shipped precedence is pinned by `tests/qr_identity.mjs` (e) so the change must be conscious |
+| SPA-03 | Cap the mule's `seen_ids` dedup memory FIFO-style (recommended 10–20 k entries) — changes dedup semantics, so it needs its own change + regression pin. Owner: §2.2 SPA-03's recommended mitigation |
+| SPA-04 | Structural closure of the node-serves-the-client-code trust (signed bundles, native application or another verified-distribution channel). Owner: `docs/protocol.md` §14 (native-application design); until then the SPA-01 engine hashes are the practical out-of-band check |
+| SUPPLY-02 | Implement the signed release capsule (`capsuletool`, air-gapped Ed25519 release key, staging/apply policy, anti-rollback counters). Owner: `docs/offline-maintenance.md` §2 — a complete DESIGN RECORD, non-normative until its follow-up issues land; the single highest-value pending hardening in the repo |
+| PI-02 | Close the source-rotation gap in the per-source L4 shields with MAC-binding enforcement (ebtables-class machinery — a new layer, deliberately not built mid-audit). Owner: §4.2 PI-02 (future hardening note); the association ceiling + station-shield per-MAC deauth bind what remains |
+| PI-04 | Image-level default users/passwords are outside every provisioning script's reach — operator duty, not a code change. Owner: the script headers (`raspberry/harden-ssh.sh` LOCKOUT NOTE) and §4.2 PI-04: flash a current image, install the operator key, verify a key-based login when `ALLOW_SSH=1` |
+| SUPPLY-05 | SHA-pin the two third-party actions in `.github/workflows/release.yml` and add a concurrency guard — maintainer one-liners, out of this audit's reach (`.github/` is read-only per the repo rule). Owner: §5.2 SUPPLY-05 |
+
+### 6.3 Phase 5 quality gates (executed at this revision)
+
+| Gate | Result |
+|---|---|
+| `make test` (the full documented suite, incl. the new `tests/docs_structure.mjs`) | PASS — exit 0 end to end: go test 10/10 packages; all 12 headless suites green (`tests/docs_structure.mjs` — 99 assertions); `sync_e2e.sh` 383/0; `upgrade_e2e.sh` 71/0; `hardening_structure.sh` 208/0 |
+| `make lint` (`gofmt -l .` + `go vet ./...`) | PASS — both clean |
+| `make chaos` (the failure-injection suite; AGENTS.md requires it before a PR) | PASS — 57 assertions, 0 failed, 0 skipped (kill 8, corrupt-db 15, full-disk 10, restart-under-load 11, janitor-flood 10, parser fuzzing 3) |
