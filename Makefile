@@ -50,6 +50,7 @@ test:
 	node tests/chunking.mjs
 	node tests/acks.mjs
 	node tests/qr_identity.mjs
+	node tests/spa_security.mjs
 	node tests/field_equiv.mjs
 	node tests/install_node_structure.mjs
 	bash tests/sync_e2e.sh

@@ -87,10 +87,15 @@ function forgedWithMutatedInner(env, alice, mutate) {
   const eph = DTN.nacl.box.keyPair();
   const nonce = DTN.randomBytes(24);
   const box = DTN.nacl.box(DTN.utf8Encode(ackInnerBytesOf(inner)), nonce, alice.boxPublic, eph.secretKey);
+  const payload = DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box));
   return {
-    v: 1, id: env.id, dest_hint: env.dest_hint,
+    v: 1,
+    /* the strongest forger recomputes the PUBLIC §6.2 id over the doctored
+     * payload — what must still stop this tamper is the inner SIGNATURE */
+    id: DTN.computeEnvelopeId(1, env.dest_hint, env.created_at, env.ttl, payload),
+    dest_hint: env.dest_hint,
     created_at: env.created_at, ttl: env.ttl,
-    payload: DTN.b64encode(DTN.concatBytes(eph.publicKey, nonce, box))
+    payload
   };
 }
 
