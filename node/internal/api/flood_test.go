@@ -363,6 +363,10 @@ func (b *brokenStore) GetDirectory(limit int) ([]storage.DirectoryEntry, error) 
 func (b *brokenStore) EnvelopeCount() (int64, error)  { return 0, b.err }
 func (b *brokenStore) DirectoryCount() (int64, error) { return 0, b.err }
 func (b *brokenStore) DBSizeBytes() (int64, error)    { return 0, b.err }
+func (b *brokenStore) ExpiringCounts(int64) (storage.ExpCounts, error) {
+	return storage.ExpCounts{}, b.err
+}
+func (b *brokenStore) SchemaVersionOnDisk() (int, error) { return 0, b.err }
 
 // TestFloodStorageUnavailableMapsTo507 forces storage write failures: the
 // sync handler must translate them into a clean 507 storage_unavailable in

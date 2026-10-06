@@ -466,6 +466,57 @@ func (s *Store) DirectoryCount() (int64, error) {
 	return n, nil
 }
 
+// ExpiringCounts counts the stored envelopes by how soon they expire
+// (docs/protocol.md §10.7, issue #36): the three cumulative buckets answer
+// "how many live envelopes' TTLs fall within the next 1 h / 6 h / 24 h",
+// so an operator can predict the store draining. An envelope counts in the
+// X-hour bucket iff it is still live at now (created_at + ttl >= now, the
+// §10.4 inclusive serving boundary) and its expiry lands strictly before
+// now + X — at exactly now+1h it sits in the 6 h bucket, not the 1 h one.
+// One SELECT over the expiry index (idx_envelopes_expiry): three pure
+// COUNTs that never inspect row content, cheap enough for the sampler's
+// once-a-minute cadence on the armv6 budget.
+func (s *Store) ExpiringCounts(now int64) (ExpCounts, error) {
+	var c ExpCounts
+	err := s.db.QueryRow(
+		`SELECT
+		   COALESCE(SUM(CASE WHEN created_at + ttl >= ?      AND created_at + ttl < ?       THEN 1 ELSE 0 END), 0),
+		   COALESCE(SUM(CASE WHEN created_at + ttl >= ?      AND created_at + ttl < ?       THEN 1 ELSE 0 END), 0),
+		   COALESCE(SUM(CASE WHEN created_at + ttl >= ?      AND created_at + ttl < ?       THEN 1 ELSE 0 END), 0)
+		 FROM envelopes`,
+		now, now+3600,
+		now, now+6*3600,
+		now, now+24*3600,
+	).Scan(&c.Within1h, &c.Within6h, &c.Within24h)
+	if err != nil {
+		return ExpCounts{}, fmt.Errorf("storage: count expiring: %w", err)
+	}
+	return c, nil
+}
+
+// ExpCounts is the expiring-soon bucket triple of the health snapshot's
+// store member (issue #36). Buckets are cumulative (Within24h ⊇ Within6h ⊇
+// Within1h).
+type ExpCounts struct {
+	Within1h  int64
+	Within6h  int64
+	Within24h int64
+}
+
+// SchemaVersionOnDisk reads the on-disk PRAGMA user_version — the §15.3
+// schema marker the migration chain stamps. The health snapshot serves it
+// next to storage.SchemaVersion so the operator can see the "pending
+// migration" flag truthfully: normally on-disk == build (Open migrates
+// before the daemon serves, §15.3), and any divergence displayed here
+// means the running binary is not the one the store was migrated by.
+func (s *Store) SchemaVersionOnDisk() (int, error) {
+	v, err := readSchemaVersion(s.db)
+	if err != nil {
+		return 0, fmt.Errorf("storage: read schema version on disk: %w", err)
+	}
+	return v, nil
+}
+
 // DBSizeBytes returns the database's size on disk: the main file plus its
 // -wal and -shm sidecars, so a stale or growing WAL is visible to the
 // operator (a full-card symptom, docs/hardening.md §3). Sidecars that do not

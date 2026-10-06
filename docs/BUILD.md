@@ -62,6 +62,7 @@ Flags:
 
 - `-addr` — listen address, default `:8080`.
 - `-db` — SQLite database path, default `node_storage.db`. Since Sprint 4 the parent directory is created automatically if missing (cold start on a fresh filesystem), so `-db /var/lib/dtn-node/node_storage.db` works on a stock system.
+- Battery configuration (issue #36, all optional — the `/status` battery card renders N/A for whatever is not configured; the reading chain degrades I2C sensor → `power_supply` sysfs → voltage estimate → unknown and is never a startup dependency): `-battery-i2c /dev/i2c-1` enables an INA219/INA260-class sensor on that bus (pure-Go SMBus; disabled when omitted), `-battery-addr 0x40` its 7-bit address; `-battery-capacity-wh 128` declares the pack capacity in Wh (autonomy stays N/A without it); `-battery-dod-floor 20` overrides the depth-of-discharge floor in % SoC (default 20, `docs/hardware.md` §2.2 — the CRITICAL alert boundary); `-battery-full-v 13.6` / `-battery-empty-v 12.0` anchor the coarse voltage→SoC estimate for a 4S LiFePO4 pack (`docs/hardware.md` §9 resting voltages).
 
 ## 4. Run all tests
 
@@ -163,8 +164,11 @@ matters):
    ok  	offgrid/dtn-node/internal/api
    ok  	offgrid/dtn-node/internal/envelope
    ok  	offgrid/dtn-node/internal/health
+   ok  	offgrid/dtn-node/internal/power
    ok  	offgrid/dtn-node/internal/sdnotify
+   ok  	offgrid/dtn-node/internal/status
    ok  	offgrid/dtn-node/internal/storage
+   ok  	offgrid/dtn-node/internal/sysres
    ```
 
 2. The crypto test ends with:

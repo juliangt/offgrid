@@ -16,6 +16,7 @@ import (
 
 	"offgrid/dtn-node/internal/envelope"
 	"offgrid/dtn-node/internal/health"
+	"offgrid/dtn-node/internal/status"
 	"offgrid/dtn-node/internal/storage"
 )
 
@@ -37,8 +38,8 @@ const (
 
 // Store is the persistence surface the API needs. It is satisfied by
 // *storage.Store and kept as an interface so handlers never touch SQL. The
-// three stat methods feed the health snapshot (issue #31): they are pure
-// COUNT/size queries that never inspect or return row content.
+// stat methods feed the health snapshot (issues #31 and #36): they are
+// pure COUNT/size/pragma queries that never inspect or return row content.
 type Store interface {
 	InsertEnvelopes(envs []envelope.Envelope) (int, error)
 	PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error)
@@ -47,6 +48,8 @@ type Store interface {
 	EnvelopeCount() (int64, error)
 	DirectoryCount() (int64, error)
 	DBSizeBytes() (int64, error)
+	ExpiringCounts(now int64) (storage.ExpCounts, error)
+	SchemaVersionOnDisk() (int, error)
 }
 
 // timeNow is the clock the directory upsert path (§10.3 last_seen) and the
@@ -63,6 +66,10 @@ var timeNow = time.Now
 // is the diagnostics budget of health.go (issue #31). counters is the shared
 // RAM-only aggregate set the health document serves (internal/health);
 // healthMu/healthCache/healthCachedAt implement the 1-second snapshot cache.
+// status is the optional field-status sampler engine of issue #36 (nil on
+// servers built without WithStatusEngine — every status member then renders
+// N/A); when wired, the budget wrappers also feed it client activity for
+// the aggregate-only active-clients count (internal/status/activity.go).
 type server struct {
 	store      Store
 	build      string
@@ -78,6 +85,32 @@ type server struct {
 	healthMu       sync.Mutex
 	healthCache    *healthResponse
 	healthCachedAt time.Time
+
+	status *status.Engine
+}
+
+// Option customizes a server built by New/NewWithCounters.
+type Option func(*server)
+
+// WithStatusEngine attaches the field-status sampler engine of issue #36:
+// the RAM-only background sampler whose Snapshot() the diagnostics surface
+// renders, and the aggregate-only active-client tracker the budget wrappers
+// feed. Passing nil (or not passing this option) leaves every new member at
+// null — the documented §10.7 N/A convention.
+func WithStatusEngine(e *status.Engine) Option {
+	return func(s *server) { s.status = e }
+}
+
+// noteClientActivity feeds the active-clients aggregate (issue #36). It is
+// called only from the budget wrappers, at the exact points where
+// clientKey(r) is already computed for admission control — so no identity
+// is retained beyond what rate limiting already keeps. The key never
+// leaves the tracker (internal/status/activity.go); only the count is
+// ever served.
+func (s *server) noteClientActivity(key string) {
+	if s.status != nil {
+		s.status.NoteClientActivity(key)
+	}
 }
 
 // staticAsset is one embedded same-origin web file (stylesheet, script,
@@ -149,8 +182,8 @@ func New(store Store, build string, webAssets fs.FS) (http.Handler, error) {
 // main passes the same *health.Counters to the cleanup-recording janitor and
 // to the API server, so TTL sweeps recorded by the janitor are exactly the
 // ones the health document reports (issue #31). A nil counters is replaced by
-// a fresh set.
-func NewWithCounters(store Store, counters *health.Counters, build string, webAssets fs.FS) (http.Handler, error) {
+// a fresh set. Options customize the server (WithStatusEngine, issue #36).
+func NewWithCounters(store Store, counters *health.Counters, build string, webAssets fs.FS, opts ...Option) (http.Handler, error) {
 	if build == "" {
 		build = "dev"
 	}
@@ -189,6 +222,9 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 		counters:     counters,
 		healthBudget: newRateLimiter(healthRequestBurst, healthRequestRefillInterval),
 		started:      time.Now(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	mux := http.NewServeMux()
 

@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Version** | 1.1.0 |
-| **Date** | 2026-10-04 |
+| **Version** | 1.2.0 |
+| **Date** | 2026-10-05 |
 | **Audience** | Whoever can physically reach a deployed node (local console or keyboard on the Pi). Every command below runs on the node unless stated otherwise; access is by console, not SSH — the firewall drops client→tcp/22 by default (`docs/hardening.md` §2). |
 | **Scope** | Reading the telemetry, detecting abuse, restoring a node in minutes, escalation. Design and rationale: `docs/hardening.md`. Build/deploy and the after-reboot verification commands: `docs/BUILD.md` §5. Normative protocol: `docs/protocol.md`. |
 
@@ -47,7 +47,7 @@ The daemon serves its own aggregate health picture (`docs/protocol.md` §10.7), 
 http://offgrid.local:8080/status        ← operator view (server-rendered, no JS)
 ```
 
-That page is deliberately **not linked from the public portal** (visitors never see operational detail); type the URL. It shows, all as aggregates: liveness (`status: ok` = the process the watchdog supervises is answering), build, uptime, envelopes held vs. the 5000 capacity, directory entries, database size on disk (a growing figure past a few MiB = WAL pressure — full-card symptom), the last TTL cleanup, and the since-boot counters (pushes accepted/rejected with rejection classes, dedup hits, TTL sweeps). If the page or its JSON twin fails with `507 storage_unavailable`, the daemon is up but cannot read its store — go to §4.1 (reboot), then §4.3 (quarantine evidence).
+That page is deliberately **not linked from the public portal** (visitors never see operational detail); type the URL. It shows, all as aggregates: liveness (`status: ok` = the process the watchdog supervises is answering), build, uptime, envelopes held vs. the 5000 capacity, directory entries, database size on disk (a growing figure past a few MiB = WAL pressure — full-card symptom), the last TTL cleanup, and the since-boot counters (pushes accepted/rejected with rejection classes, dedup hits, TTL sweeps). If the page or its JSON twin fails with `507 storage_unavailable`, the daemon is up but cannot read its store — go to §4.1 (reboot), then §4.3 (quarantine evidence). The power, system, store-drain and projection cards the page grew in issue #36 are read in §2.2 ("reading the status page before a site visit").
 
 From a console the machine-readable twin answers the same numbers:
 
@@ -56,6 +56,32 @@ curl -s -H 'Host: offgrid.local:8080' http://10.42.0.1:8080/api/v1/health
 ```
 
 Reading the counters: `node_full` rejections climbing means the store hit the 5000 cap (§3 row below — the janitor reclaims it, do nothing); `rate_limited` climbing means someone is hammering the write path (the §2 `portal_dropped` firewall counter is its network-layer twin); `dedup_hits` climbing alone is normal mule traffic re-offering known mail. Both diagnostics endpoints are rate-limited per client (burst 60, `429` beyond) and cached server-side for one second — a fast poll cannot hurt the node, and there is nothing to tune. Like everything else here, the page carries **aggregates only**: no ids, no hints, no aliases, no addresses — never add any.
+
+### 2.2 Reading the status page before a site visit (issue #36)
+
+Since the #36 extension the page (and its `/api/v1/health` twin) also answers the field questions: power, temperature, storage headroom and load trajectory. What each thing means and what to do:
+
+**Power & battery card.** The charge state (`charging`/`discharging`/`idle`), a state-of-charge percentage with its source, pack voltage/current, an alert band and an autonomy projection in hours and "nights of autonomy" (24-hour nights, counted down to the 20% depth-of-discharge floor).
+
+- `CHARGING` — the panel is winning. Nothing to do.
+- `HEALTHY` — at or above 30% state of charge. That 30% line is the same overnight floor `docs/hardware.md` §8 uses as the acceptance rule for leaving a node unattended: a node that never dips below it overnight passes.
+- `LOW` — below 30%. Not a fault by itself, but the margin is gone: check the panel for shading/dirt and the season's sun before walking away.
+- `CRITICAL` — at or below the 20% DoD floor. The node is living on its protection margin; visit soon (panel, wiring, or load above the ~1 W design figure — `docs/hardware.md` §9).
+- **Accuracy honesty:** a voltage-derived percentage is COARSE (a LiFePO4 4S pack holds a nearly flat voltage through the middle of its discharge — the page says so next to the number). Trust the trend and the band, not the exact digit. A coulomb-counting BMS (shown as source "BMS coulomb count") is precise; battery wear (`health_percent`) reads N/A on voltage-only setups by design.
+- **N/A** — no battery sensor configured or reachable. The node runs fine; you just cannot see the battery. Wiring an INA219/INA260 (the `docs/hardware.md` §3 optional part) and passing `-battery-i2c /dev/i2c-1 -battery-capacity-wh <pack Wh>` fills the card.
+
+**System card.** Load average with a saturation word (saturated = the 15-minute load reached the core count), memory used/available, disk used/free on the database volume, SoC temperature, throttling, system uptime. `disk_free_low` means under 50 MiB free — the whole store is ≤ 5 MB hot data, so something else is eating the card; that is a full-card symptom worth acting on. Throttling observed with a cool SoC usually means undervoltage (wiring, buck converter). `N/A` entries are the parts the host cannot measure (a stock Pi OS Lite without `vcgencmd` shows the throttle line as N/A — installing nothing is fine).
+
+**Software identity card.** The running build, the envelope versions it accepts, the storage schema version this build carries, the schema version actually on disk, and whether a migration is pending. In normal operation on-disk == build and the flag reads `no`. A `YES` means the store's marker moved after boot — capture `journalctl -u dtn-node -b` and §4.3 evidence before touching anything. There is no update checking: the node has no uplink by design.
+
+**Store card.** Envelopes held vs the 5000 capacity, the **expiring-within 1 h / 6 h / 24 h buckets** (a preview of the store draining — the janitor reaps them automatically), registered users, **active clients** (distinct portal sessions with write activity over the last 15 minutes; a count only — the node keeps no identity there), database size, last cleanup.
+
+**Load projections card.** Pushes/day, TTL expiries/day, database growth/day, battery drain/day, and the derived projections: days to envelope capacity, days to disk-full, whether the store is growing/shrinking/steady, and whether the battery is net-positive or slowly starving over the multi-day window. Two honest limits:
+
+- **"not enough data yet"** is the page's way of refusing to guess: projections are computed from an in-RAM rolling window sampled once a minute, and until that window holds at least two samples over thirty minutes (a full day for the battery verdict) there is no number. It is normal right after a reboot — it is not a fault.
+- Every projection is labelled with its window and is the recent past continued forward — **a projection, never a promise**. A reboot clears the window by design (nothing operational is ever written to disk).
+
+**Before a site visit, the one-minute check is:** `status: ok` + build identity (§2.1) → battery band not CRITICAL and autonomy in nights, not hours → disk free not low, temp not throttling → store not pinned at capacity with `days_to_disk_full` far away → projections not starving. Anything N/A is absence of a sensor, not a failure — match it against what the node physically has installed.
 
 ## 3. Detecting abuse (symptom → likely cause → check → action)
 
