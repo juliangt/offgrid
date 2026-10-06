@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Version** | 0.2.0 (Phase 2 appended) |
+| **Version** | 0.3.0 (Phase 3 appended) |
 | **Date** | 2026-10-06 |
-| **Status** | DRAFT — Phases 3–5 pending; this document is the master report that each audit phase appends to. Phase 1 (node daemon) and Phase 2 (SPA and client crypto engine) are complete as of this revision. |
+| **Status** | DRAFT — Phases 4–5 pending; this document is the master report that each audit phase appends to. Phase 1 (node daemon), Phase 2 (SPA and client crypto engine) and Phase 3 (protocol and threat model) are complete as of this revision. |
 | **Tracker** | GitHub issue #14 ("Security audit"), branch `feat/14-security-audit` |
 | **Normative baseline** | `docs/protocol.md` (wire contract — nothing here overrides it), `docs/hardening.md` (defense tracks A1–A8), `tests/chaos/FAILURE_MATRIX.md` (failure contract) |
 
@@ -14,7 +14,7 @@
 |---|---|---|---|
 | 1 | **Node daemon** — Go HTTP API + SQLite storage (`node/main.go`, `node/internal/…`) | this document, §1 | **Phase 1 — complete** |
 | 2 | SPA / client crypto (`node/web/` — tweetnacl usage, IndexedDB, CSP, key handling, §4.6/§4.7 verification duties) | this document, §2 | **Phase 2 — complete (this revision)** |
-| 3 | Protocol / crypto design (envelope format, §5 canonical forms, §6 derivations, §13 threat model, forward secrecy) | — | pending |
+| 3 | Protocol / crypto design (envelope format, §5 canonical forms, §6 derivations, §13 threat model, forward secrecy) | this document, §3 | **Phase 3 — complete (this revision)** |
 | 4 | Raspberry Pi / network (`raspberry/` — hostapd, dnsmasq, iptables, systemd, hardening scripts) | — | pending |
 | 5 | Supply chain / build (`go.mod`/`go.sum` in depth, vendored JS provenance, `node/build.sh`, release stamping) | — | pending (the vendored-JS provenance chain — the §5 item that lives inside `node/web/` — was discharged by Phase 2, §2.3 item 1; what remains for Phase 5 is the Go module hygiene depth started in §1.4 item 9) |
 
@@ -56,6 +56,14 @@
 | SPA-04 | Info | SPA + transport | The node serves the client code: a malicious node can serve a modified SPA that captures the identities of users who register/unlock on it | Documented / accepted risk (protocol-inherent; verifiable out-of-band since SPA-01) |
 | SPA-05 | Info | SPA (identity storage) | Shared-device account takeover: the unlocked browser IS the identity (seed + secrets in IndexedDB, seed display, plaintext inbox) | Documented / accepted risk (spec §13.1 trust model) |
 | SPA-06 | Info | SPA (CSP) | `img-src` carried an unused `data:` allowance | **Fixed in this PR** |
+| PROTO-01 | Medium | protocol (§6.1, §13.3) | §13.3 overclaimed hint rotation: directory-holder `dest_hint`→alias linkage is permanent (public epochs + plaintext `created_at`), not epoch-confined | **Spec corrected in this PR** (protocol.md 1.12.2) |
+| PROTO-02 | Low | protocol (§13.5 replay) | Node dedup covers the live store only: captured envelopes are re-injectable after TTL eviction; no freshness floor on `created_at`; fresh/restored clients cannot distinguish replayed mail | **Spec corrected in this PR** + regression pin |
+| PROTO-03 | Medium | protocol (§13.6) | Resource exhaustion as censorship: a budget-compliant store fill holds NEW mail off a node for up to TTL_MAX (30 days); mule transit-queue stuffing ungoverned by §13 | **Spec corrected in this PR** (protocol.md 1.12.2) |
+| PROTO-04 | Info | protocol (§12, §13.6) | Evil-twin row conditioned "client-side crypto bounds the exposure" without noting the node serves the client code — a fake node harvests registrations (SPA-04) | **Spec corrected in this PR** (protocol.md 1.12.2) |
+| PROTO-05 | Low | SPA + protocol (§4.7, §13.5) | QR-pinned encryption key silently overridden by the node directory (a NODE-04-hijacked entry defeats QR verification of `x25519`); `docs/offline-maintenance.md` §3.5 specifies the opposite (pin-and-warn) | **Spec corrected in this PR** + regression pin (behavior change deferred) |
+| PROTO-06 | Medium | protocol (§13.5) | Doctored-bundles bullet attributed the directory-entry `x25519` swap to node operators only — the unauthenticated §10.3 POST extends it to ANY station (NODE-04's actor set) | **Spec corrected in this PR** (protocol.md 1.12.2) |
+| PROTO-07 | Info | protocol (§13.5) | Chunk groups (2..16 envelopes sharing hint/created_at/ttl) and ack pickups are unmentioned metadata leaks in the traffic-analysis residual | **Spec corrected in this PR** (protocol.md 1.12.2) |
+| PROTO-08 | Info | protocol (§8.1/§9/§10.3/§10.5) | Spec-code divergences: §10.5 misdescribed the pull select as hint-scoped (fixed); the shipped NODE-01 directory row cap is absent from §8.1/§9/§10.3/§13.5 (amendment deferred — contract change) | **Partially fixed in this PR** |
 
 Note on disclosure: the three fixed findings (NODE-01..03) and this report land in the same merge, so there is no window between fix and disclosure.
 
@@ -311,4 +319,152 @@ Every item of the issue's Phase 2 checklist was checked; the following were veri
 
 ---
 
-*(Phases 3–5 append below as they complete.)*
+## 3. Protocol and threat model
+
+Audited: `docs/protocol.md` 1.12.1 in full (§3 envelope format, §4 inner payload / chunking / acks / prekeys / QR, §5 canonical serialization, §6 key derivations, §7 primitives, §8 limits, §9 storage, §10 API, §11 client behavior, §12 same-origin/no-TLS, §13 threat model, §14 evolution mapping, §15 versioning), with the design records `docs/DEVELOPMENT_PLAN.md` §1.1–§1.7, `docs/hardening.md` (A1–A8), `docs/forward-secrecy.md` and `docs/offline-maintenance.md`, against the shipped implementation of `node/internal/` and `node/web/js/`. Phases 1–2 already traced most of the code claims; this phase reuses and cites their evidence rather than re-deriving it. Everything below cites the file:line of branch `feat/14-security-audit` at this revision.
+
+The method of this phase is claim-by-claim: every sentence of §13 (and the hardening assumptions A1–A8) was checked against the spec's own normative text AND the code that implements it, producing the verdict table of §3.3. The headline result: **the blind-node architecture itself is sound and every "cannot see / cannot do" claim of §13.2/§13.5 holds in the shipped code — but three privacy/availability statements in the documented model overclaimed, and two actor sets were understated.** Where the documented model was wrong, the spec was corrected surgically (protocol.md 1.12.2, changelog entry records every touch) without changing any wire format, limit or §-numbered contract; where a weakness is inherent to the design, §13 now states it as an accepted residual with its real bound.
+
+### 3.1 The core claims, re-verified at the protocol layer
+
+- **Blind mailbox, sign-then-encrypt, canonical forms — CONFIRMED.** Phase 1 §1.1 proved the daemon cannot read, verify or discriminate; Phase 2 §2.1–§2.3 proved the client never leaks secrets and implements §4/§5/§6 exactly (vectors pinned by `tests/crypto_roundtrip.mjs`, `tests/hint_rotation.mjs`, `tests/prekeys.mjs`, `tests/version_migration.mjs`). Canonical-serialization malleability was re-examined and is sound: the §5 fixed-order forms are vector-pinned, `id` (§5.2/§6.2) binds the exact outer bytes and is now also verified receive-side (SPA-02), the §15.1 `meta` exclusion keeps ids conversion-stable (§15.7 rows c/d/e), and JSON integer/encoding rules remove the classic float/duplicate-key ambiguity on the admission path (`envelope.go` `Validate`, line 190).
+- **Forward secrecy — honestly bounded, not marketing.** §4.6 and `docs/forward-secrecy.md` claim exactly what the construction delivers: FS only for envelopes addressed to consumed OPKs; SPK horizon = 30-day rotation; identity-key mail permanently FS-free. Verdict: no overclaim found; `tests/prekeys.mjs` (rows j–m of §15.7) pins the capture-then-extract property and the fallback paths.
+- **The documented-vs-implemented reconciliation surfaced one arithmetic error in the privacy model** (PROTO-01) and two honest-bound gaps (PROTO-02/03) — details below.
+
+### 3.2 Findings
+
+#### PROTO-01 — Medium — §13.3 overclaimed hint rotation: directory-holder linkability is permanent, not epoch-confined
+
+- **Severity:** Medium (metadata/privacy model error in the normative document; the underlying exposure is the pre-1.6 accepted risk resurfacing through an overstated mitigation)
+- **Affected component:** `docs/protocol.md` §13.3 ("What the mitigation buys", residual 2) and §6.1 ("computationally independent … linkability decays"); echoed in `docs/DEVELOPMENT_PLAN.md` §1.2/§1.7 and `docs/offline-maintenance.md` §3.6.
+- **Description.** §13.3 claimed: "A node operator who recomputes hint(E) for every directory user can match stored envelopes to aliases ONLY for the CURRENT epoch E … envelopes deposited in earlier epochs can no longer be attributed to an alias by recomputation." This is arithmetically wrong. The rotating derivation is `HKDF-SHA256(ikm = recipient X25519 public key, salt = epoch)` (§6.1) — the epoch is a **public counter** (it is literally the salt, published per directory entry), the ikm is the **public directory key**, and every envelope carries **`created_at` in plaintext** (§3.1), naming the deposit epoch exactly. A directory holder can therefore derive a user's hint for ANY epoch — past or future — and link every stored envelope to its alias, permanently. The candidate set is small: the hint epoch lags the deposit epoch only as far as the recipient's last republication, and sweeping candidates back over the TTL horizon (≤ 31 epochs) or further is a handful of cheap HKDF evaluations per user (`hintCandidates`, `envelopes.js` 126–140, shows the recipient itself only ever tries 2–3). What rotation genuinely buys: (a) the pre-1.6 attack (one static hash per user, computed once, valid forever) now requires per-envelope, per-epoch work — a work-factor increase, not a closure; (b) a hint alone reveals nothing, so linkage requires holding the key: envelopes deposited where the recipient's key is not yet held become linkable only after a later directory acquisition, and then only for the epochs the acquirer recomputes — rotation bounds retroactive linking after a LATE directory acquisition (the exact case §3.6 of `docs/offline-maintenance.md` widens via federation). Within a single node, where the operator holds the directory from day one, linkage is permanent — exactly the pre-1.6 accepted risk.
+- **Evidence:** `docs/protocol.md` §6.1 derivation + §3.1 (`created_at` plaintext) + §10.3 (directory publishes `pubkey`, `epoch`); client candidate logic `node/web/js/envelopes.js` 126–140; §13.3's own residual 2 conceded the operator "can derive each user's hint(E) and hint(E−1)" while the binding paragraph two paragraphs above denied exactly that.
+- **Fix (in this PR):** §13.3 heading, binding statement and residuals 1–2 rewritten to the honest statement; §6.1's inference sentence corrected; echoes corrected in `DEVELOPMENT_PLAN.md` §1.2/§1.7 and `offline-maintenance.md` §3.6. No wire or derivation change — the scheme itself is not broken, the documentation of its strength was.
+- **Status:** Spec corrected in this PR (protocol.md 1.12.2). Documented / accepted residual (protocol-inherent: any blind-routing scheme whose hint is derivable from public data is linkable by the directory holder).
+
+#### PROTO-02 — Low — Replay protection is live-store dedup only: captured envelopes are re-injectable after TTL eviction
+
+- **Severity:** Low (real, bounded impact: re-delivery confusion and cap-headroom nibbling; no content exposure — MAC/signature still bind)
+- **Affected component:** `docs/protocol.md` §13.5 (replay bullet); semantics in `node/internal/storage/storage.go` (`InsertEnvelopes` 582, `PullEnvelopes` 634, `DeleteExpired` 784), `node/internal/envelope/envelope.go` (Validate 190, created_at bounds 203–207), `node/internal/cleanup/cleanup.go` (15-min cadence; `main.go` 63).
+- **Description.** §13.5 said replay is "harmless: mules and recipients dedup by `id`". That covers only replay against the CURRENT store. The node keeps no memory of expired ids: `INSERT OR IGNORE` (storage.go 599) dedups against live rows only; the §10.6 janitor's deletions (every 15 min, `main.go` 63) are not remembered anywhere; and §10.5 bounds `created_at` only from above (`> 0`, `≤ now + 300`, envelope.go 203–207) — there is no freshness floor. Consequently a station that captured an envelope (any station may pull the whole blind dead-drop, §13.2) can re-inject it at any later time, at any node. An injected envelope whose deadline has already passed is ADMITTED (validation passes), stored — occupying §8.1 cap headroom until the next sweep — and never served (the §10.4 inclusive boundary excludes it from the first pull); a still-unexpired capture rides again for its remaining TTL. Recipient-side absorption depends on client state that §13 did not qualify: `seen_ids` (unbounded, SPA-03) absorbs replays only for clients that keep it; a freshly initialized or seed-restored client cannot distinguish a replayed message from late mail — the text reappears in its inbox, and a replayed ack re-applies its idempotent delivery state. Prekey-addressed replay to a consumed OPK still fails the trial decrypt (the one place the model was already right).
+- **Reproduction:** pull any live envelope from an open node; wait for its TTL to pass (or target another node that never saw it); re-push it verbatim. Admission answers the ordinary `200`; if unexpired, the envelope serves for its remaining TTL; a recipient that wiped its store (new browser, seed re-import) sees the old message as new mail.
+- **Fix (in this PR):** §13.5's replay bullet rewritten to the honest statement (live-store-only dedup, no freshness floor, fresh-client caveat, accepted residual — a blind node cannot remember expired ids without unbounded state). No code change: the behavior is correct for a blind node; it was the documentation that claimed more than dedup delivers.
+- **Regression tests:** NEW `node/internal/api/unknown_recipient_test.go` `TestExpiredEnvelopeAdmittedNeverServed` (line 202) — pins that an already-expired envelope is admitted `200` with the ordinary response shape, is stored (count = 1), is never served by a pull, and is reaped by `DeleteExpired`; together with the existing `TestPullTTLBoundaryAndDeleteExpired` (`storage_test.go` 189) and the TTL/created_at bounds rows of `TestSyncInvalidEnvelopes` (`api_test.go` 771–773) the corrected §13.5 text is fully pinned.
+- **Status:** Spec corrected in this PR; behavior pinned.
+
+#### PROTO-03 — Medium — Resource exhaustion as censorship: the store cap denies NEW mail for up to TTL_MAX, and §13 did not say so
+
+- **Severity:** Medium (unauthenticated, service-wide denial of a community node's mailbox, bounded by TTL — real but recoverable)
+- **Affected component:** `docs/protocol.md` §13.6 (store-flooding row, and the absence of any mule-resource row); enforcement in `node/internal/api/ratelimit.go` (budgets) + `storage.go` (cap, reject-newest).
+- **Description.** §13.6 presented the 5000-envelope cap as the defense against store flooding. The cap is equally the attack surface: a single hostile station acting entirely within the per-IP envelope budget (burst 600, refill 600/hour) can deposit 5000 junk envelopes with `ttl = 2592000` in under eight hours (600 burst + 4400 at 600/h); from then on every push — including all legitimate mail — answers `429 node_full` until the junk expires through its OWN ttl, i.e. up to 30 days per injected batch, repeatable to sustain, scaling linearly with collusion. The pre-audit text (and `docs/hardening.md` §3's "the global cap plus the TTL janitor win that race by design") is accurate only for short-TTL junk: the janitor wins no race against attacker-chosen TTL_MAX. The keep-oldest policy is the genuine mitigation — mail already deposited stays servable; what a fill denies is NEW mail. The same blindness applies to mule resources, which §13 did not mention at all: a hostile node can fill a visiting mule's 100-slot transit FIFO with valid-shaped garbage (evicting real cargo, `mule.js` 42–58) and grow `seen_ids` without bound (SPA-03) — carried-mail loss indistinguishable from ordinary DTN loss. Blindness is why no conforming build can close this: a node that preferred "legitimate" mail would have to judge content.
+- **Evidence:** budgets `ratelimit.go` (`syncEnvelopeBurst`, refill 600/h); cap + reject-newest `storage.go` 107–125, 582–599; cap-holds-under-flood pinned by `TestFloodJunkEnvelopesStoreCapHolds` (`flood_test.go`); mule FIFO `mule.js` 42–58, stuffing analysis SPA-03.
+- **Fix (in this PR):** §13.6 gains the "Resource exhaustion as censorship" statement with the honest TTL_MAX bound, the mule-stuffing residual, and the keep-oldest caveat. No code or limit change — inherent to the shared finite store.
+- **Status:** Spec corrected in this PR (protocol.md 1.12.2). Documented / accepted residual.
+
+#### PROTO-04 — Info — §13.6's evil-twin row ignored that the node serves the client code
+
+- **Severity:** Info (protocol-inherent; the deepest trust assumption, already recorded as SPA-04)
+- **Affected component:** `docs/protocol.md` §13.6 (evil-twin row) + §12 (same-origin).
+- **Description.** The row claimed "client-side crypto bounds the exposure" against an evil twin. True only while the client CODE is genuine — and the code is served by the very node under attack over the same origin (§12): an evil twin can serve a modified SPA that harvests the seed and secrets of every user who registers, imports a seed, or unlocks on it (SPA-04). E2EE bounds nothing in that case; the "cannot read / cannot forge" rows hold for envelopes, not for the identity creation flow. Practical mitigations are operational: since SPA-01 the served crypto embeds carry recorded SHA-256 hashes with an offline re-verification recipe (an engine swap is detectable from any terminal), and the structural closure (signed/native distribution) is reserved for §14. The wildcard-DNS + canonical-origin convenience that makes mule storage portable (§12) is the same mechanism that makes the fake node indistinguishable from a genuine one before code verification.
+- **Fix (in this PR):** the §13.6 evil-twin row now conditions its claim on the client code being genuine and points at the new §13.5 "the node serves the client code" bullet (with the engine-hash check). No code change.
+- **Status:** Spec corrected in this PR. Documented / accepted residual (cross-ref SPA-04).
+
+#### PROTO-05 — Low — QR-pinned encryption keys defer silently to the node directory (NODE-04's reach includes QR-verified contacts)
+
+- **Severity:** Low (a mitigation channel weaker than a design record promises; requires the NODE-04 tamper to be present)
+- **Affected component:** `node/web/js/qr.js` `qrMergeRecipients` (237–281: the directory's `x25519` at 250 wins; a merged contact keeps only its alias, 262–265); `docs/protocol.md` §4.7 merge rule + trust model; contradiction in `docs/offline-maintenance.md` §3.5.
+- **Description.** This resolves the open question NODE-04 left to Phase 2: the §4.7 merged picker lets the DIRECTORY supply `x25519`/`epoch`/`prekeys` for any entry that exists — including for a QR-pinned contact (only the display alias is kept from the contact). Since x25519 is seed-derived and permanent, an honest directory and an honest QR always agree; a divergence is therefore by construction the NODE-04 tamper signal (a hijacked entry carrying the attacker's x25519 under the victim's pubkey) — and the shipped client resolves it SILENTLY in the directory's favor. The QR exchange thus authenticates the Ed25519 identity binding, but the encryption path travelled through a directory can still be redirected to the attacker even for contacts verified in person; the QR's `x` is used only when the directory lacks the entry. `docs/offline-maintenance.md` §3.5 specifies the opposite behavior for the federation work ("QR-scanned or pasted contacts keep their keys … NEVER overwritten"; warn on divergence) — a documented-vs-implemented contradiction this phase reconciles on paper: §3.5 is future-work design intent, §4.7's directory-wins rule is the shipped contract, and the §13.5 residual now says so.
+- **Reproduction:** register a contact pair via §4.7 QR exchange; hijack the victim's directory entry per NODE-04's reproduction (republish the victim's `pubkey` with an attacker `x25519`); the sender — holding the QR-pinned contact — still encrypts to the attacker's key, with no warning.
+- **Fix (in this PR):** documentation, not behavior: §4.7's trust model states the precedence and its consequence; a new §13.5 bullet records the silent-divergence resolution and points at the pin-and-warn refinement. Changing the merge rule would alter the §4.7 contract and is deferred to the workstream that already owns the warning design (`offline-maintenance.md` §3.5 / follow-up issue 7).
+- **Regression tests:** `tests/qr_identity.mjs` (e) extended (lines 347–363): a directory entry whose `x25519` diverges from a QR-pinned contact's `x` resolves to the DIRECTORY value — pinning the shipped precedence so the future pin-and-warn change must consciously update this test.
+- **Status:** Spec corrected in this PR; behavior change deferred (documented).
+
+#### PROTO-06 — Medium — §13.5 understated the directory-entry swap's actor set: any station, not just the node
+
+- **Severity:** Medium (same class as NODE-04, whose Phase 1 nuance this spec text now records)
+- **Affected component:** `docs/protocol.md` §13.5 (doctored-bundles bullet); mechanism in `handlers.go` `handlePostDirectory` (592) — unauthenticated by §10.3 design.
+- **Description.** §13.5 said "the signature does NOT close the pre-existing hole that the NODE can swap any entry's `x25519` member". The unauthenticated `POST /api/v1/directory` widens the hole exactly as NODE-04 recorded: any station of the open AP can republish a victim's `pubkey` bound to attacker `x25519`/prekeys and receive the victim's prekey-addressed mail — no node control required. The protocol-inherent reason stands (a blind node cannot demand proof-of-possession without doing cryptography), but the documented actor set was wrong, and the actor set is the difference between "trust your node operator" and "trust nobody in radio range".
+- **Fix (in this PR):** the §13.5 bullet now names the any-station actor set and the closure candidates (proof-of-possession — which would cross the blindness invariant — or key transparency). No code change; NODE-04 remains the tracking finding.
+- **Status:** Spec corrected in this PR. Documented / accepted residual (cross-ref NODE-04).
+
+#### PROTO-07 — Info — Chunk groups and ack pickups are unmentioned traffic-analysis surface
+
+- **Severity:** Info
+- **Affected component:** `docs/protocol.md` §13.5 (traffic-analysis bullet); sender conventions §4.4 (rule 4: all chunks share `created_at`/`ttl`) and §4.5 (ack addressed to the sender's hint).
+- **Description.** A chunked message is visible AS a group to any node or mule: its 2..16 envelopes share `dest_hint`, `created_at` and `ttl`, so the observer learns the message's size band (94−|alias| bytes/chunk budget, §4.4) and chunk count — strictly more than the "timing and volume" the residual already accepts, and a reasonable price for reassembly, but it belonged in the model. Likewise a §4.5 ack, addressed back to the sender's hint, lets an observer correlate the original's pickup. Both are now stated in the traffic-analysis residual.
+- **Fix (in this PR):** §13.5 traffic-analysis bullet extended. No change to chunk/ack conventions.
+- **Status:** Spec corrected in this PR. Documented / accepted residual.
+
+#### PROTO-08 — Info — Spec-code divergences found during the claim-by-claim reconciliation
+
+- **Severity:** Info
+- **Affected component:** `docs/protocol.md` §10.5 (pull-select description — fixed), §8.1/§9/§10.3/§13.5 (directory cap — deferred).
+- **Description.** Two divergences between the documented model and the shipped node: (1) §10.5's unknown-recipient bullet described the pull as "§10.4 step 3 selects by `dest_hint` alone" — no such filter exists; the §10.4 select carries no hint parameter and serves every live envelope the puller does not already know. The actual behavior is STRONGER for privacy (no hint-scoped query exists to observe) and §10.5 now says so — a pure accuracy fix. (2) Phase 1's NODE-01 fix shipped a per-node directory row cap (5000; `429 node_full` on new registrations at cap; refresh-always) that §8.1 (limits table), §9 ("directory rows are never auto-deleted in Phase 1" — still true, but now incomplete: rows are never auto-deleted AND new rows are shed at cap), §10.3 (the POST row defines no 429) and §13.5's directory-spam mitigation list do not reflect. Reconciling these is a §-numbered-contract change and needs its own spec revision (with the `DEVELOPMENT_PLAN.md` §1.7 update the spec footer requires); it is recorded here and deferred, not smuggled into a threat-model pass.
+- **Fix (in this PR):** §10.5 corrected; the directory-cap reconciliation deferred and tracked by this finding.
+- **Status:** Partially fixed in this PR (documentation divergence recorded; spec amendment deferred).
+
+### 3.3 Threat-model verdict table (the §13 claim-by-claim review)
+
+Every claim of `docs/protocol.md` §13 (+ hardening A1–A8), against the shipped code. "Confirmed" means the claim upholds as written; "Corrected" means this phase rewrote the claim in the spec (finding in parentheses); "Gap" means the claim or its mitigation list diverges from shipped reality.
+
+| # | Claim (spec location) | Verdict | Evidence |
+|---|---|---|---|
+| 1 | §13.1 — only the sender's and recipient's own browsers are trusted | Confirmed, with the code-provenance caveat (the browsers' code comes from the node — PROTO-04) | Phase 2 §2.1 (no egress, secrets stay in IndexedDB); §13.5 new bullet |
+| 2 | §13.2 node row — sees outer fields + directory; cannot see content/sender/recipient; no recipient-existence oracle | Confirmed | Phase 1 §1.1 (`envelope.go` 190 shape-only; `storage.go` 582/634 verbatim; no directory consult on push); `TestUnknownRecipientStoredServedExpired` |
+| 3 | §13.2 mule row — same metadata; identifies own mail locally | Confirmed; stuffing residual now stated (PROTO-03) | Phase 2 §2.3 item 5 (`tests/spa_security.mjs` (d)); SPA-03 |
+| 4 | §13.2 network-observer row — same metadata as node, nothing inside payload | Confirmed | NODE-05 (plaintext HTTP by design); Phase 2 §2.1 |
+| 5 | §13.3 — rotation confines operator linkage to the current epoch; linkability decays | **Corrected** (PROTO-01) | Public epoch counter + public directory key + plaintext `created_at` (§3.1/§6.1/§10.3); §13.3 rewritten |
+| 6 | §13.3 residual 3 — transition window keeps the static hint linkable until the deadline | Confirmed | `constants.js` 78 (`HINT_TRANSITION_DEADLINE`); `tests/hint_rotation.mjs` (§15.7 rows h/i) |
+| 7 | §13.3 residual 4 — timing/volume correlation untouched by rotation | Confirmed; extended with chunk groups + ack pickup (PROTO-07) | §4.4 rule 4; §4.5; NODE-05 |
+| 8 | §13.4 — captive mini-browser isolation, full-browser banner | Confirmed | `ui.js` 1627–1648 (banner), pinned by `tests/spa_structure.mjs` |
+| 9 | §13.5 — recipient-existence probing closed by design (no oracle) | Confirmed | `TestUnknownRecipientStoredServedExpired` + `TestUnknownRecipientResponseIndistinguishable` (§15.7 row q) |
+| 10 | §13.5 — replay harmless: dedup by id + MAC | **Corrected** (PROTO-02) | Live-store-only dedup (`storage.go` 582/599/784); no freshness floor (`envelope.go` 203–207); new `TestExpiredEnvelopeAdmittedNeverServed` |
+| 11 | §13.5 — traffic analysis accepted | Confirmed (extended, PROTO-07) | NODE-05; §4.4/§4.5 conventions |
+| 12 | §13.5 — directory spam mitigated by GET cap, sanitization, budgets, cleanup | Confirmed, mitigation list incomplete (PROTO-08): the shipped NODE-01 row cap (5000, `429 node_full`) is absent from §8.1/§9/§10.3/§13.5 — amendment deferred | `storage.go` `maxDirectoryEntries`/`UpsertDirectory` (Phase 1 NODE-01); `TestDirectoryUpsertCapacityGuard` |
+| 13 | §13.5 — identity loss on data wipe unless seed backed up | Confirmed | SPA-05 (`store.js` 276–284; §11 backup UX) |
+| 14 | §13.5 — FS horizon: OPK-consumed mail safe; still-held prekeys safe vs long-term extraction only; identity-key mail FS-free | Confirmed (honest, no marketing) | `tests/prekeys.mjs` (§15.7 rows j–m); `forward-secrecy.md` §9 |
+| 15 | §13.5 — OPK collision/replenish loss windows bounded and indistinguishable from DTN loss | Confirmed | `tests/prekeys.mjs` (wipe-on-use, low-water replenish); `forward-secrecy.md` §8.2 |
+| 16 | §13.5 — doctored bundles closed by `spk_sig`; the NODE can swap `x25519` (hole open) | **Corrected** (PROTO-06): the swap needs no node — any station via the unauthenticated §10.3 POST | NODE-04 + its reproduction; `handlers.go` 592 |
+| 17 | §4.7/§13.5 — QR contact exchange is trust-on-sight; merged picker takes directory key material when an entry exists | Confirmed as behavior; the silent-divergence consequence now stated (PROTO-05) | `qr.js` 237–281; extended pin `tests/qr_identity.mjs` (e) 347–363 |
+| 18 | §13.6 — store flooding answered by budgets + cap (reject-newest/keep-oldest) | **Corrected** (PROTO-03): the fill denies NEW mail for up to TTL_MAX; mule transit stuffing added | `ratelimit.go` budgets; `storage.go` 107–125; `TestFloodJunkEnvelopesStoreCapHolds`; SPA-03 |
+| 19 | §13.6 — evil twin: client-side crypto bounds the exposure | **Corrected** (PROTO-04): only while the served client code is genuine | SPA-04; §12 same-origin; SPA-01 hashes |
+| 20 | §13.6 — free-riding/DNS/sync-storms/station-saturation rows and the blind-guarantees thread | Confirmed | Phase 1 §1.3 (budgets, fail-closed validation, RAM-only sheds); `tests/hardening_structure.sh`; chaos suite |
+| 21 | §13.6 — physical/power: WAL atomicity, quarantine, restart | Confirmed | `chaos_kill_mid_sync.sh`, `chaos_corrupt_db.sh`, `storage.go` `Open`/`quarantineCorruptDatabase` |
+| 22 | hardening A1 (every client an attacker), A3 (clients will flood), A4 (hostile majority), A7 (no user-identifying data for defenders) | Confirmed | Phase 1 §1.2/§1.3 items 2–3, 8 (per-IP budgets, RAM-only state, no per-client persistence) |
+| 23 | hardening A2 (island: no uplink), A5 (power cuts routine), A8 (nobody on call) | Confirmed | §10.3 surface; `tests/chaos/*` rows 1–9; systemd watchdog |
+| 24 | hardening A6 (evil twins exist; exposure bounded client-side) | Confirmed as an assumption; its consequence statement corrected (PROTO-04) | §13.6 evil-twin row, rewritten |
+| 25 | §10.5 — unknown-recipient envelope "SERVED to any puller … whose pull select covers the hint (selects by dest_hint alone)" | **Corrected** (PROTO-08): the select has no hint parameter — every live envelope goes to every puller | §10.4 step 3 SQL; `storage.go` 634–647 |
+| 26 | §4.6/§13.5 — prekeys deliver bounded FS exactly as stated (what prekeys actually deliver) | Confirmed | `tests/prekeys.mjs`; `forward-secrecy.md` §9 horizon statement matches §4.6 rule 4 |
+| 27 | §12 — TLS absence acceptable because content is E2EE and the node is blind | Confirmed for envelopes; the code-delivery corollary now explicit (PROTO-04) | §13.5 new bullet; NODE-05 |
+
+No §13 claim remains that the code does not uphold: the three Corrected rows were documentation errors (the code always behaved as now documented), and the one Gap row is a deferred spec amendment for a shipped, tested hardening measure (PROTO-08).
+
+### 3.4 Checklist coverage — the issue's Phase 3 items and where each landed
+
+1. **Replay protection** — PROTO-02: live-store-only dedup, re-injection after TTL eviction admitted-never-served (pinned by the new API test), client absorption qualified (unbounded `seen_ids`, fresh-device caveat). Replay is now IN the documented threat model as an accepted residual with its real bound.
+2. **TTL semantics** — confirmed sound: client-chosen within the server-fenced `[3600, 2592000]` (`envelope.go` 209–210; reject rows `api_test.go` 772–773), no absurd values possible, attacker cannot shorten others' TTL (MAC), min-TTL floor prevents sub-hour evasion, max bounds junk residence at 30 days (which PROTO-03 turns into the honest censorship bound). Metadata (send time + lifetime in the clear) is already covered by the §13.2 node row.
+3. **Flooding as censorship** — PROTO-03: §13.6 now states the TTL_MAX bound of a store fill and the keep-oldest caveat; mule transit stuffing (SPA-03) added to the model.
+4. **Metadata leakage** — §13.2 confirmed (timing/size/directory all by design); §13.3 corrected (PROTO-01: brute-forceability was never the issue — recomputation is; the legacy-window residual stands); ack correlation + chunk grouping added (PROTO-07); NODE-04's actor set recorded in §13.5 (PROTO-06).
+5. **Sybil / fake-node** — PROTO-04: the §13.6 evil-twin row now states the same-origin code-delivery consequence; SPA-01's recorded engine hashes are cited in the spec as the practical out-of-band check; QR contact verification's precise power (identity pinning only, not the directory-travelled encryption path) stated (PROTO-05).
+6. **Documented-vs-implemented gap inventory** — §3.3 verdict table (27 rows); every Corrected row is a spec rewrite in protocol.md 1.12.2; the one deferred amendment is PROTO-08.
+7. **Anything else** — sign-then-encrypt and daemon-metadata visibility re-confirmed (§3.1); canonical-serialization malleability examined and sound (§3.1); forward-secrecy wording checked against the construction — no overclaim found; cross-phase §14 notes: `hop_count` is unsigned loop-control metadata (spoofable, harmless by construction — dedup is by `id`), and the §14.3 LoRa short mode's trial-decrypt broadcast removes the hint from the radio entirely (a privacy improvement worth preserving when Phase 3 lands); the offline-maintenance design record's open items are its own follow-up issues — this phase corrected its two §13-echoes (§3.5 precedence contradiction, §3.6 rotation understatement) and found no security gap in the capsule trust design (§2.7's anti-rollback monotonic rule is sound).
+
+### 3.5 Phase 3 quality gates (executed at this revision)
+
+| Gate | Result |
+|---|---|
+| `cd node && go test ./... -count=1` | PASS — 10/10 packages (incl. the new `TestExpiredEnvelopeAdmittedNeverServed`) |
+| `cd node && go vet ./...` | PASS — clean |
+| `cd node && test -z "$(gofmt -l .)"` | PASS — clean |
+| `node tests/crypto_roundtrip.mjs` | PASS — 44 assertions |
+| `node tests/spa_security.mjs` | PASS — 277 assertions |
+| `node tests/spa_structure.mjs` | PASS — 262 assertions |
+| `node tests/version_migration.mjs` | PASS — 78 assertions |
+| `node tests/field_equiv.mjs` | PASS — 62 assertions |
+| `node tests/hint_rotation.mjs` | PASS — 44 assertions |
+| `node tests/qr_identity.mjs` (extended this phase) | PASS — 73 assertions (was 72; +1 PROTO-05 pin) |
+| `bash tests/sync_e2e.sh` | PASS — 383 assertions, 0 failed (docs-only + client-test changes; the daemon is untouched) |
+
+---
+
+*(Phases 4–5 append below as they complete.)*
