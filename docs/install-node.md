@@ -699,13 +699,16 @@ network stack by design ([`pi-models.md`](pi-models.md#5-which-os-image-exactly)
    §7 first-boot checklist). The Pi's Wi-Fi is now the node's access point:
    **its own network name `offgrid-messages` appears.**
 
+<!-- PHOTO: the bench software setup — Pi with keyboard and small screen,
+     the SD card and laptop running the Imager in the background. -->
+
 ### 6.5 Bench validation checklist
 
 Do not let the node leave the house until every line passes. From a phone:
 
 - [ ] The Wi-Fi network `offgrid-messages` is visible and joins without a password.
 - [ ] The captive portal pops up on its own — or you open your **full browser** at `http://offgrid.local:8080` and the page loads.
-- [ ] Register a test identity (§quick-start steps 1–5 of [`quick-start.md`](quick-start.md)).
+- [ ] Register a test identity (steps 1–5 of the end-user guide, [`quick-start.md`](quick-start.md)).
 - [ ] With a SECOND phone on the same Wi-Fi: register another identity, send a test message from one to the other, tap "Sync now" on both — the message arrives.
 - [ ] The two phones cannot see each other's traffic (that is `ap_isolate` doing its job; you simply notice there is no "local network" anything between them).
 
