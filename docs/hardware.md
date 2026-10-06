@@ -2,6 +2,8 @@
 
 Power budget, sizing math, wiring, parts and assembly for one fixed node. The software side of a node is documented in `docs/BUILD.md`; the radio/network configuration lives in `raspberry/` (`hostapd`, `dnsmasq`, firewall, `provision.sh`). The power-trim measures referenced here (HDMI off, LEDs off, Bluetooth disabled, `powersave` governor) are already applied by `raspberry/power/` and `provision.sh`. Which board model to pick, and the per-model power/performance notes, are in `docs/pi-models.md` — the baseline is the Pi Zero W, and every figure below holds for it (it idles slightly below the Zero 2 W).
 
+Building your first node end to end? This file is the sizing reference, not a tutorial. The step-by-step companion — component shopping with budget tiers, battery and panel choices in plain language, bench assembly and per-environment deployment (forest, mountain, desert, coastal) — is [`docs/install-node.md`](install-node.md), which links back here for every calculation it uses.
+
 ## 1. Design target: ~1 W continuous
 
 After the power trim, the node is designed around a **1 W continuous electrical load** at the Pi (5 V × ~200 mA average, dominated by the Wi-Fi radio beaconing in AP mode plus the Go daemon, which idles at negligible CPU on a Zero W or Zero 2 W). Everything in this guide sizes the energy system so the load never browns out, including through multi-day overcast weather. Larger boards (Pi 3/4/5) run the same node at a higher idle draw — feed the measured number into §2 instead of 1 W if you deploy one.
