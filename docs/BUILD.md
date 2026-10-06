@@ -140,6 +140,17 @@ bash tests/upgrade_e2e.sh
 #     field-test scaffold (no pre-filled results). Needs go; owns
 #     127.0.0.1:18201-18202.
 node tests/field_equiv.mjs
+
+# 15. docs/install-node.md structure (issue #35): the builder's guide exists
+#     with all 10 required sections, the TOC anchors match the real headings
+#     (GitHub's anchor algorithm), every relative doc link resolves to a file
+#     and every cross-file heading fragment matches the target file, the
+#     README wiring and the hardware.md forward pointer are in place, the
+#     guide's key numbers agree with hardware.md (1 W, 0.90 buck, 0.80 DoD,
+#     12.8 V, 20 W, both fuse ratings, the 0 °C charge ban, the 30% overnight
+#     floor), every environment subsection carries its ASCII diagram, and the
+#     glossary covers the unavoidable terms
+node tests/install_node_structure.mjs
 ```
 
 Expected outputs (assertion counts move as suites grow — the shape is what
@@ -238,6 +249,21 @@ matters):
     ```
 
     It sources `raspberry/upgrade.sh` — the very library `install.sh --upgrade` and `--rollback` execute on a Pi — binds every `DTN_*` path into a temporary "node" and overrides the three `upgrade_svc_*` systemd seams with plain background-process management, so the exact field code runs here rootlessly against real files and real daemons (on `127.0.0.1:18101`, disjoint from the E2E's `18091-18095` and the chaos suite's `18095-18099`). It needs `go`, `curl` and the `sqlite3` CLI. The legs: structural pins on the field wiring (`install.sh` modes, the binding stop → backup → swap → start → gate order, the provision.sh `STEPS` subset selector, the Makefile + docs wiring); two binaries from the current tree with distinct `-ldflags -X main.build=` ids; a v1-era store crafted with the §9 schema verbatim (`user_version` 0, no `envelopes.v` / `directory.epoch` / `directory.prekeys`) populated with 3 envelopes + 2 directory rows; the deployed release migrating that populated store through the real §15.3 chain (everything keeps being served: ids, byte-identical payloads, epoch-0 directory backfill); the upgrade success path through the library (backup generation with db + previous binary + `MANIFEST.txt`, prune, binary swap, health gate on build identity + schema_version, zero envelope loss, the write path accepts new mail); backup rotation (4 generations → keep 3, explicit `KEEP=1`); the FAILED-migration rollback (store marker forced to 99, the swapped daemon refuses to start naming both versions, the gate fails, `upgrade_auto_rollback` restores the previous binary + db backup and the node serves the full ledger again with the refused store kept as `pre-restore-<UTC>` evidence); and the negative gates (wrong expected build / schema fail an otherwise healthy node).
+
+14. The install-node guide structure test (issue #35) ends with:
+
+    ```
+    PASS: <n> assertions on docs/install-node.md structure, anchors and cross-links
+    ```
+
+    It is pure file-structure checking (no daemon, no network): the guide's
+    10 required sections and key subsections, TOC anchors vs real headings
+    via GitHub's anchor algorithm (both directions), every relative link
+    resolving with its cross-file heading fragment validated against the
+    target file, the README (docs table + solar paragraph) and hardware.md
+    forward-pointer wiring, the number-consistency pins against
+    `docs/hardware.md` (1 W, 0.90, 0.80, 12.8 V, 14.6 V, 20 W, 5.1 V, 15 A,
+    2 A, 0 °C, 30%), the per-environment ASCII diagrams and the glossary.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 

@@ -69,7 +69,7 @@ The full manual path (build + copy) is in [`docs/BUILD.md`](docs/BUILD.md) §5. 
 
 ### Hardware
 
-For solar-powered deployment (~1 W continuous target): solar + LiFePO4 sizing math, wiring, SD card and enclosure guidance are in [`docs/hardware.md`](docs/hardware.md).
+For solar-powered deployment (~1 W continuous target): the step-by-step builder's guide — component shopping with budget tiers, battery and panel choices, bench assembly, and per-environment deployment (forest, mountain, desert, coastal) — is [`docs/install-node.md`](docs/install-node.md); the solar + LiFePO4 sizing math, wiring, SD card and enclosure guidance it links to are in [`docs/hardware.md`](docs/hardware.md).
 
 ## Usage
 
@@ -134,6 +134,7 @@ offgrid/
 | [`docs/BUILD.md`](docs/BUILD.md) | Build, run locally, test and deploy to a Pi (online / offline / manual), plus troubleshooting and on-site checklists |
 | [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
+| [`docs/install-node.md`](docs/install-node.md) | **From-scratch node installation guide** (issue #35): component shopping in three budget tiers with substitution rules, battery chemistry + runtime tables, build alternatives, step-by-step bench assembly, per-environment outdoor deployment (forest, mountain, desert, coastal), maintenance, troubleshooting and printable checklists — links to `hardware.md` for all the math |
 | [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), upgrading a deployed node + rollback, escalation |
 | [`docs/quick-start.md`](docs/quick-start.md) | **End-user quick-start guide** (issue #23): the printable, translatable one-pager a field pilot hands out — join the Wi-Fi, open the full browser, register, back up the seed, send, be a mule — also served by every node at `http://offgrid.local:8080/guide` |
