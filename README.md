@@ -31,7 +31,7 @@ All cryptography happens on the client: X25519 + XSalsa20-Poly1305 for confident
 Key design decisions:
 
 - **Same-origin trick** — every node serves the portal at the same URL, `http://offgrid.local:8080` (gateway `10.42.0.1`, wildcard DNS), so a phone's `IndexedDB` keeps one identity and one transit queue across all nodes.
-- **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Since spec 1.6.0 the hint ROTATES per 24-hour epoch (HKDF of the key with the node's epoch), so a directory-holding operator can only link envelopes to aliases within the current epoch. Nodes and mules see only random bytes and an opaque hint — never content, sender identity or the full recipient key.
+- **Zero-trust intermediaries** — envelopes are sign-then-encrypt, addressed to a truncated key hash (`dest_hint`). Since spec 1.6.0 the hint ROTATES per 24-hour epoch (HKDF of the key with the epoch salt) — rotation raises the work factor and bounds retroactive linking after a late key acquisition, but a directory-holding operator can still link envelopes to aliases permanently (protocol §13.3). Nodes and mules see only random bytes and an opaque hint — never content, sender identity or the full recipient key.
 - **Self-contained nodes** — a single static Go binary serves the API and the whole SPA (embedded via `go:embed`). No CDNs, no cloud calls, nothing external; everything is served from the Pi.
 - **Lightweight envelope** — JSON/Base64 in Phase 1 within binding limits (128-byte plaintext per envelope — longer texts are split client-side into several ordinary envelopes and reassembled transparently, 1 MiB envelope cap, 5000-envelope node cap, per-envelope TTL with a 15-minute janitor), designed to map onto BLE L2CAP and LoRa CBOR frames in later phases.
 
@@ -132,6 +132,8 @@ offgrid/
 |---|---|
 | [`docs/protocol.md`](docs/protocol.md) | **Normative protocol spec**: envelope format, canonical serialization, key derivations, crypto primitives, binding limits, node schema and API, threat model, Phase 2 (BLE) / Phase 3 (LoRa) mapping |
 | [`docs/rfc4838-alignment.md`](docs/rfc4838-alignment.md) | **RFC 4838 alignment audit** (issue #40): the DTN architecture claim validated concept-by-concept against RFC 4838 — 16-row mapping table, verdicts, deviation register (intentional vs unintentional) and what Bundle-Protocol conformance would mean (informational) |
+| [`docs/security-audit.md`](docs/security-audit.md) | **Security audit report** (issue #14, FINAL v1.0.0): five-phase audit — node daemon, SPA + crypto engine, protocol/threat model, Pi network stack, supply chain — 30 findings by severity with reproductions and fixes, the §13 claim-by-claim threat-model verdict table, and the consolidated register of accepted residuals and deferred follow-ups |
+| [`docs/known-limitations.md`](docs/known-limitations.md) | **Known limitations** (issue #14): the residual risks accepted by design, in plain language — no TLS, node-served app code, permanent directory-holder linkability, unauthenticated directory entries, replay after expiry, store-fill censorship, shared devices, SD-card extraction, unsigned release hashes, mule withholding — each citing its spec section and audit finding |
 | [`docs/BUILD.md`](docs/BUILD.md) | Build, run locally, test and deploy to a Pi (online / offline / manual), plus troubleshooting and on-site checklists |
 | [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
@@ -146,6 +148,7 @@ offgrid/
 
 ## Status and roadmap
 
+- **Security audit — complete** (issue #14): all five phases done across the node daemon, client, protocol, Pi network stack and supply chain — no critical or high findings; fixes, spec corrections and accepted residuals are documented in [`docs/security-audit.md`](docs/security-audit.md), with the user/operator-facing residual list in [`docs/known-limitations.md`](docs/known-limitations.md).
 - **Phase 1 (this repository) — software complete**: Wi-Fi dead-drop nodes + browser data mules over HTTP, covered by the automated test suite above. The remaining manual item is on-hardware acceptance with physical Pis and phones: the executable protocol and report scaffold are [`docs/field-test.md`](docs/field-test.md) (T1–T10, every result PENDING until executed — `make field-kit` prints the session checklist).
 - **Phase 2 — BLE**: direct phone-to-phone transfer over BLE L2CAP connection-oriented channels with `hop_count ≤ 7`; the envelope format and the code-level mapping are already defined in [`docs/protocol.md`](docs/protocol.md) §14.
 - **Phase 3 — LoRa**: long-range radio backhaul between zones, envelope packed as CBOR within the 222-byte SX1262 MTU at 915 MHz (same spec section).
