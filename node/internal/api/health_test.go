@@ -22,13 +22,16 @@ import (
 )
 
 // healthMembers is the exact §10.7 top-level member set of the health
-// document; countersMembers and rejectionMembers the nested sets.
+// document (the thirteen of #31 plus the five additive issue-#36 members);
+// countersMembers and rejectionMembers the nested sets.
 var (
 	healthMembers = []string{
 		"status", "api", "build", "envelope_versions", "schema_version",
 		"uptime_seconds", "envelopes", "envelope_capacity", "directory_entries",
 		"db_size_bytes", "last_cleanup_unix", "last_cleanup_envelopes_deleted",
 		"counters",
+		// Issue #36 (additive per §15.4): the field status extensions.
+		"battery", "system", "software", "store", "projections",
 	}
 	countersMembers = []string{
 		"pushes_accepted", "pushes_rejected", "pushes_rejected_by_class",
@@ -73,8 +76,11 @@ func envWithHint(id string, createdAt int64, hint string) envelope.Envelope {
 }
 
 // TestHealthEndpointDocument verifies the §10.7 document shape on a fresh
-// node: exactly the thirteen members, the nested counter sets, the identity
-// members wired to the same sources as §15.5, and truthful zero values.
+// node: exactly the eighteen members (thirteen of #31 + five of #36), the
+// nested counter sets, the identity members wired to the same sources as
+// §15.5, and truthful zero values. On a server without the status sampler
+// the five issue-#36 members are present but null — the §10.7 N/A
+// convention.
 func TestHealthEndpointDocument(t *testing.T) {
 	h, _ := newTestHandler(t)
 
@@ -152,6 +158,13 @@ func TestHealthEndpointDocument(t *testing.T) {
 	if hr.Counters.PushesAccepted != 0 || hr.Counters.PushesRejected != 0 || hr.Counters.DedupHits != 0 ||
 		hr.Counters.TTLSweeps != 0 || hr.Counters.TTLSweptEnvelopes != 0 {
 		t.Fatalf("fresh counters must be zero, got %+v", hr.Counters)
+	}
+	// The five issue-#36 members on a server WITHOUT the sampler engine:
+	// present (fixed member set) but null — the §10.7 N/A convention.
+	for _, m := range []string{"battery", "system", "software", "store", "projections"} {
+		if doc[m] != nil {
+			t.Errorf("member %q must be null without the status sampler, got %v", m, doc[m])
+		}
 	}
 }
 
@@ -469,9 +482,11 @@ func TestHealthPrivacy(t *testing.T) {
 		}
 	}
 
-	// Three envelopes with distinct ids, hints and payloads.
+	// Three envelopes with distinct ids, hints and payloads. The requests
+	// also come FROM a client whose source address must never surface
+	// (httptest defaults RemoteAddr to 192.0.2.1 — a TEST-NET address).
 	envs := make([]envelope.Envelope, 0, 3)
-	secrets := []string{aliased[0].alias, aliased[1].alias}
+	secrets := []string{aliased[0].alias, aliased[1].alias, "192.0.2.1"}
 	for i := 0; i < 3; i++ {
 		e := envWithHint(hexID(61+i), now+int64(i), fmt.Sprintf("%016x", 0xBEEF00+i))
 		envs = append(envs, e)

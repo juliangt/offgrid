@@ -251,10 +251,17 @@ func overrideAdmissionLimits(postBurst int, postRefill time.Duration, envBurst, 
 // withRequestBudget wraps one of the two POST handlers with the per-IP
 // request budget. The check runs BEFORE the body is read a single byte
 // (cheap-first): an over-budget client pays one map lookup and gets a 429
-// instead of making the node parse megabytes of JSON.
+// instead of making the node parse megabytes of JSON. The client key also
+// feeds the aggregate-only active-clients count of the status page
+// (issue #36) at this exact point where the key is already handled. The
+// diagnostics endpoints deliberately do NOT count: an operator polling
+// /status is diagnosing, not using the portal, and the count must not
+// include the observer.
 func (s *server) withRequestBudget(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if ok, wait := s.postBudget.allow(clientKey(r), 1); !ok {
+		key := clientKey(r)
+		s.noteClientActivity(key)
+		if ok, wait := s.postBudget.allow(key, 1); !ok {
 			writeRateLimited(w, wait)
 			return
 		}
@@ -270,7 +277,9 @@ func (s *server) withRequestBudget(next http.HandlerFunc) http.HandlerFunc {
 // answers "how many requests did the node refuse at this door", never who.
 func (s *server) withSyncRequestBudget(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if ok, wait := s.postBudget.allow(clientKey(r), 1); !ok {
+		key := clientKey(r)
+		s.noteClientActivity(key)
+		if ok, wait := s.postBudget.allow(key, 1); !ok {
 			s.counters.RecordPushRejected(health.ClassRateLimited)
 			writeRateLimited(w, wait)
 			return
