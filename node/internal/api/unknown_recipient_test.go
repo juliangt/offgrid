@@ -188,6 +188,66 @@ func TestUnknownRecipientResponseIndistinguishable(t *testing.T) {
 	}
 }
 
+// TestExpiredEnvelopeAdmittedNeverServed pins the freshness semantics the
+// §13.5 replay record rests on (corrected by the issue-#14 protocol audit,
+// docs/security-audit.md §3 PROTO-02): §10.5 bounds created_at only from
+// ABOVE (> 0, <= now + 300) — there is deliberately no freshness floor — so
+// an envelope that is ALREADY past its created_at + ttl deadline at push
+// time passes validation, is admitted with the ordinary 200 shape and is
+// stored (occupying §8.1 cap headroom until the next sweep), is never
+// served by any pull (the §10.4 inclusive servability boundary excludes it
+// from the first pull), and is reaped by the next §10.6 pass. The node
+// therefore keeps no memory of expired ids: a captured envelope can be
+// re-injected after eviction — the accepted replay residual of §13.5.
+func TestExpiredEnvelopeAdmittedNeverServed(t *testing.T) {
+	h, s := newTestHandler(t)
+	now := time.Now().Unix()
+
+	// created_at two hours ago with the §8.1 minimum TTL: the deadline
+	// (created_at + ttl) is a full hour in the past at push time.
+	env := validEnv(hexID(11), now-7200)
+	if deadline := env.CreatedAt + env.TTL; deadline >= now {
+		t.Fatalf("fixture must already be expired at push time: deadline %d >= now %d", deadline, now)
+	}
+
+	rec := postJSON(t, h, "/api/v1/sync", map[string]any{
+		"push_envelopes": []envelope.Envelope{env},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("already-expired envelope must be admitted (§10.5 has no freshness floor): got %d, want 200 (body: %s)",
+			rec.Code, rec.Body.String())
+	}
+	assertSyncShape(t, rec.Body.Bytes(), "push")
+	if n, err := s.EnvelopeCount(); err != nil || n != 1 {
+		t.Fatalf("expired envelope must be stored (cap headroom until the sweep), count = %d (err: %v)", n, err)
+	}
+
+	// Never served: the inclusive §10.4 boundary excludes it immediately,
+	// not only after the janitor runs.
+	rec = postJSON(t, h, "/api/v1/sync", map[string]any{"known_ids": []string{}})
+	var resp struct {
+		PullEnvelopes []envelope.Envelope `json:"pull_envelopes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode pull response: %v", err)
+	}
+	if len(resp.PullEnvelopes) != 0 {
+		t.Fatalf("an already-expired envelope must never be served, got %+v", resp.PullEnvelopes)
+	}
+
+	// The next §10.6 sweep reaps it.
+	deleted, err := s.DeleteExpired(now)
+	if err != nil {
+		t.Fatalf("DeleteExpired: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("janitor must reap the expired envelope, deleted %d rows", deleted)
+	}
+	if n, err := s.EnvelopeCount(); err != nil || n != 0 {
+		t.Fatalf("expired envelope must be gone after the sweep, count = %d (err: %v)", n, err)
+	}
+}
+
 // assertDirectoryEmpty fails the test unless the directory table is empty,
 // checked both through the public GET (what a client could observe) and the
 // store count (what the push path could have consulted and did not).

@@ -344,6 +344,23 @@ console.log("== (e) recipient merge: contacts ∪ directory, offline-first ==");
   ok(bobRow.alias === "bob_scanned", "the LOCAL contact alias wins as the display label (cosmetic, §4.7)");
   ok(bobRow.epoch === DTN.epochOf(NOW) && bobRow.prekeys && bobRow.last_seen === NOW,
      "the DIRECTORY supplies the fresh key material (epoch, prekeys, last_seen)");
+  // PROTO-05 pin (docs/security-audit.md §3): the §4.7 merge precedence on a
+  // DIVERGENCE. An honest directory and an honest QR always agree — x25519
+  // is seed-derived and permanent — so a differing x25519 under the same
+  // Ed25519 key is exactly the §13.5 directory-tamper signal (NODE-04). The
+  // shipped §4.7 rule is that the DIRECTORY entry wins; the QR-pinned x is
+  // used only when the directory lacks the entry ("the directory entry
+  // supplies the fresh key material"), and the divergence is resolved
+  // SILENTLY in the directory's favor. docs/offline-maintenance.md §3.5
+  // specifies the pin-and-warn refinement as future federation work.
+  const mallory = freshIdentity("mallory");
+  const tamperedDir = [
+    { alias: "bob_directory", pubkey: bob.signPublicB64, x25519: mallory.boxPublicB64, last_seen: NOW, epoch: DTN.epochOf(NOW) },
+  ];
+  const hijacked = DTN.qrMergeRecipients(tamperedDir, [bobContact]);
+  const hijackedBob = hijacked.find((r) => r.ed === bob.signPublicB64);
+  ok(hijackedBob && hijackedBob.contact && hijackedBob.x25519 === mallory.boxPublicB64,
+     "PROTO-05 pin: a directory entry's x25519 silently overrides a QR-pinned contact's x (§4.7 directory-wins precedence)");
   const carolRow = merged.find((r) => r.ed === carol.signPublicB64);
   ok(carolRow && carolRow.contact && !carolRow.in_directory && carolRow.epoch === undefined && carolRow.prekeys === undefined,
      "a contact the directory does not list carries only the QR keys (offline addressing)");
