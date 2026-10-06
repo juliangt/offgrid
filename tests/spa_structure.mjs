@@ -121,7 +121,7 @@ const expectedApi = [
   "purgeExpiredChunkPartials",
   "addSentRecord", "listSent", "markSentPushed", "applyAckToSent", "STORE_SENT",
   "addTransitEnvelopes", "listTransit", "removeTransitIds",
-  "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire",
+  "markSeenIds", "listSeenIds", "getMeta", "setMeta", "toEnvelopeWire", "transitRecordOf",
   // §15.6 store migrations chain
   "DB_VERSION", "IDB_MIGRATIONS", "runIdbMigrations",
   // §4.7 identity QR — in-person contact exchange (issue #28)
