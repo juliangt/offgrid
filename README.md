@@ -6,7 +6,7 @@ Asynchronous, end-to-end encrypted (E2EE) messaging that works with **no Interne
 
 The project combines three ideas:
 
-- **Delay-tolerant networking (DTN) / store-and-forward** — messages are atomic envelopes that sit in untrusted mailboxes until a path to the recipient shows up. Nodes never talk to each other; *physical human movement is the transport layer*.
+- **Delay-tolerant networking (DTN) / store-and-forward** — messages are atomic envelopes that sit in untrusted mailboxes until a path to the recipient shows up. Nodes never talk to each other; *physical human movement is the transport layer*. This follows the DTN **architecture** of RFC 4838 (store-carry-forward, endpoint naming, message lifetimes) — not the IETF Bundle Protocol wire format (RFC 5050/9171); the concept-by-concept alignment audit is [`docs/rfc4838-alignment.md`](docs/rfc4838-alignment.md).
 - **Sneakernet / data mules** — anyone who opens the portal at one node and later at another carries other people's encrypted envelopes in their browser, extending the network wherever its users go.
 - **bitchat and Nostr** — the envelope format follows their model of small, self-contained, signed events (~180–250 bytes), so the same data structure can later migrate, without rewrites, to Bluetooth LE (Phase 2) and LoRa point-to-point radio (Phase 3).
 
@@ -131,6 +131,7 @@ offgrid/
 | Document | Contents |
 |---|---|
 | [`docs/protocol.md`](docs/protocol.md) | **Normative protocol spec**: envelope format, canonical serialization, key derivations, crypto primitives, binding limits, node schema and API, threat model, Phase 2 (BLE) / Phase 3 (LoRa) mapping |
+| [`docs/rfc4838-alignment.md`](docs/rfc4838-alignment.md) | **RFC 4838 alignment audit** (issue #40): the DTN architecture claim validated concept-by-concept against RFC 4838 — 16-row mapping table, verdicts, deviation register (intentional vs unintentional) and what Bundle-Protocol conformance would mean (informational) |
 | [`docs/BUILD.md`](docs/BUILD.md) | Build, run locally, test and deploy to a Pi (online / offline / manual), plus troubleshooting and on-site checklists |
 | [`docs/pi-models.md`](docs/pi-models.md) | Support matrix for every Raspberry Pi model: OS image, binary, Wi-Fi caveats, performance and power notes |
 | [`docs/hardware.md`](docs/hardware.md) | Solar + LiFePO4 sizing math, bill of materials, wiring diagram, assembly checklist |
