@@ -579,7 +579,13 @@ func validatePrekeysBundle(raw json.RawMessage) ([]byte, error) {
 // set from the NODE clock (§10.3, §6.1: the server, never the client, owns
 // the time reference). Invalid alias or keys → 400; an invalid §4.6 prekeys
 // member → 400 invalid_prekeys (blind shape validation only — the node
-// never verifies the bundle signature, §1/§4.6). The POST body shape is
+// never verifies the bundle signature, §1/§4.6). At the storage layer's
+// directory cap (storage.MaxDirectoryEntries, issue #14 NODE-01) a NEW
+// pubkey is shed with 429 node_full — the same capacity class the sync
+// endpoint answers at envelope capacity, and a status this endpoint already
+// answers under the §10.1 request budget — while a refresh of an entry
+// already present always succeeds (issue #14: a full directory must never
+// lock existing users out of republication). The POST body shape is
 // otherwise unchanged since pre-1.6 builds (epoch is additive in the GET
 // response only, §15.4; prekeys is additive since 1.7.0 and its absence
 // clears any stored bundle, §9).
@@ -607,6 +613,10 @@ func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	}
 	now := timeNow().Unix()
 	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds, prekeys); err != nil {
+		if errors.Is(err, storage.ErrCapacity) {
+			writeError(w, http.StatusTooManyRequests, codeNodeFull)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
 	}
