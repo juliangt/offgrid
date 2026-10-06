@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,5 +147,47 @@ func envelopeForTest(seed byte, createdAt int64) envelope.Envelope {
 		CreatedAt: createdAt,
 		TTL:       3600,
 		Payload:   base64.StdEncoding.EncodeToString(raw),
+	}
+}
+
+// TestNewHTTPServerTimeouts pins the connection-lifetime bounds of issue #14
+// (NODE-02): every phase of a connection's life must be time-boxed. The
+// pre-fix server set only ReadHeaderTimeout, so a hostile station could hold
+// connections indefinitely — a slow-body drip (MaxBytesReader bounds SIZE,
+// never TIME) or idle keep-alive hoarding — with no daemon-level brake
+// (hardening.md A3, Track 2's "shields may be bypassed" assumption). A
+// regression that drops one of these fields must fail here, not in review.
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	handler := http.NewServeMux()
+	srv := newHTTPServer(":8080", handler)
+
+	if srv.Handler != http.Handler(handler) {
+		t.Fatalf("newHTTPServer must wire the given handler")
+	}
+	if srv.Addr != ":8080" {
+		t.Fatalf("Addr: got %q, want :8080", srv.Addr)
+	}
+	if srv.ReadHeaderTimeout != readHeaderTimeout {
+		t.Fatalf("ReadHeaderTimeout: got %v, want %v", srv.ReadHeaderTimeout, readHeaderTimeout)
+	}
+	if srv.ReadTimeout != readTimeout {
+		t.Fatalf("ReadTimeout: got %v, want %v (slow-body drip must be bounded)", srv.ReadTimeout, readTimeout)
+	}
+	if srv.WriteTimeout != writeTimeout {
+		t.Fatalf("WriteTimeout: got %v, want %v (unread responses must not pin writers)", srv.WriteTimeout, writeTimeout)
+	}
+	if srv.IdleTimeout != idleTimeout {
+		t.Fatalf("IdleTimeout: got %v, want %v (idle keep-alive sockets must be reaped)", srv.IdleTimeout, idleTimeout)
+	}
+	// The bounds must actually bite: all four are strictly positive and the
+	// body/idle windows are longer than the header window (a slow header is
+	// cut first; a legitimate big body still fits the generous read window).
+	if readHeaderTimeout <= 0 || readTimeout <= 0 || writeTimeout <= 0 || idleTimeout <= 0 {
+		t.Fatalf("all timeouts must be positive, got header=%v read=%v write=%v idle=%v",
+			readHeaderTimeout, readTimeout, writeTimeout, idleTimeout)
+	}
+	if readTimeout <= readHeaderTimeout || idleTimeout < readHeaderTimeout {
+		t.Fatalf("timeout ordering sanity: read=%v idle=%v must exceed header=%v",
+			readTimeout, idleTimeout, readHeaderTimeout)
 	}
 }
