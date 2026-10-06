@@ -95,6 +95,8 @@ Since the #36 extension the page (and its `/api/v1/health` twin) also answers th
 
 ## 4. Restoring a node in minutes
 
+> **Forward pointer (issue #37):** offline **update distribution** — releases delivered to island nodes by a mule device or a drive-by laptop instead of carried on a USB stick per node — is designed in [`docs/offline-maintenance.md`](offline-maintenance.md) (signed release capsule, staging endpoint, anti-rollback policy). It is a design record only: until its follow-up issues land, the software update paths that exist today are exactly the two below — the §4.6 reflash and the §4.8 in-place upgrade.
+
 ### 4.1 Reboot first
 
 The standing rule: **`sudo reboot` before any diagnosis.** Every unit is enabled at boot and the reboot is the activation step (`docs/BUILD.md` §5); all tmpfs shed state resets (a reboot IS the big reset — also for the watchdog's restart budget). After it comes back, run the §5 verification trio of `docs/BUILD.md`:
