@@ -135,3 +135,14 @@ Fill this in per deployment (values at the buck output unless stated; use a USB 
 | Charge controller quiescent | 1–5 mA @ 12.8 V | ______ | subtract from harvest in §2.3 if large |
 | Cold night minimum battery voltage | ≥ 12.0 V (4S, 80% DoD floor ≈ 12.2 V under load) | ______ | below 11.6 V: discharge protection nearing |
 | **24 h average** | **≤ 200 mA @ 5 V ≈ 1 W** | ______ | the §2 sizing input |
+
+## 10. Channel planning (2.4 GHz, issue #20 T6)
+
+Every node ships on **channel 6** by default (`raspberry/hostapd/hostapd.conf`: `channel=6`). Two nodes whose coverage areas partially overlap **on the same channel share one airtime domain**: 802.11 carriers sense per channel, so co-channel APs in partial range steal airtime from each other (slower associations, retry loops, slower portal loads at the midpoint) — no function is lost, but the degradation is real and was accepted in the design on the assumption that nodes are deployed far apart.
+
+Deployment guidance:
+
+1. **Plan adjacent nodes on 1/6/11** (the three non-overlapping 2.4 GHz channels). A chain A → B → C assigns 1 / 6 / 11 so no two reachable-from-one-spot nodes share a channel.
+2. **Co-channel pairs are fine only when geographically separated** — far enough that no client location hears both beacons weakly (the failure mode is the *partial* overlap, not the distance itself).
+3. After ANY channel change: edit `/etc/hostapd/hostapd.conf`, reboot, and re-run the coexistence case (T6 of `docs/field-test.md`) plus the mule walk (T1) on the new plan before leaving the node unattended.
+4. Record the chosen per-node channel in the deployment log — the §12 matrices of `docs/field-test.md` are the place the observed evidence lives.

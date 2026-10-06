@@ -767,6 +767,7 @@ DTN.listSeenIds = listSeenIds;
 DTN.getMeta = getMeta;
 DTN.setMeta = setMeta;
 DTN.toEnvelopeWire = toEnvelopeWire;
+DTN.transitRecordOf = transitRecordOf;
 DTN.DB_VERSION = DB_VERSION;
 DTN.IDB_MIGRATIONS = IDB_MIGRATIONS;
 DTN.runIdbMigrations = runIdbMigrations;

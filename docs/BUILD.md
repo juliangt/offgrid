@@ -132,6 +132,14 @@ bash tests/hardening_structure.sh
 #     health-gate success path, forced-failure automatic rollback, zero
 #     envelope loss at every phase
 bash tests/upgrade_e2e.sh
+
+# 14. Issue-#20 field equivalents: the software-verifiable half of
+#     docs/field-test.md — seed backup/restore round trip, one store across
+#     two nodes (identity + inbox + transit survive), health/status agreement
+#     within the documented cache window, and the fabrication guard on the
+#     field-test scaffold (no pre-filled results). Needs go; owns
+#     127.0.0.1:18201-18202.
+node tests/field_equiv.mjs
 ```
 
 Expected outputs (assertion counts move as suites grow — the shape is what

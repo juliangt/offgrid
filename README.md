@@ -137,11 +137,12 @@ offgrid/
 | [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), upgrading a deployed node + rollback, escalation |
 | [`docs/quick-start.md`](docs/quick-start.md) | **End-user quick-start guide** (issue #23): the printable, translatable one-pager a field pilot hands out — join the Wi-Fi, open the full browser, register, back up the seed, send, be a mule — also served by every node at `http://offgrid.local:8080/guide` |
+| [`docs/field-test.md`](docs/field-test.md) | **Field acceptance protocol + report** (issue #20): the executable T1–T10 cases for the on-hardware session (two-node mule walk, device matrix, seed restore, isolation, cold start, coexistence, power draw) with PENDING results matrices, a defect log and an empty sign-off — plus the software-verifiable half automated as `tests/field_equiv.mjs` |
 | [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
 | [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
 
 ## Status and roadmap
 
-- **Phase 1 (this repository) — complete**: Wi-Fi dead-drop nodes + browser data mules over HTTP, covered by the automated test suite above. The remaining manual item is on-hardware acceptance with a physical Pi Zero W (see [`docs/BUILD.md`](docs/BUILD.md) §5 and §7).
+- **Phase 1 (this repository) — software complete**: Wi-Fi dead-drop nodes + browser data mules over HTTP, covered by the automated test suite above. The remaining manual item is on-hardware acceptance with physical Pis and phones: the executable protocol and report scaffold are [`docs/field-test.md`](docs/field-test.md) (T1–T10, every result PENDING until executed — `make field-kit` prints the session checklist).
 - **Phase 2 — BLE**: direct phone-to-phone transfer over BLE L2CAP connection-oriented channels with `hop_count ≤ 7`; the envelope format and the code-level mapping are already defined in [`docs/protocol.md`](docs/protocol.md) §14.
 - **Phase 3 — LoRa**: long-range radio backhaul between zones, envelope packed as CBOR within the 222-byte SX1262 MTU at 915 MHz (same spec section).

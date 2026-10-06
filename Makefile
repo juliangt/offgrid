@@ -5,7 +5,7 @@
 #
 #   make build       host dev binary (node/dtn-node-dev, the go:embeded SPA inside)
 #   make build-all   the full cross-compile matrix of node/build.sh (arm64/armv7/armv6 + dev)
-#   make test        the full suite: go test, the 9 headless SPA tests, the
+#   make test        the full suite: go test, the 10 headless SPA tests, the
 #                    curl E2E, the node upgrade/rollback E2E (issue #22) and
 #                    the Pi hardening structure test
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
@@ -15,12 +15,14 @@
 #   make fuzz        parser fuzzing only (the chaos fuzz script: seed
 #                    corpora + a small -fuzztime per target, FUZZTIME env
 #                    to retune)
+#   make field-kit   print the field-session checklist for executing
+#                    docs/field-test.md on real hardware (issue #20)
 #
 # No root is needed for any target. The test targets start and stop their
 # own daemons on 127.0.0.1 ports 18091-18099 (sync E2E + chaos) and 18101
 # (upgrade E2E) and clean up after themselves.
 
-.PHONY: build build-all test lint chaos fuzz
+.PHONY: build build-all test lint chaos fuzz field-kit
 
 GO ?= go
 
@@ -47,9 +49,26 @@ test:
 	node tests/chunking.mjs
 	node tests/acks.mjs
 	node tests/qr_identity.mjs
+	node tests/field_equiv.mjs
 	bash tests/sync_e2e.sh
 	bash tests/upgrade_e2e.sh
 	bash tests/hardening_structure.sh
+
+# Field-session entry point (issue #20): the physical acceptance cases of
+# docs/field-test.md CANNOT be automated here — this target only verifies the
+# kit is complete and prints what to bring/print. Execution results go into
+# docs/field-test.md by hand, on site.
+field-kit:
+	@echo "field kit — issue #20 session checklist"
+	@test -f docs/field-test.md || { echo "MISSING docs/field-test.md"; exit 1; }
+	@test -f docs/quick-start.md || { echo "MISSING docs/quick-start.md"; exit 1; }
+	@test -f docs/BUILD.md && grep -q 'Path 4' docs/BUILD.md \
+		|| { echo "MISSING the release-kit path (docs/BUILD.md §5 Path 4)"; exit 1; }
+	@echo "  [ok] docs/field-test.md   — the T1..T10 protocol + report scaffold (print 2)"
+	@echo "  [ok] docs/quick-start.md  — the end-user guide (print 2; also served at /guide)"
+	@echo "  [ok] release USB kit      — build per docs/BUILD.md §5 Path 4 (offline checklist there)"
+	@echo "  hardware, phones and meter: see docs/field-test.md §1 (prerequisites table)"
+	@echo "  after the session: fill the §12 matrices + §13 defect log, sign §14."
 
 # Lint gates (docs/BUILD.md §4): gofmt must report nothing, vet nothing.
 lint:
