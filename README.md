@@ -106,8 +106,8 @@ Requirements: Go 1.26+ and Node.js (tests only). From the repository root:
 cd node && ./build.sh && cd ..     # cross-compiles arm64/armv7/armv6 + dev binary
 cd node && go test ./... -count=1 && cd ..
 node tests/crypto_roundtrip.mjs    # 44 assertions against the SPA crypto engine
-node tests/qr_identity.mjs         # 72 assertions on the §4.7 identity QR (payload vectors, tamper rejection, QR encoder round-trips)
-node tests/spa_structure.mjs       # 261 assertions on the SPA layout, CSP, API surface and the /guide page
+node tests/qr_identity.mjs         # 73 assertions on the §4.7 identity QR (payload vectors, tamper rejection, QR encoder round-trips)
+node tests/spa_structure.mjs       # 262 assertions on the SPA layout, CSP, API surface and the /guide page
 node tests/pwa_assets.mjs          # 46 assertions on the §12.1 PWA-lite assets (manifest, icons, zero external URLs)
 bash tests/sync_e2e.sh             # 383 assertions: five real daemons + full mule walk (curl only)
 ```
