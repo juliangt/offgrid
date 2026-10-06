@@ -1,0 +1,10 @@
+# esp32 (minimum board: ESP32-WROOM-32, 4 MB flash, no PSRAM).
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
+
+# No PSRAM: the enforced envelope cap is 1000 (docs/esp32-design.md §2/§7),
+# which keeps the store RAM index at 31 KB of internal RAM. The 1 MiB sync
+# body is still never resident — the streaming parser bounds per-envelope
+# staging to ~700 B (docs/esp32-design.md §2/§4).

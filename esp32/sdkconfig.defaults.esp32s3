@@ -1,0 +1,14 @@
+# esp32s3 (reference board: ESP32-S3 N16R8, 16 MB flash, octal PSRAM).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_16mb.csv"
+
+# PSRAM holds the store RAM index at the full 5000-envelope cap and the
+# diagnostics sampler ring (docs/esp32-design.md §2). Small allocations stay
+# in internal RAM; only explicitly large buffers spill over.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
