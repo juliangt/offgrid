@@ -27,6 +27,39 @@ var captiveProbePaths = map[string]bool{
 	"/hotspot-detect.html": true,
 }
 
+// secureHeaders sets the daemon's baseline HTTP security headers on EVERY
+// response — HTML, JSON, errors and redirects alike (issue #14, NODE-03):
+//
+//   - X-Content-Type-Options: nosniff — every body already carries an exact
+//     §10.1 Content-Type; this forbids legacy MIME sniffing from ever
+//     reinterpreting attacker-influenced bytes (e.g. the verbatim client
+//     JSON inside directory prekeys, served with SetEscapeHTML(false)).
+//   - X-Frame-Options: DENY — no page of this origin may be framed. The
+//     portal and the operator status view ship their CSP as <meta> tags,
+//     and frame-ancestors is IGNORED inside a meta policy, so without this
+//     header clickjacking protection would rest on nothing. The portal is a
+//     top-level destination (captive-portal redirect chain, §10.2) and never
+//     embedded, so DENY cannot break a legitimate flow.
+//   - Referrer-Policy: no-referrer — the pages already set <meta
+//     name="referrer" content="no-referrer">; the header extends the same
+//     guarantee to every response (and to clients that ignore meta).
+//
+// A header Content-Security-Policy is deliberately NOT introduced here: the
+// per-page meta policies are the normative CSPs (index.html, guide.html and
+// the §10.7 status view each declare their own), and a second, header-level
+// CSP would be a drifting copy that can only restrict further. Frame
+// protection — the one directive a meta tag cannot express — is delivered by
+// X-Frame-Options above.
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // canonicalHost redirects every request whose Host header is not exactly
 // CanonicalHost (case-insensitive) to the same path and query on the
 // canonical origin, so the browser always ends on the one true origin

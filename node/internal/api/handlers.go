@@ -165,7 +165,8 @@ const manifestContentType = "application/manifest+json; charset=utf-8"
 // and img/ are read once at
 // startup. Unknown paths yield a JSON 404 and wrong
 // methods a JSON 405 with an Allow header (§10.1). The whole mux is wrapped
-// with the canonical-host redirect and the body-size limiter; the two POST
+// with the baseline security headers, the canonical-host redirect and the
+// body-size limiter; the two POST
 // endpoints additionally sit behind the per-IP admission-control budgets of
 // ratelimit.go (issue #16 Phase 2): exhaustion answers 429 rate_limited with
 // a Retry-After header before the body is read. GET endpoints stay unlimited
@@ -267,7 +268,10 @@ func NewWithCounters(store Store, counters *health.Counters, build string, webAs
 	// Everything else → JSON 404 (no SPA fallback; only GET / serves HTML).
 	mux.HandleFunc("/", handleNotFound)
 
-	return canonicalHost(limitBody(mux)), nil
+	// secureHeaders outermost: even the 301 canonical redirect and the 302
+	// captive-probe answer carry the baseline security headers (issue #14,
+	// NODE-03); then the canonical-host redirect, then the body cap.
+	return secureHeaders(canonicalHost(limitBody(mux))), nil
 }
 
 // loadStaticAssets reads every .css/.js file under css/ and js/ plus every
