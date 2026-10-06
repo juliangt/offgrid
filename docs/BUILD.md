@@ -161,6 +161,15 @@ node tests/field_equiv.mjs
 #     floor), every environment subsection carries its ASCII diagram, and the
 #     glossary covers the unavoidable terms
 node tests/install_node_structure.mjs
+
+# 17. Audit-deliverables docs structure (issue #14): the security-audit
+#     report is FINAL (v1.0.0) with its executive summary, the complete
+#     30-finding index and the deliverables-traceability/deferred sections;
+#     known-limitations.md exists, is dated and covers every accepted
+#     residual with its source citations; the README links both docs,
+#     records the audit as complete and carries the corrected
+#     hint-linkability claim with the pre-audit overclaim wording gone
+node tests/docs_structure.mjs
 ```
 
 Expected outputs (assertion counts move as suites grow — the shape is what
@@ -269,7 +278,13 @@ matters):
 
     It sources `raspberry/upgrade.sh` — the very library `install.sh --upgrade` and `--rollback` execute on a Pi — binds every `DTN_*` path into a temporary "node" and overrides the three `upgrade_svc_*` systemd seams with plain background-process management, so the exact field code runs here rootlessly against real files and real daemons (on `127.0.0.1:18101`, disjoint from the E2E's `18091-18095` and the chaos suite's `18095-18099`). It needs `go`, `curl` and the `sqlite3` CLI. The legs: structural pins on the field wiring (`install.sh` modes, the binding stop → backup → swap → start → gate order, the provision.sh `STEPS` subset selector, the Makefile + docs wiring); two binaries from the current tree with distinct `-ldflags -X main.build=` ids; a v1-era store crafted with the §9 schema verbatim (`user_version` 0, no `envelopes.v` / `directory.epoch` / `directory.prekeys`) populated with 3 envelopes + 2 directory rows; the deployed release migrating that populated store through the real §15.3 chain (everything keeps being served: ids, byte-identical payloads, epoch-0 directory backfill); the upgrade success path through the library (backup generation with db + previous binary + `MANIFEST.txt`, prune, binary swap, health gate on build identity + schema_version, zero envelope loss, the write path accepts new mail); backup rotation (4 generations → keep 3, explicit `KEEP=1`); the FAILED-migration rollback (store marker forced to 99, the swapped daemon refuses to start naming both versions, the gate fails, `upgrade_auto_rollback` restores the previous binary + db backup and the node serves the full ledger again with the refused store kept as `pre-restore-<UTC>` evidence); and the negative gates (wrong expected build / schema fail an otherwise healthy node).
 
-15. The install-node guide structure test (issue #35) ends with:
+15. The field-equivalents test (issue #20) ends with:
+
+    ```
+    PASS: 62 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
+    ```
+
+16. The install-node guide structure test (issue #35) ends with:
 
     ```
     PASS: <n> assertions on docs/install-node.md structure, anchors and cross-links
@@ -283,6 +298,23 @@ matters):
     forward-pointer wiring, the number-consistency pins against
     `docs/hardware.md` (1 W, 0.90, 0.80, 12.8 V, 14.6 V, 20 W, 5.1 V, 15 A,
     2 A, 0 °C, 30%), the per-environment ASCII diagrams and the glossary.
+
+17. The audit-deliverables docs structure test (issue #14) ends with:
+
+    ```
+    PASS: <n> assertions on the security-audit and known-limitations docs and the README wiring
+    ```
+
+    It is pure file-structure checking (no daemon, no network): the
+    security-audit report is FINAL (v1.0.0) with its executive summary, the
+    complete 30-finding index (NODE/SPA/PROTO/PI/SUPPLY) and the
+    deliverables-traceability + deferred/follow-up sections, with no stale
+    DRAFT wording; `docs/known-limitations.md` is dated, tied to issue #14
+    and covers every accepted residual section with its source citations;
+    the README links both docs, records the audit as complete and carries
+    the corrected hint-linkability claim with the pre-audit overclaim gone;
+    and the suite wiring itself (Makefile `test`, the §4 step list with
+    consistent numbering) is pinned.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
