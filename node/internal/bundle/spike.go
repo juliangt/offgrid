@@ -3,9 +3,11 @@
 // the canonical CBOR encoder subset, the frozen profile's block builders,
 // the §14.3-derived frame-fit math and the standard SX126x LoRa airtime
 // formula — exactly enough to MEASURE the byte budgets that
-// docs/node-network.md §4/§5 quote. It is NOT the P3.2 codec: the codec
-// (parse/validate/fail-closed) lands in this package later, from the same
-// vectors. The numbers in the spec are transcribed from this code's output:
+// docs/node-network.md §4/§5 quote. Since P3.2 this package also hosts the
+// formal profile codec (bundle.go: Parse/Encode/RewriteHop with
+// validate/fail-closed, from the shared vectors) and the promoted CBOR
+// reader (reader.go) — the spike's builders above remain their single
+// encoding core. The numbers in the spec are transcribed from this code's output:
 //
 //	go test ./internal/bundle -run TestSpikeDump -v
 package bundle
@@ -180,6 +182,15 @@ const hopOctetLimit = 7
 // flags = 0 for every v1 bundle (no fragment, no administrative-record bit —
 // management payloads are COSE objects, deliberately not BP admin records).
 func primaryBlock(dest, src, reportTo eid, createdUnix int64, sequence, lifetime uint64) []byte {
+	return primaryBlockDTNms(dest, src, reportTo, dtnTime(createdUnix), sequence, lifetime)
+}
+
+// primaryBlockDTNms is primaryBlock at the DTN-millisecond level: the P3.2
+// codec (bundle.go) carries the creation timestamp in DTN time directly, so
+// its builder needs the ms form without a unix-seconds round trip. The spike
+// builders keep their unix-seconds signature and delegate here — one code
+// path, no duplicated block math.
+func primaryBlockDTNms(dest, src, reportTo eid, creationDTNms uint64, sequence, lifetime uint64) []byte {
 	e := &cbor{}
 	e.array(9) // 8 fields + the CRC value
 	e.uint(7)  // BPv7 version
@@ -189,7 +200,7 @@ func primaryBlock(dest, src, reportTo eid, createdUnix int64, sequence, lifetime
 	e.eid(src)
 	e.eid(reportTo)
 	e.array(2)
-	e.uint(dtnTime(createdUnix))
+	e.uint(creationDTNms)
 	e.uint(sequence)
 	e.uint(lifetime)
 	e.appendCRC()

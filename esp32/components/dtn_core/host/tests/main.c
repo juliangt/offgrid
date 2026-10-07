@@ -15,6 +15,7 @@ void test_budget(void);
 void test_docs(void);
 void test_store(void);
 void test_nodeid(void);
+void test_bundle(void);
 
 int main(void)
 {
@@ -28,6 +29,7 @@ int main(void)
     test_docs();
     test_store();
     test_nodeid();
+    test_bundle();
     return t_summary();
 }
 

@@ -102,7 +102,7 @@ func TestCertMapCanonicalShape(t *testing.T) {
 		t.Fatalf("cert map head 0x%02x, want A8 (map of 8)", m[0])
 	}
 	// Robust check: re-parse with the reader and confirm key order.
-	r := newCborReader(m)
+	r := bundle.NewCborReader(m)
 	n, err := r.Map()
 	if err != nil || n != 8 {
 		t.Fatalf("map head: %v n=%d", err, n)

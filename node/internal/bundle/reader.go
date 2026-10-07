@@ -1,4 +1,4 @@
-package nodeid
+package bundle
 
 import (
 	"fmt"
@@ -6,8 +6,9 @@ import (
 )
 
 // A minimal canonical-CBOR READER (RFC 8949 subset) for the node plane —
-// the decode counterpart of internal/bundle's encoder. Scope, identical to
-// the C reader of dtn_core (dtn_cbor.c) so Go and C fail on the same bytes:
+// the decode counterpart of this package's spike encoder. Scope, identical
+// to the C reader of dtn_core (dtn_cbor.c) so Go and C fail on the same
+// bytes:
 //
 //   - major types 0-5 plus the type-7 `null` needed by the BPv7 profile;
 //   - definite lengths only; indefinite-length items are REJECTED in v1;
@@ -17,8 +18,12 @@ import (
 //
 // Strings are returned as views into the input (zero copy); bstr contents
 // are therefore immutable and the caller must not retain them past the next
-// read. P3.2's bundle codec is expected to promote this reader next to the
-// bundle encoder — kept package-private until then.
+// read.
+//
+// Provenance: promoted from node/internal/nodeid (P3.1) into this package
+// for P3.2 — the profile codec is its primary consumer, and nodeid reads
+// through the exported CborReader alias below. The C mirror of every rule
+// here is dtn_core's dtn_cbor.c.
 
 const cborMaxDepth = 32
 
@@ -29,6 +34,20 @@ type cborReader struct {
 }
 
 func newCborReader(b []byte) *cborReader { return &cborReader{buf: b} }
+
+// CborReader is the canonical-CBOR reader above, exported so the sibling
+// node-plane packages decode from this ONE implementation (the role
+// certificates of internal/nodeid consume it through this alias). An alias —
+// not a wrapper — so the reader's own methods keep working unchanged.
+type CborReader = cborReader
+
+// NewCborReader returns a reader over b. Views returned by Bstr/Tstr point
+// into b and are only valid until the next read on the same reader.
+func NewCborReader(b []byte) *CborReader { return newCborReader(b) }
+
+// Pos returns the current read offset (for callers that need to know where
+// a value started or how many bytes remain).
+func (r *cborReader) Pos() int { return r.off }
 
 func (r *cborReader) errAt(format string, a ...any) error {
 	return fmt.Errorf("cbor at offset %d: %s", r.off, fmt.Sprintf(format, a...))

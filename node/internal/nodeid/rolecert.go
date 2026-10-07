@@ -13,8 +13,8 @@ import (
 // The role certificate of docs/node-network.md §2.2: a CBOR map with the
 // FIXED key order 0..7, wrapped in a COSE_Sign1 (RFC 9052) signed by the
 // offline anchor key. Encoding goes through the single canonical CBOR
-// encoder of internal/bundle; decoding through this package's minimal
-// canonical reader (cborread.go) — the same bytes fail the same way in C
+// encoder of internal/bundle; decoding through the same package's minimal
+// canonical reader (reader.go) — the same bytes fail the same way in C
 // (esp32/components/dtn_core/dtn_rolecert.c).
 
 const (
@@ -336,7 +336,7 @@ func VerifyCert(cose, anchorPub []byte, now int64) (*Cert, error) {
 
 // parseCOSE takes the COSE_Sign1 array apart. Shape failures are cose_shape.
 func parseCOSE(cose []byte) (protected, kid, payload, sig []byte, err error) {
-	r := newCborReader(cose)
+	r := bundle.NewCborReader(cose)
 	n, err := r.Array()
 	if err != nil {
 		return nil, nil, nil, nil, verr(CodeCOSEShape, "not a COSE_Sign1 array: %v", err)
@@ -366,13 +366,13 @@ func parseCOSE(cose []byte) (protected, kid, payload, sig []byte, err error) {
 		return nil, nil, nil, nil, verr(CodeCOSEShape, "%v", err)
 	}
 	if !r.Done() {
-		return nil, nil, nil, nil, verr(CodeCOSEShape, "%d trailing bytes after the COSE_Sign1", len(cose)-r.off)
+		return nil, nil, nil, nil, verr(CodeCOSEShape, "%d trailing bytes after the COSE_Sign1", len(cose)-r.Pos())
 	}
 	return protected, kid, payload, sig, nil
 }
 
 // parseUnprotected reads exactly {4: bstr(8)} (the kid map).
-func parseUnprotected(r *cborReader, kid *[]byte) error {
+func parseUnprotected(r *bundle.CborReader, kid *[]byte) error {
 	n, err := r.Map()
 	if err != nil {
 		return verr(CodeCOSEShape, "unprotected header: %v", err)
@@ -414,7 +414,7 @@ func parseCertMap(payload []byte) (*Cert, error) {
 	schema := func(format string, a ...any) error {
 		return verr(CodeCertSchema, format, a...)
 	}
-	r := newCborReader(payload)
+	r := bundle.NewCborReader(payload)
 	n, err := r.Map()
 	if err != nil {
 		return nil, schema("cert payload: %v", err)
@@ -492,7 +492,7 @@ func parseCertMap(payload []byte) (*Cert, error) {
 		}
 	}
 	if !r.Done() {
-		return nil, schema("%d trailing bytes inside the cert map", len(payload)-r.off)
+		return nil, schema("%d trailing bytes inside the cert map", len(payload)-r.Pos())
 	}
 	return c, nil
 }

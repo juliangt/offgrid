@@ -19,7 +19,9 @@ idf_component_register(
          "src/dtn_tweetnacl.c"
          "src/dtn_ed25519.c"
          "src/dtn_cbor.c"
+         "src/dtn_cbor_writer.c"
          "src/dtn_nodeid.c"
          "src/dtn_rolecert.c"
+         "src/dtn_bundle.c"
     INCLUDE_DIRS "include"
 )
