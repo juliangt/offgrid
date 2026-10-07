@@ -8,3 +8,5 @@ void dtn_tasks_start(void);
 void dtn_tasks_sweep_now(void);
 
 #endif
+
+void dtn_dns_start(void);

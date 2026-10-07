@@ -1,7 +1,6 @@
 ## Managed components of the DTN node firmware (issue #39).
-## - dns_server: the ESP-IDF captive-portal DNS responder (wildcard
-##   address=/#/10.42.0.1 equivalent, §12).
-## - littlefs: the power-loss-resilient filesystem backing the §9 store.
+## littlefs: the power-loss-resilient filesystem backing the §9 store.
+## (The §12 wildcard DNS responder is dtn_node's own dtn_dns.c — a minimal
+## UDP/53 answer-everything-with-the-portal-IP server, no dependency.)
 dependencies:
-  espressif/dns_server: "*"
   joltwallet/littlefs: "*"

@@ -23,7 +23,8 @@ static const char *tdir(const char *name)
          * the committed state, not a freshly deleted directory */
         char cmd[192];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", g_dir);
-        (void)system(cmd); /* missing dir is fine */
+        FILE *probe = popen(cmd, "r"); /* missing dir is fine */
+        if (probe) pclose(probe);
         mkdir(g_dir, 0755);
         snprintf(last, sizeof(last), "%s", name);
     }

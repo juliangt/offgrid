@@ -12,9 +12,8 @@
 #include <esp_wifi.h>
 #include <lwip/dns.h>
 
-#include "dns_server.h"
-
 #include "dtn_core.h"
+#include "dtn_dns.h"
 #include "dtn_netif.h"
 #include "dtn_node_priv.h"
 
@@ -26,8 +25,7 @@ static void wifi_event_cb(void *arg, esp_event_base_t base, int32_t id,
     if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
         /* wildcard address=/#/10.42.0.1 (§12): every name resolves to the
          * portal, offgrid.local included */
-        dns_server_config_t cfg = DNS_SERVER_CONFIG_SINGLE("*", "lan", DTN_AP_IP);
-        dns_server_start(&cfg);
+        dtn_dns_start();
         ESP_LOGI(TAG, "AP up: SSID %s, gateway %s, wildcard DNS on", DTN_AP_SSID,
                  DTN_AP_IP);
     }
