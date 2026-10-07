@@ -204,8 +204,8 @@ byte-match the Go node (the shared fixture set pins the validation decisions).
 | Phase | Deliverable | Exit criterion | Status |
 |---|---|---|---|
 | **0** | `esp32/` scaffold, design note (this file), `make firmware`, CI firmware job | Both targets compile in CI; merged bin produced | ✅ landed |
-| **1** | `dtn_core`: envelope validation, limits, sync processing order, canonical host, budgets, capabilities/health assembly | §15.7-adapted assertions pass on the host; byte-level parity with the Go node's validation decisions on the shared fixture set; host suite in `make test` | ✅ landed |
-| **2** | Flash storage engine honoring the §9 contract | Dedup, cap, boundary and power-loss tests pass on the host; wear analysis in §4 | ✅ landed |
+| **1** | `dtn_core`: envelope validation, limits, sync processing order, canonical host, budgets, capabilities/health assembly | §15.7-adapted assertions pass on the host; byte-level parity with the Go node's validation decisions on the shared fixture set; host suite in `make test` | ✅ landed — 292 host checks green (test-esp32-core) |
+| **2** | Flash storage engine honoring the §9 contract | Dedup, cap, boundary and power-loss tests pass on the host; wear analysis in §4 | ⏳ next |
 | **3** | IDF adapters: full HTTP surface (8080 + 80), budgets, netif/DHCP/DNS bring-up, janitor, snapshot cache, watchdog | Firmware compiles for both targets in CI; contract suite (curl) passes against hardware over Wi-Fi | 🔶 firmware compiles in CI; **curl-over-Wi-Fi pass pending hardware (§9)** |
 | **4** | Mixed-fleet interop: `tests/sync_e2e.sh` parameterized to run its identical assertion set against any node base URL; Pi ↔ ESP32 mule walk | Every interop checklist item executed with evidence | 🔶 suite parameterized + conformance checklist landed; **mule walk pending hardware (§9)** |
 | **5** | `esp32-models.md`, RUNBOOK/BUILD/hardware/DEPLOY updates, release assets, 72 h soak | Release tag carries the complete ESP32 asset set; soak meets the power budget | 🔶 docs + release pipeline landed; **soak pending hardware (§9)** |

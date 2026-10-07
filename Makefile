@@ -8,8 +8,9 @@
 #   make test        the full suite: go test, the headless SPA tests, the
 #                    docs structure tests (install-node guide, issue #35;
 #                    audit deliverables, issue #14), the curl E2E, the node
-#                    upgrade/rollback E2E (issue #22) and the Pi hardening
-#                    structure test
+#                    upgrade/rollback E2E (issue #22), the Pi hardening
+#                    structure test and the dtn_core ESP32 host tests
+#                    (issue #39)
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
 #                    purpose, assert degrade + auto-recover; see
@@ -62,6 +63,19 @@ test:
 	bash tests/sync_e2e.sh
 	bash tests/upgrade_e2e.sh
 	bash tests/hardening_structure.sh
+	$(MAKE) test-esp32-core
+
+# dtn_core host suite (issue #39): the ESP32 firmware's portable core runs
+# the §15.7-adapted assertions next to the Go/SPA/E2E gates. Needs any C99
+# compiler; skips with a loud marker when none exists.
+test-esp32-core:
+	@if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then \
+	  sh esp32/components/dtn_core/host/run_tests.sh; \
+	else \
+	  echo "SKIP dtn_core host tests: no C99 compiler available"; \
+	fi
+
+.PHONY: test-esp32-core
 
 # Field-session entry point (issue #20): the physical acceptance cases of
 # docs/field-test.md CANNOT be automated here — this target only verifies the
