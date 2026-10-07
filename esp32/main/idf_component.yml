@@ -3,5 +3,5 @@
 ##   address=/#/10.42.0.1 equivalent, §12).
 ## - littlefs: the power-loss-resilient filesystem backing the §9 store.
 dependencies:
-  espressif/dns_server: "^1.4"
-  joltwallet/littlefs: "^1.14"
+  espressif/dns_server: "*"
+  joltwallet/littlefs: "*"

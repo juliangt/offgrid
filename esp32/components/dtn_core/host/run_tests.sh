@@ -8,7 +8,8 @@ cd "$(dirname "$0")"
 CC=${CC:-cc}
 mkdir -p build
 # -Werror keeps the portable core clean under the ESP-IDF compiler too.
-$CC -std=c99 -Wall -Wextra -Werror -O1 -I../include -Itests \
+$CC -std=c99 -Wall -Wextra -Werror -O1 -D_POSIX_C_SOURCE=200809L \
+   -D_DEFAULT_SOURCE -I../include -Itests \
     tests/main.c tests/test_json.c tests/test_envelope.c tests/test_sync.c \
     tests/test_canonical.c tests/test_budget.c tests/test_docs.c \
     tests/test_store.c \
