@@ -42,7 +42,7 @@ file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/web_assets.c" CONTENT
 "/* GENERATED from node/web at build time — do not edit (issue #39).
  * The SPA is embedded VERBATIM and served byte-identical to the Pi build
  * (§10.3 exact-path static surface, closed content-type allow-list). */
-#include \"dtn_node_priv.h\"
+#include \"dtn_node.h\"
 #include <stddef.h>
 ${ASSET_DECLS}
 static const dtn_web_asset ASSETS[] = {
