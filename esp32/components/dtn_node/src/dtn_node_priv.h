@@ -10,6 +10,7 @@
 
 #include "dtn_budget.h"
 #include "dtn_docs.h"
+#include "dtn_node.h"
 #include "dtn_store.h"
 
 /* §10.1/§10.7 budgets: RAM-only, per source IP, capped table (oldest
@@ -90,15 +91,6 @@ const dtn_health_snapshot *dtn_node_snapshot(void);
 /* rendered by dtn_http for GET /status from the same snapshot */
 long dtn_node_status_html(char *out, size_t cap,
                           const dtn_health_snapshot *s);
-
-/* the embedded SPA (generated in main from node/web — weak default here) */
-typedef struct {
-    const char *path;   /* exact request path, e.g. "/css/portal.css" */
-    const char *ctype;  /* exact §10.3 content type */
-    const uint8_t *data;
-    unsigned len;
-} dtn_web_asset;
-const dtn_web_asset *dtn_web_assets(int *count);
 
 extern const char DTN_STORE_MOUNT[]; /* "/store" */
 

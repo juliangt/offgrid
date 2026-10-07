@@ -21,6 +21,7 @@
 #define DTN_NODE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "dtn_docs.h"
@@ -40,6 +41,18 @@ void dtn_node_start(void);
 /* The enforced §8.1 cap of this board (from Kconfig: 5000 reference /
  * 1000 minimum) — the honest envelope_capacity of capabilities/health. */
 int32_t dtn_node_envelope_capacity(void);
+
+/* The embedded SPA surface (§10.3 exact-path static assets, served
+ * verbatim). The DEFAULT is an empty table (an API-only build); main
+ * overrides it with the table GENERATED from node/web at build time —
+ * single-sourced with the Pi build, never copied. */
+typedef struct {
+    const char *path;   /* exact request path, e.g. "/css/portal.css" */
+    const char *ctype;  /* exact §10.3 content type */
+    const uint8_t *data;
+    unsigned len;
+} dtn_web_asset;
+const dtn_web_asset *dtn_web_assets(int *count);
 
 #ifdef __cplusplus
 }
