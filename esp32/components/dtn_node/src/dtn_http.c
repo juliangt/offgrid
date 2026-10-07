@@ -696,11 +696,21 @@ static httpd_handle_t start_server(uint16_t port, const httpd_uri_t *uris,
     return h;
 }
 
+/* the :80 listener serves ONLY the two probes; everything else gets the
+ * §10.2 redirect to the canonical origin (gate() answers both) */
+static const httpd_uri_t ROUTES_80[] = {
+    { "/generate_204", HTTP_GET, h_probe, NULL },
+    { "/generate_204", HTTP_POST, h_probe, NULL },
+    { "/hotspot-detect.html", HTTP_GET, h_probe, NULL },
+    { "/hotspot-detect.html", HTTP_POST, h_probe, NULL },
+};
+
 void dtn_http_start(void)
 {
     httpd_handle_t main_srv =
-        start_server(8080, sizeof(ROUTES_8080) / sizeof(ROUTES_8080[0]));
-    httpd_handle_t legacy = start_server(80, 4);
+        start_server(8080, ROUTES_8080, sizeof(ROUTES_8080) / sizeof(ROUTES_8080[0]));
+    httpd_handle_t legacy =
+        start_server(80, ROUTES_80, sizeof(ROUTES_80) / sizeof(ROUTES_80[0]));
     if (!main_srv || !legacy) {
         ESP_LOGE(TAG, "httpd start failed");
     }
