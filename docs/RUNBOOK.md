@@ -209,3 +209,14 @@ This is ALSO the documented recovery for a binary-only downgrade: the forward-on
 | A "fail" verdict on any FIELD procedure | Stop, capture `journalctl -b -1` and any `/var/lib/dtn-node/.corrupt-*` files, and report it as a real finding — do not patch on the bench and move on |
 
 **Recorded-failure discipline:** every field exercise (power yanks, reboot storms, hostile-station saturation, SD pulls, component kills — `tests/chaos/FAILURE_MATRIX.md` FIELD-1…6) gets one line per repetition in its template, verdict **pass / degrade / fail** exactly as defined there. Field rows feed the same matrix as the automated suite; a matrix that only ever passes tells you nothing.
+
+## ESP32 nodes (issue #39)
+
+Flash/reflash per `docs/esp32-models.md` (merged image + `esptool.py
+write_flash`). Failure meanings: the boot log names the state — downgrade
+refusal (§15.3: store newer than firmware, store untouched), quarantine
+(§13.6: corrupt store renamed aside, fresh store serving), watchdog or
+brownout resets (check the coredump partition / the power supply).
+`GET /status` shows the boot stance. The store's RAM counters die on
+restart by design (§10.7). On-hardware acceptance register:
+`docs/esp32-design.md` §9.

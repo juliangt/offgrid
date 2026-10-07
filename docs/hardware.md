@@ -148,3 +148,14 @@ Deployment guidance:
 2. **Co-channel pairs are fine only when geographically separated** — far enough that no client location hears both beacons weakly (the failure mode is the *partial* overlap, not the distance itself).
 3. After ANY channel change: edit `/etc/hostapd/hostapd.conf`, reboot, and re-run the coexistence case (T6 of `docs/field-test.md`) plus the mule walk (T1) on the new plan before leaving the node unattended.
 4. Record the chosen per-node channel in the deployment log — the §12 matrices of `docs/field-test.md` are the place the observed evidence lives.
+
+## ESP32 power profile (issue #39 addendum)
+
+The ESP32 node is an AP-first platform: **deep sleep is not applicable**
+(the access point is always on). Budget planning mirrors §1's ~1 W rule of
+thumb: Wi-Fi TX dominates (modem-sleep is limited while stations are
+associated); the S3 reference board adds octal PSRAM draw. Measured
+numbers land in `docs/esp32-design.md` §2/§9 with the 72 h soak. The
+hardware watchdog + brownout detector replace the Pi's systemd
+supervision; there is no SD card to corrupt and no filesystem remount
+cycle.
