@@ -41,12 +41,15 @@ typedef enum {
     DTN_SYNC_ERR_TOO_MANY_PUSH,    /* 400 too_many_envelopes */
     DTN_SYNC_ERR_RATE_LIMITED,     /* 429 rate_limited */
     DTN_SYNC_ERR_INVALID_ENVELOPE, /* 400 invalid_envelope */
+    DTN_SYNC_ERR_NODE_FULL,        /* 429 node_full (§8.1 cap) */
     DTN_SYNC_ERR_STORAGE,          /* 507 storage_unavailable */
 } dtn_sync_err;
 
 /* Storage sink — the flash store (phase 2) implements this. begin brackets a
  * pending batch; put appends one envelope; commit makes it visible; abort
- * discards it. All return 0 on success, -1 on storage failure. */
+ * discards it. put returns 0 on success, -1 on a storage failure (507) and
+ * -2 when the §8.1 envelope cap is reached (429 node_full — nothing is
+ * stored, nothing evicted). All others return 0 on success, -1 on failure. */
 typedef struct {
     void *ud;
     int (*begin)(void *ud);
@@ -80,6 +83,7 @@ typedef struct dtn_sync {
     bool known_invalid;
     bool too_many_push;
     bool env_invalid;
+    bool node_full;
     bool storage_err;
     bool batch_open;
 

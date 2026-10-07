@@ -12,5 +12,7 @@ idf_component_register(
          "src/dtn_canonical.c"
          "src/dtn_budget.c"
          "src/dtn_docs.c"
+         "src/dtn_sync.c"
+         "src/dtn_store.c"
     INCLUDE_DIRS "include"
 )

@@ -13,6 +13,7 @@ void test_sync(void);
 void test_canonical(void);
 void test_budget(void);
 void test_docs(void);
+void test_store(void);
 
 int main(void)
 {
@@ -24,6 +25,7 @@ int main(void)
     test_canonical();
     test_budget();
     test_docs();
+    test_store();
     return t_summary();
 }
 

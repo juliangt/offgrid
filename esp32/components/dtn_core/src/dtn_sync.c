@@ -93,7 +93,7 @@ static void env_stage(dtn_sync *s)
         s->too_many_push = true;
         return;
     }
-    if (s->env_invalid || s->too_many_push || s->storage_err) {
+    if (s->env_invalid || s->too_many_push || s->storage_err || s->node_full) {
         return; /* this batch can never commit; stop staging */
     }
     dtn_env_err err;
@@ -120,7 +120,12 @@ static void env_stage(dtn_sync *s)
         s->batch_open = true;
     }
     int absorbed = 0;
-    if (s->sink.put(s->sink.ud, &s->env, &absorbed) != 0) {
+    int rc = s->sink.put(s->sink.ud, &s->env, &absorbed);
+    if (rc == -2) {
+        s->node_full = true; /* at/over the §8.1 cap: nothing stored (§8.1) */
+        return;
+    }
+    if (rc != 0) {
         s->storage_err = true; /* keep parsing: later violations may win */
         return;
     }
@@ -143,6 +148,7 @@ static void push_restart(dtn_sync *s)
     s->absorbed_count = 0;
     s->too_many_push = false;
     s->env_invalid = false;
+    s->node_full = false;
 }
 
 static void known_restart(dtn_sync *s)
@@ -569,6 +575,8 @@ dtn_sync_err dtn_sync_finish(dtn_sync *s, bool budget_allowed)
         verdict = DTN_SYNC_ERR_RATE_LIMITED;
     } else if (s->env_invalid) {
         verdict = DTN_SYNC_ERR_INVALID_ENVELOPE;
+    } else if (s->node_full) {
+        verdict = DTN_SYNC_ERR_NODE_FULL;
     } else if (s->storage_err) {
         verdict = DTN_SYNC_ERR_STORAGE;
     } else {
