@@ -35,7 +35,7 @@ foreach(f ${WEB_FILES})
         set(ct "application/octet-stream")
     endif()
     string(APPEND ASSET_ROWS
-        "    { \"/${rel}\", \"${ct}\", _binary_${sym}_start, (unsigned)(_binary_${sym}_end - _binary_${sym}_start) },\n")
+        "    { \"/${rel}\", \"${ct}\", _binary_${sym}_start, _binary_${sym}_end },\n")
 endforeach()
 
 file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/web_assets.c" CONTENT

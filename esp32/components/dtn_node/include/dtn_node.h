@@ -49,9 +49,13 @@ int32_t dtn_node_envelope_capacity(void);
 typedef struct {
     const char *path;   /* exact request path, e.g. "/css/portal.css" */
     const char *ctype;  /* exact §10.3 content type */
-    const uint8_t *data;
-    unsigned len;
+    const uint8_t *start; /* embedded bytes (ld _binary_*_start symbols) */
+    const uint8_t *end;   /* one past the last byte; len = end - start */
 } dtn_web_asset;
+static inline unsigned dtn_web_asset_len(const dtn_web_asset *a)
+{
+    return (unsigned)(a->end - a->start);
+}
 const dtn_web_asset *dtn_web_assets(int *count);
 
 #ifdef __cplusplus
