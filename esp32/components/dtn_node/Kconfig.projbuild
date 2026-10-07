@@ -1,0 +1,16 @@
+menu "DTN node"
+
+    config DTN_ENVELOPE_CAPACITY
+        int "Enforced per-node envelope cap (§8.1, honest capacity)"
+        default 5000 if IDF_TARGET_ESP32S3
+        default 1000
+        help
+            The reference board (16 MB flash) MUST hold the full 5000-envelope
+            cap; the 4 MB minimum board enforces 1000 and reports it honestly
+            in envelope_capacity (docs/esp32-design.md §2/§7).
+
+    config DTN_HTTPD_STACK
+        int "httpd task stack bytes (streaming sync + pull staging)"
+        default 12288
+
+endmenu

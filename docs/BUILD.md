@@ -516,3 +516,13 @@ The automated scripts, in `run_all.sh` order (each also runs standalone; they ow
 **Exit codes and determinism.** Every script follows the `tests/sync_e2e.sh` PASS/FAIL counter style, exits 0 all-pass / 1 any-fail, builds its own daemon binary into a temp dir, and cleans up after itself via EXIT traps (daemons killed, volumes detached, temp dirs removed) even on failure.
 
 **Field chaos.** The hardware half of the discipline — repeated power yanks, reboot storms, a hostile station saturating the AP while a legitimate mule syncs, SD pull mid-write, hostapd/dnsmasq process death — is manual by nature and recorded in the FIELD section of `tests/chaos/FAILURE_MATRIX.md`, each procedure with its pass/degrade/fail template. Run it on real hardware before any deployment; the automated suite above is the machine-checked subset of the same matrix.
+
+## ESP32 firmware (issue #39)
+
+`make firmware` builds both targets (esp32s3 reference, esp32 minimum)
+with ESP-IDF v5.5; `make firmware-merge` produces the merged flashable
+images. Without ESP-IDF installed, use the CI container invocation the
+Makefile prints. The portable core's host tests run inside `make test`
+(`test-esp32-core`); the dtn_core sources must stay free of `esp_*`
+includes. Full build story: `docs/esp32-design.md` §5; boards and flash:
+`docs/esp32-models.md`.

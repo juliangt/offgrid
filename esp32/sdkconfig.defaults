@@ -1,0 +1,20 @@
+# DTN node firmware — defaults common to every target (docs/esp32-design.md).
+# Target-specific overlays live in sdkconfig.defaults.<target>.
+
+# 1 kHz tick: the janitor (15 min + boot, §10.6) and the once-per-minute
+# diagnostics sampler (§10.7) are the only periodic work; the tick stays cheap.
+CONFIG_FREERTOS_HZ=1000
+
+# Hardware supervision (issue #16 parity, §6 of the design note): the task
+# watchdog is initialized by the app and PANICS on hunger — the reset is the
+# recovery, no OS babysitter exists.
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Brownout detector stays on (the shed→survive→self-recover contract of
+# docs/hardening.md §4 maps onto watchdog + brownout here).
+CONFIG_ESP_BROWNOUT_DET=y
+
+# Core dump on panic, for the post-mortem partition.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y

@@ -8,8 +8,9 @@
 #   make test        the full suite: go test, the headless SPA tests, the
 #                    docs structure tests (install-node guide, issue #35;
 #                    audit deliverables, issue #14), the curl E2E, the node
-#                    upgrade/rollback E2E (issue #22) and the Pi hardening
-#                    structure test
+#                    upgrade/rollback E2E (issue #22), the Pi hardening
+#                    structure test and the dtn_core ESP32 host tests
+#                    (issue #39)
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
 #                    purpose, assert degrade + auto-recover; see
@@ -19,12 +20,16 @@
 #                    to retune)
 #   make field-kit   print the field-session checklist for executing
 #                    docs/field-test.md on real hardware (issue #20)
+#   make firmware    build the ESP32 firmware for both targets (issue #39);
+#                    needs ESP-IDF v5.5 (docs/esp32-design.md §5) — the CI
+#                    container invocation is printed when idf.py is missing
 #
 # No root is needed for any target. The test targets start and stop their
 # own daemons on 127.0.0.1 ports 18091-18099 (sync E2E + chaos) and 18101
 # (upgrade E2E) and clean up after themselves.
 
-.PHONY: build build-all test lint chaos fuzz field-kit
+.PHONY: build build-all test lint chaos fuzz field-kit \
+	firmware firmware-merge firmware-clean
 
 GO ?= go
 
@@ -58,6 +63,19 @@ test:
 	bash tests/sync_e2e.sh
 	bash tests/upgrade_e2e.sh
 	bash tests/hardening_structure.sh
+	$(MAKE) test-esp32-core
+
+# dtn_core host suite (issue #39): the ESP32 firmware's portable core runs
+# the §15.7-adapted assertions next to the Go/SPA/E2E gates. Needs any C99
+# compiler; skips with a loud marker when none exists.
+test-esp32-core:
+	@if command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || command -v clang >/dev/null 2>&1; then \
+	  sh esp32/components/dtn_core/host/run_tests.sh; \
+	else \
+	  echo "SKIP dtn_core host tests: no C99 compiler available"; \
+	fi
+
+.PHONY: test-esp32-core
 
 # Field-session entry point (issue #20): the physical acceptance cases of
 # docs/field-test.md CANNOT be automated here — this target only verifies the
@@ -90,3 +108,30 @@ chaos:
 # is a Go duration (default 20s per target; 0 disables the fuzzing phase).
 fuzz:
 	bash tests/chaos/chaos_fuzz_parsers.sh
+
+# ESP32 firmware (issue #39, docs/esp32-design.md §5): both targets —
+# esp32s3 (reference, 16 MB) and esp32 (minimum, 4 MB). `make` is a
+# convenience; the raw idf.py invocations are exactly the recipes below.
+ESP32_IDF_VER ?= v5.5
+
+firmware:
+	@command -v idf.py >/dev/null 2>&1 || { \
+	  echo "idf.py not on PATH — install ESP-IDF $(ESP32_IDF_VER) and load its environment:"; \
+	  echo "  . \$\$IDF_PATH/export.sh"; \
+	  echo "or use the CI container without installing anything:"; \
+	  echo "  docker run --rm -v \"\$$PWD:/repo\" -w /repo espressif/idf:$(ESP32_IDF_VER) bash -lc '. \$$IDF_PATH/export.sh && cd esp32 && idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 build && idf.py -DIDF_TARGET=esp32 -B build-esp32 build'"; \
+	  exit 1; }
+	cd esp32 && idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 -DSDKCONFIG=sdkconfig.esp32s3 build
+	cd esp32 && idf.py -DIDF_TARGET=esp32 -B build-esp32 -DSDKCONFIG=sdkconfig.esp32 build
+
+# Merged, flashable image per target (what a release ships): esptool
+# merge_bin over the build's own flash_args, so the offsets always match the
+# partition tables of docs/esp32-design.md §2.
+firmware-merge:
+	cd esp32/build-esp32s3 && python3 $${IDF_PATH:-/opt/esp/idf}/components/esptool_py/esptool/esptool.py --chip esp32s3 merge_bin -o ../dtn-node-esp32s3.bin @flash_args
+	cd esp32/build-esp32 && python3 $${IDF_PATH:-/opt/esp/idf}/components/esptool_py/esptool/esptool.py --chip esp32 merge_bin -o ../dtn-node-esp32.bin @flash_args
+	ls -l esp32/dtn-node-*.bin
+
+firmware-clean:
+	rm -rf esp32/build-esp32s3 esp32/build-esp32 esp32/sdkconfig.esp32s3 esp32/sdkconfig.esp32
+	rm -f esp32/dtn-node-esp32s3.bin esp32/dtn-node-esp32.bin

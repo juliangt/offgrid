@@ -19,10 +19,45 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  esp32-firmware:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # The merged flashable images (bootloader + partition table +
+      # firmware at the esp32/partitions_*.csv offsets) for both targets —
+      # the release assets documented in docs/esp32-models.md.
+      - name: Build ESP32 firmware and merge flashable images
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo espressif/idf:v5.5 bash -lc '
+            set -euo pipefail
+            . "$IDF_PATH/export.sh" >/dev/null
+            cd esp32
+            idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 -DSDKCONFIG=sdkconfig.esp32s3 build
+            idf.py -DIDF_TARGET=esp32 -B build-esp32 -DSDKCONFIG=sdkconfig.esp32 build
+            (cd build-esp32s3 && python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
+              --chip esp32s3 merge_bin -o ../dtn-node-esp32s3.bin @flash_args)
+            (cd build-esp32 && python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
+              --chip esp32 merge_bin -o ../dtn-node-esp32.bin @flash_args)
+          '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-firmware
+          path: |
+            esp32/dtn-node-esp32s3.bin
+            esp32/dtn-node-esp32.bin
+
+  release:
+    needs: esp32-firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: esp32-firmware
+          path: firmware
 
       - uses: actions/setup-go@v5
         with:
@@ -48,7 +83,9 @@ jobs:
             echo "| \`dtn-node-linux-armv7\` | Pi 2, or a 64-bit board running a 32-bit OS |"
             echo "| \`dtn-node-linux-armv6\` | Pi Zero W, Pi 1, CM1 (32-bit OS only) |"
             echo "| \`raspberry-${GITHUB_REF_NAME}.tar.gz\` | provisioning tree (offline install, manual path) |"
-            echo "| \`SHA256SUMS\` | checksums for everything above |"
+            echo "| \`dtn-node-esp32s3.bin\` | ESP32-S3 reference (16 MB), merged flashable image |"
+          echo "| \`dtn-node-esp32.bin\` | ESP32 minimum (4 MB), merged flashable image |"
+          echo "| \`SHA256SUMS\` | checksums for everything above |"
             echo
             echo "One-line install on the Pi (online):"
             echo
@@ -71,7 +108,8 @@ jobs:
       - name: Checksums
         run: |
           sha256sum node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 \
-            node/dtn-node-linux-armv6 "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md > SHA256SUMS
+            node/dtn-node-linux-armv6 "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md \
+            firmware/dtn-node-esp32s3.bin firmware/dtn-node-esp32.bin > SHA256SUMS
           cat SHA256SUMS
 
       # `gh release create` errors when a release with the tag already exists
@@ -82,7 +120,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           assets=(node/dtn-node-linux-arm64 node/dtn-node-linux-armv7 node/dtn-node-linux-armv6 \
-            "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md SHA256SUMS)
+            "raspberry-${GITHUB_REF_NAME}.tar.gz" DEPLOY.md SHA256SUMS \
+            firmware/dtn-node-esp32s3.bin firmware/dtn-node-esp32.bin)
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber "${assets[@]}"
             gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \

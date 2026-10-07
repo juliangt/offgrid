@@ -1,0 +1,13 @@
+# ESP32-WROOM-32 minimum layout (4 MB flash) — docs/esp32-design.md §2.
+#
+# No OTA A/B: the flash budget goes to the store instead. Upgrades are a USB
+# reflash (docs/esp32-models.md). The store partition (1.7 MB) bounds the
+# envelope cap at 1000 — reported honestly as `envelope_capacity` in
+# capabilities/health per docs/esp32-design.md §7.
+#
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x240000,
+store,    data, spiffs,  0x250000,0x1ac000,
+coredump, data, coredump,0x3fc000,0x4000,
