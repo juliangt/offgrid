@@ -680,7 +680,7 @@ static esp_err_t h_sync_get_405(httpd_req_t *req)
  * (httpd answers 404 itself for unregistered URIs — register the catch-all
  * by listing each path's alternates above). */
 
-static httpd_handle_t start_server(uint16_t port, int uris, size_t n)
+static httpd_handle_t start_server(uint16_t port, size_t n)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = port;
@@ -697,9 +697,9 @@ static httpd_handle_t start_server(uint16_t port, int uris, size_t n)
 
 void dtn_http_start(void)
 {
-    httpd_handle_t main_srv = start_server(8080, 0,
-        sizeof(ROUTES_8080) / sizeof(ROUTES_8080[0]));
-    httpd_handle_t legacy = start_server(80, 0, 4);
+    httpd_handle_t main_srv =
+        start_server(8080, sizeof(ROUTES_8080) / sizeof(ROUTES_8080[0]));
+    httpd_handle_t legacy = start_server(80, 4);
     if (!main_srv || !legacy) {
         ESP_LOGE(TAG, "httpd start failed");
     }
