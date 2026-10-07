@@ -13,7 +13,7 @@
 #include <lwip/dns.h>
 
 #include "dtn_core.h"
-#include "dtn_dns.h"
+#include "dtn_netif.h"
 #include "dtn_netif.h"
 #include "dtn_node_priv.h"
 

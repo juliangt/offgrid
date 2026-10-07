@@ -74,10 +74,11 @@ static int gate(httpd_req_t *req)
 {
     set_common_headers(req);
     char path[128];
-    httpd_req_get_url_path_str(req, path, sizeof(path));
+    strlcpy(path, req->uri, sizeof(path)); /* uri = path?query: split */
+    char *qm = strchr(path, '?');
+    if (qm) *qm = '\0';
     char host[80] = "";
-    size_t hl = sizeof(host);
-    if (httpd_req_get_hdr_value_str(req, "Host", host, &hl) != ESP_OK) {
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
         host[0] = '\0';
     }
     dtn_canon_verdict v = dtn_canonical_check(path, host);
@@ -116,13 +117,14 @@ static uint32_t client_ip(httpd_req_t *req)
     return 0; /* IPv4-only AP; v6-mapped falls into one shared bucket */
 }
 
-static bool budget_allow(httpd_req_t *req, dtn_bucket dtn_client::*which,
-                         uint64_t cost)
+#include <stddef.h>
+static bool budget_allow(httpd_req_t *req, size_t bucket_off, uint64_t cost)
 {
     dtn_client *c = dtn_node_client(client_ip(req));
     if (!c) return false; /* table full: shed */
+    dtn_bucket *b = (dtn_bucket *)((char *)c + bucket_off);
     int64_t wait = 0;
-    if (dtn_bucket_allow(&(c->*which), now_ms(), cost, &wait)) return true;
+    if (dtn_bucket_allow(b, now_ms(), cost, &wait)) return true;
     char rs[16];
     snprintf(rs, sizeof(rs), "%lld", (long long)wait);
     httpd_resp_set_hdr(req, "Retry-After", rs);
@@ -158,7 +160,9 @@ static esp_err_t h_static(httpd_req_t *req)
     int g = gate(req);
     if (g != -1) return g;
     char path[128];
-    httpd_req_get_url_path_str(req, path, sizeof(path));
+    strlcpy(path, req->uri, sizeof(path));
+    char *qm = strchr(path, '?');
+    if (qm) *qm = '\0';
     if (!strcmp(path, "/")) strcpy(path, "/index.html");
     const dtn_web_asset *a = find_asset(path);
     if (!a) return send_json_err(req, 404, "not_found");
@@ -204,7 +208,7 @@ static esp_err_t h_health(httpd_req_t *req)
 {
     int g = gate(req);
     if (g != -1) return g;
-    if (!budget_allow(req, &dtn_client::diag, 1)) return ESP_OK;
+    if (!budget_allow(req, offsetof(dtn_client, diag), 1)) return ESP_OK;
     const char *doc = dtn_node_snapshot_json();
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     set_common_headers(req);
@@ -215,7 +219,7 @@ static esp_err_t h_status(httpd_req_t *req)
 {
     int g = gate(req);
     if (g != -1) return g;
-    if (!budget_allow(req, &dtn_client::diag, 1)) return ESP_OK;
+    if (!budget_allow(req, offsetof(dtn_client, diag), 1)) return ESP_OK;
     char page[1536];
     long n = dtn_node_status_html(page, sizeof(page), dtn_node_snapshot());
     httpd_resp_set_type(req, "text/html; charset=utf-8");
@@ -479,7 +483,7 @@ static esp_err_t h_sync(httpd_req_t *req)
     int g = gate(req);
     if (g != -1) return g;
     /* the request budget is checked BEFORE the body is read (§10.1) */
-    if (!budget_allow(req, &dtn_client::request, 1)) return ESP_OK;
+    if (!budget_allow(req, offsetof(dtn_client, request), 1)) return ESP_OK;
     if (req->content_len > DTN_BODY_MAX_BYTES) {
         dtn_node_count_reject("body_too_large");
         return send_json_err(req, 413, "body_too_large");
@@ -487,7 +491,6 @@ static esp_err_t h_sync(httpd_req_t *req)
 
     static char known_store[DTN_KNOWN_IDS_MAX][DTN_ID_LEN + 1]; /* single
         httpd task: scratch reused per request, never persisted (§13.6) */
-    (void)pushed_budget_cost;
     dtn_known_ids known = { known_store, DTN_KNOWN_IDS_MAX, 0 };
     dtn_sync sync;
     dtn_sync_init(&sync, boot_uptime_s(), &STORE_SINK, &known);
@@ -513,7 +516,8 @@ static esp_err_t h_sync(httpd_req_t *req)
     if (dtn_sync_pushed(&sync) > 0) {
         dtn_client *c = dtn_node_client(client_ip(req));
         int64_t wait = 0;
-        budget_ok = c && dtn_bucket_allow(&(c->env), now_ms(),
+        budget_ok = c && dtn_bucket_allow(
+            (dtn_bucket *)((char *)c + offsetof(dtn_client, env)), now_ms(),
                                           (uint64_t)dtn_sync_pushed(&sync),
                                           &wait);
         if (!budget_ok) {
@@ -550,7 +554,7 @@ static esp_err_t h_dir_post(httpd_req_t *req)
 {
     int g = gate(req);
     if (g != -1) return g;
-    if (!budget_allow(req, &dtn_client::request, 1)) return ESP_OK;
+    if (!budget_allow(req, offsetof(dtn_client, request), 1)) return ESP_OK;
     char ct[64] = "";
     size_t cl = sizeof(ct);
     httpd_req_get_hdr_value_str(req, "Content-Type", ct, cl);
