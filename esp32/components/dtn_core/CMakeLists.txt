@@ -15,5 +15,11 @@ idf_component_register(
          "src/dtn_sync.c"
          "src/dtn_store.c"
          "src/dtn_prekeys.c"
+         "src/dtn_sha256.c"
+         "src/dtn_tweetnacl.c"
+         "src/dtn_ed25519.c"
+         "src/dtn_cbor.c"
+         "src/dtn_nodeid.c"
+         "src/dtn_rolecert.c"
     INCLUDE_DIRS "include"
 )

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Version** | 1.0.0 |
+| **Version** | 1.1.0 |
 | **Date** | 2026-10-07 |
 | **Status** | **Normative — BINDING for all Phase 3 node-plane implementations (P3.1–P3.9).** The user-plane formats of `docs/protocol.md` §3–§15 remain byte-frozen and untouched; this document governs only the node plane defined below. |
 | **Scope** | The two-plane model, node identity/roles/authority, the Offgrid BPv7 profile (RFC 9171 subset) with measured byte budgets, the LoRa convergence layer (radio plan, MAC, link security), forwarding and storage, the management plane, updates and directory federation over the plane, and the node-plane threat-model delta. |
@@ -99,6 +99,20 @@ There is **no online CRL** — on an island, none can exist. Revocation and roll
 3. **Equal `seq`, differing bytes**: keep the existing cert, count `rolecert_conflicts`. Equal-sequence ties NEVER overwrite (first verified claim wins) — there is no honest reason for one anchor to issue two different certs at one sequence; the tie is an **attack signal**, not a race.
 4. **Revocation** is a higher-`seq` cert with `roles` cleared (`[]`) and `level` 0. Nodes MUST NOT open link sessions carrying management traffic with a revoked node and MUST NOT honor its commands; mail bundles remain receivable (they are opaque, §3.3).
 5. Expired certs (`expires_ts < now`) are treated as absent: no authority, no management session; the node itself MAY keep forwarding mail.
+
+### 2.6 Provisioning ceremony (P3.1)
+
+Identity is provisioned, never improvised on the node, and never a side effect of an upgrade — the same offline-first shape as the release key (offline-maintenance §2.2). The ceremony, per node, with `capsuletool` (`node/cmd/capsuletool` in the daemon module; deterministic, scriptable, no network):
+
+1. **Anchor keygen (once per island, air-gapped):** `capsuletool anchor keygen --out anchor/` — writes `anchor.seed` (mode 0600, the second crown jewel beside the release key; two offline copies, same discipline as offline-maintenance §2.2) and `anchor.pub` (the value every node pins).
+2. **Node keygen:** `capsuletool rolecert keygen --out nodeA/` — the node's `node.seed` (0600) and `node.pub`.
+3. **Request (the thing the anchor operator reviews):** `capsuletool rolecert request --seed nodeA/node.seed --roles edge,relay --level 1` — prints the unsigned payload fields; the EID is already fixed here because it is the key's fingerprint (§2.1).
+4. **Offline sign:** `capsuletool rolecert sign --anchor-seed anchor/anchor.seed --node-pub nodeA/node.pub --roles edge,relay --level 1 --seq 1 --out nodeA/node_cert.cbor` (defaults: `issued_ts` = now, `expires_ts` = now + 90 days; explicit timestamps keep the ceremony deterministic). `capsuletool rolecert verify --anchor-pub anchor/anchor.pub --in nodeA/node_cert.cbor` closes the loop on the signer's side.
+5. **Kit:** the operator kit carries `nodeid/{node.seed, node_cert.cbor, anchor.pub}` into the provisioning tree.
+6. **Pi install:** `raspberry/provision.sh` gains step `install_nodeid` — idempotent, root-owned (`/opt/dtn-node/nodeid/`, `node.seed` 0600, cert and `anchor.pub` 0644); an ABSENT kit is a loud SKIP naming this ceremony (the node boots without a role cert: mail works, management does not, §10); a PARTIAL kit fails the install. The upgrade subset (`install.sh --upgrade`) deliberately does NOT run this step — rotation is a re-issue at `seq+1` through THIS ceremony, never a file swap (the offline-maintenance §2.2.3 idempotence rule). The files land root-owned; granting the daemon user read access to its own identity is P3.2+ daemon wiring, not silently widened here.
+7. **ESP32:** the same three files become the NVS provisioning payload at flash time. P3.1 lands the seam — the `dtn_nodeid_store` vtable (load/save 32-byte seed + cert blob, RAM reference implementation, host-tested) in `dtn_core`; the NVS driver itself is hardware bring-up work (P3.3+/field), stated here so nobody mistakes the seam for the flash driver.
+
+The C side (`esp32/components/dtn_core/`: `dtn_nodeid`, `dtn_rolecert`, `dtn_cbor`, `dtn_ed25519` over the embedded public-domain TweetNaCl, `dtn_sha256`) is a VERIFY-ONLY consumer: it verifies certs against pinned anchors and applies the §2.5 merge rules, but never signs. Go and C are pinned to the same vectors (`tests/vectors/nodeid/vectors.json`, shared with the C suite through a generated header); the merge/TOFU rules derive from offline-maintenance §3.4/§3.5, which defines the rules but carries no literal role-cert vectors — noted in the vector file's provenance field.
 
 ## 3. Bundle layer: the Offgrid BPv7 profile
 
@@ -325,8 +339,8 @@ A build claiming conformance to this specification MUST be covered by tests for 
 | a | Byte budgets of §4: mail overhead ≤ 80 B; 399 B envelope ≤ 3 frames; frame-fit table; handshake < 3 frames; capsule chunk 2 frames; 1024 B card refused | `node/internal/bundle/spike_test.go` (this phase) |
 | b | LoRa airtime formula and §5.3 table values | `node/internal/bundle/spike_test.go` (`TestSpikeAirtimeTable`, this phase) |
 | c | Profile codec: canonical CBOR vectors (incl. the §4 hex), CRC-16/X.25 catalogue value, fail-closed parse of malformed bundles | `node/internal/bundle/profile_test.go` *(P3.2)*; `esp32/components/dtn_core/bundle/test_bundle.c` *(P3.2)* — byte-identical Go↔C on the shared fixture set |
-| d | Role-cert verification, self-certifying EID binding, seq merge rules incl. equal-seq attack signal and revocation (§2.5) | `node/internal/mgmt/rolecert_test.go` *(P3.1)* |
-| e | Provisioned Pi and ESP32 both boot with EID + cert | P3.1 integration tests |
+| d | Role-cert verification, self-certifying EID binding, seq merge rules incl. equal-seq attack signal and revocation (§2.5) | `node/internal/nodeid/{rolecert,cache,pinstore,nodeid}_test.go` (this phase); `esp32/components/dtn_core/host/tests/test_nodeid.c` (this phase) — both run every shared vector of `tests/vectors/nodeid/vectors.json` |
+| e | Provisioned Pi and ESP32 both boot with EID + cert | `node/cmd/capsuletool/main_test.go` (the §2.6 ceremony end-to-end, this phase); `raspberry/provision.sh install_nodeid` (kit install, structure-checked, absent kit = loud SKIP, this phase); the on-hardware boot legs (Pi daemon reading its identity, ESP32 NVS payload at flash time) are P3.2+/P3.3 field bring-up |
 | f | Handshake vectors (RFC 9529-shaped traces); replay rejected via persisted sequences; TOFU change fails loudly | `node/internal/nodesec/handshake_test.go` *(P3.3)*; `dtn_core` link-session tests *(P3.3)* |
 | g | Multi-hop A→B→C delivery: envelope bytes unmodified, hop octet honored and capped at 7, dup-safe | `tests/node_network_e2e.sh` *(P3.5)* |
 | h | Budget-gated TCPCLv4 transfer with TLS 1.3 and pinned node certs | `node/internal/tcpcl` tests *(P3.4)* |
@@ -354,6 +368,7 @@ Owner sign-off for these decisions is recorded by implementation proceeding on t
 
 ## Changelog
 
+- **1.1.0 (2026-10-07, issue #33 P3.1):** node identity and provisioning, additive. New §2.6 provisioning ceremony (offline anchor → node keygen → request → offline sign → kit → `provision.sh install_nodeid`; ESP32 NVS payload named as P3.3+ hardware work over the landed `dtn_nodeid_store` seam); P3.1 implementations: `node/internal/nodeid` (self-certifying EIDs, COSE_Sign1 role certs per §2.2, the §2.5 cache with counters, the TOFU pin store with `Marshal` persistence) and the verify-only C counterpart in `dtn_core` (`dtn_nodeid`/`dtn_rolecert`/`dtn_cbor`/`dtn_ed25519`/`dtn_sha256` + the embedded public-domain TweetNaCl trim); shared conformance vectors `tests/vectors/nodeid/vectors.json` executed by BOTH suites (§11 rows d/e updated to the real test names); `capsuletool` (`anchor keygen`, `rolecert keygen/request/sign/verify/id`). No §1–§2.5 rule changed; matrix rows d/e renamed, nothing dropped.
 - **1.0.0 (2026-10-07, issue #33 P3.0):** initial normative release. Two-plane model with the rfc4838-alignment §8 and offline-maintenance §2.8 amendments (§1); self-certifying EIDs, role-cert schema, roles/levels, seq merge rules (§2); the Offgrid BPv7 profile freeze with the 1-byte hop-octet hop-limit mechanism (§3); measured byte budgets — mail bundle overhead 46–47 B (≤ 80 B budget), 399 B envelope in 3 frames, management overhead 79 B fixed, handshake messages 38/134/91 B (§4, §6); radio plan with region matrix and measured airtime table incl. drift record vs the issue estimates (§5); EDHOC-shaped link security (§6); epidemic forwarding, budgets, shared stores (§7); management plane (§8); capsules and directory over the plane with honest bandwidth accounting (§9); threat-model delta (§10); conformance matrix (§11); the seven issue §5 decisions recorded ADOPTED (§12). Byte math measured by `node/internal/bundle/spike.go` and pinned by its tests.
 
 ---

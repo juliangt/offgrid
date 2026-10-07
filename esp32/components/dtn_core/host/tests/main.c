@@ -14,6 +14,7 @@ void test_canonical(void);
 void test_budget(void);
 void test_docs(void);
 void test_store(void);
+void test_nodeid(void);
 
 int main(void)
 {
@@ -26,6 +27,7 @@ int main(void)
     test_budget();
     test_docs();
     test_store();
+    test_nodeid();
     return t_summary();
 }
 

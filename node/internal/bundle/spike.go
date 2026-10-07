@@ -55,6 +55,34 @@ func (e *cbor) bFalse()        { e.b = append(e.b, 0xf4) }
 func (e *cbor) bTrue()         { e.b = append(e.b, 0xf5) }
 func (e *cbor) null()          { e.b = append(e.b, 0xf6) }
 
+// Cbor is the canonical CBOR encoder above, exported as a type alias so the
+// sibling node-plane packages encode from this ONE implementation instead of
+// growing a second one (issue #33 P3.1: the role certificates of
+// internal/nodeid; P3.2: the profile codec). An alias — not a wrapper — so
+// existing *cbor call sites keep working unchanged.
+type Cbor = cbor
+
+// EncodeCbor builds a canonical CBOR byte string with the encoder above:
+// build writes exactly one top-level value (the encoder is never reused
+// across values). It is the shared entry point for the node-plane packages;
+// the spike's own builders below keep calling the type directly.
+func EncodeCbor(build func(e *Cbor)) []byte {
+	e := &cbor{}
+	build(e)
+	return e.b
+}
+
+// Exported forwarding methods so sibling packages can drive the encoder
+// through the Cbor alias from EncodeCbor closures (the unexported names
+// above remain the spike's own vocabulary). Pure delegation — no behavior
+// of the encoder changes.
+func (e *Cbor) Uint(v uint64)  { e.uint(v) }
+func (e *Cbor) Negint(v int64) { e.negint(v) }
+func (e *Cbor) Bstr(b []byte)  { e.bstr(b) }
+func (e *Cbor) Tstr(s string)  { e.tstr(s) }
+func (e *Cbor) Array(n int)    { e.array(n) }
+func (e *Cbor) MapHead(n int)  { e.mapHead(n) }
+
 // ---------------------------------------------------------------------------
 // CRC-16/X.25 — RFC 9171 CRC type code 1 (reflected poly 0x8408, init
 // 0xFFFF, xorout 0xFFFF). Check value over the ASCII string "123456789"
