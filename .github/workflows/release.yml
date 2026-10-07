@@ -33,8 +33,8 @@ jobs:
             set -euo pipefail
             . "$IDF_PATH/export.sh" >/dev/null
             cd esp32
-            idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 build
-            idf.py -DIDF_TARGET=esp32   -B build-esp32   build
+            idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 -DSDKCONFIG=sdkconfig.esp32s3 build
+            idf.py -DIDF_TARGET=esp32 -B build-esp32 -DSDKCONFIG=sdkconfig.esp32 build
             (cd build-esp32s3 && python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \
               --chip esp32s3 merge_bin -o ../dtn-node-esp32s3.bin @flash_args)
             (cd build-esp32 && python "$IDF_PATH/components/esptool_py/esptool/esptool.py" \

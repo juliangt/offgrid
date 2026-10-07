@@ -121,8 +121,8 @@ firmware:
 	  echo "or use the CI container without installing anything:"; \
 	  echo "  docker run --rm -v \"\$$PWD:/repo\" -w /repo espressif/idf:$(ESP32_IDF_VER) bash -lc '. \$$IDF_PATH/export.sh && cd esp32 && idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 build && idf.py -DIDF_TARGET=esp32 -B build-esp32 build'"; \
 	  exit 1; }
-	cd esp32 && idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 build
-	cd esp32 && idf.py -DIDF_TARGET=esp32 -B build-esp32 build
+	cd esp32 && idf.py -DIDF_TARGET=esp32s3 -B build-esp32s3 -DSDKCONFIG=sdkconfig.esp32s3 build
+	cd esp32 && idf.py -DIDF_TARGET=esp32 -B build-esp32 -DSDKCONFIG=sdkconfig.esp32 build
 
 # Merged, flashable image per target (what a release ships): esptool
 # merge_bin over the build's own flash_args, so the offsets always match the
