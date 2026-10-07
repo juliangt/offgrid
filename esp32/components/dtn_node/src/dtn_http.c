@@ -680,7 +680,8 @@ static esp_err_t h_sync_get_405(httpd_req_t *req)
  * (httpd answers 404 itself for unregistered URIs — register the catch-all
  * by listing each path's alternates above). */
 
-static httpd_handle_t start_server(uint16_t port, size_t n)
+static httpd_handle_t start_server(uint16_t port, const httpd_uri_t *uris,
+                                   size_t n)
 {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = port;
