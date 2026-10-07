@@ -14,5 +14,6 @@ idf_component_register(
          "src/dtn_docs.c"
          "src/dtn_sync.c"
          "src/dtn_store.c"
+         "src/dtn_prekeys.c"
     INCLUDE_DIRS "include"
 )

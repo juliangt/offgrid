@@ -33,6 +33,7 @@
 #include <string.h>
 
 #include "dtn_base64.h"
+#include "dtn_prekeys.h"
 
 #ifndef DTN_STORE_NO_FSYNC
 #include <unistd.h>
@@ -1384,156 +1385,18 @@ bool dtn_store_pending_migration(const dtn_store *st)
 
 bool dtn_store_quarantined(const dtn_store *st) { return st->quarantined; }
 
-/* ---- §10.3 blind prekeys admission (shape only — §1: never verify) ----
- *
- * Rules (§4.6/§10.3): the member set is exactly v, spk, spk_sig, ts, opks —
- * every one required; v == 1; spk padded standard Base64 of exactly 32
- * bytes; spk_sig of exactly 64 bytes; ts an integer > 0; opks an array of
- * 8..16 Base64 strings each decoding to exactly 32 bytes; the whole
- * serialized member ≤ 2048 bytes; unknown members are ignored (§15.4) but
- * still syntax-walked. NO signature verification — the node stays blind.
- */
-struct prekeys_ctx {
-    bool started;       /* saw the top-level bundle object */
-    int cur;            /* 0..4 = known member being read; -1 unknown */
-    int skip_depth;     /* nested containers of an ignored member */
-    bool in_opks;
-    int opks;
-    bool saw_opks;
-    bool bad;
-    bool have_spk, have_sig;
-    int64_t v;
-    bool v_set, ts_set;
-    int64_t ts;
-};
-
-static void pk_event(void *ud, const dtn_json_event *ev)
-{
-    struct prekeys_ctx *c = ud;
-    if (c->bad) return;
-
-    switch (ev->type) {
-    case DTN_JSON_EV_BEGIN_OBJECT:
-        if (!c->started) {
-            c->started = true; /* the bundle object itself */
-        } else if (c->skip_depth > 0) {
-            c->skip_depth++;
-        } else if (c->cur != -1) {
-            c->bad = true; /* object where a scalar/array member belongs */
-        } else {
-            c->skip_depth = 1; /* ignored member's object subtree */
-        }
-        return;
-    case DTN_JSON_EV_BEGIN_ARRAY:
-        if (!c->started) {
-            c->bad = true; /* the bundle must be an object */
-        } else if (c->skip_depth > 0) {
-            c->skip_depth++;
-        } else if (c->cur == 4) {
-            c->in_opks = true;
-            c->opks = 0;
-        } else if (c->cur == -1) {
-            c->skip_depth = 1; /* ignored member's array subtree */
-        } else {
-            c->bad = true; /* array where v/spk/sig/ts belongs */
-        }
-        return;
-    case DTN_JSON_EV_END_OBJECT:
-        if (c->skip_depth > 0 && --c->skip_depth == 0 && c->cur == -1) {
-            /* fallthrough: the ignored member ended; cur stays -1 */
-        }
-        return;
-    case DTN_JSON_EV_END_ARRAY:
-        if (c->in_opks) {
-            c->in_opks = false;
-            c->saw_opks = true;
-            c->cur = -1;
-            return;
-        }
-        if (c->skip_depth > 0) c->skip_depth--;
-        return;
-    case DTN_JSON_EV_KEY: {
-        c->cur = -1;
-        if (ev->overflow) return; /* too-long key: never a known member */
-        if (strcmp(ev->s, "v") == 0) c->cur = 0;
-        else if (strcmp(ev->s, "spk") == 0) c->cur = 1;
-        else if (strcmp(ev->s, "spk_sig") == 0) c->cur = 2;
-        else if (strcmp(ev->s, "ts") == 0) c->cur = 3;
-        else if (strcmp(ev->s, "opks") == 0) c->cur = 4;
-        return;
-    }
-    case DTN_JSON_EV_STRING: {
-        if (c->skip_depth > 0) return;
-        if (c->in_opks) {
-            if (c->opks >= 16 || ev->overflow ||
-                dtn_base64_decoded_len(ev->s, ev->len) != 32) {
-                c->bad = true;
-                return;
-            }
-            c->opks++;
-            return;
-        }
-        if (c->cur == 1) {
-            if (ev->overflow || dtn_base64_decoded_len(ev->s, ev->len) != 32) {
-                c->bad = true;
-                return;
-            }
-            c->have_spk = true;
-        } else if (c->cur == 2) {
-            if (ev->overflow || dtn_base64_decoded_len(ev->s, ev->len) != 64) {
-                c->bad = true;
-                return;
-            }
-            c->have_sig = true;
-        } else if (c->cur >= 0) {
-            c->bad = true; /* string into v/ts/opks */
-        }
-        return;
-    }
-    case DTN_JSON_EV_NUMBER: {
-        if (c->skip_depth > 0) return;
-        if (c->in_opks || !ev->is_integer || c->cur < 0) {
-            c->bad = true; /* number in opks, float, or into spk/sig */
-            return;
-        }
-        if (c->cur == 0) {
-            c->v = ev->num;
-            c->v_set = true;
-        } else if (c->cur == 3) {
-            c->ts = ev->num;
-            c->ts_set = true;
-        } else {
-            c->bad = true;
-        }
-        return;
-    }
-    case DTN_JSON_EV_TRUE:
-    case DTN_JSON_EV_FALSE:
-    case DTN_JSON_EV_NULL:
-        if (c->skip_depth == 0 && c->cur >= 0) c->bad = true;
-        if (c->in_opks) c->bad = true;
-        return;
-    }
-}
-
+/* ---- §10.3 blind prekeys admission: the shape validator lives in
+ * dtn_prekeys.c (shared with the HTTP directory POST handler); this is the
+ * whole-string form. NO signature verification — the node stays blind (§1). */
 bool dtn_store_valid_prekeys(const char *raw, size_t raw_len)
 {
-    if (!raw || raw_len == 0 || raw_len > 2048) return false;
-    struct prekeys_ctx c;
-    memset(&c, 0, sizeof(c));
-    c.cur = -1;
-    dtn_json_parser p;
-    dtn_json_init(&p, pk_event, &c);
-    if (dtn_json_feed(&p, raw, raw_len) != DTN_JSONFEED_DONE) return false;
-    if (c.bad) return false;
-    if (c.skip_depth > 0 || c.in_opks) return false; /* never closed */
-    if (!c.v_set || !c.ts_set || !c.have_spk || !c.have_sig || !c.saw_opks) {
-        return false; /* every §4.6 member is required */
+    if (!raw || raw_len == 0 || raw_len > DTN_PREKEYS_MAX_BYTES) return false;
+    dtn_prekeys_val pv;
+    dtn_prekeys_val_init(&pv, NULL);
+    if (dtn_prekeys_val_feed(&pv, raw, raw_len) != DTN_JSONFEED_DONE) {
+        return false;
     }
-    if (c.v != 1) return false;
-    if (c.ts <= 0) return false;
-    if (c.opks < 8 || c.opks > 16) return false;
-    return true;
+    return dtn_prekeys_val_ok(&pv);
 }
 
 void dtn_store_test_crash(dtn_store *st)

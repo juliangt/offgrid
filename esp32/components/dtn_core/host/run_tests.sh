@@ -15,5 +15,6 @@ $CC -std=c99 -Wall -Wextra -Werror -O1 -I../include -Itests \
     ../src/dtn_core.c ../src/dtn_json.c ../src/dtn_base64.c \
     ../src/dtn_envelope.c ../src/dtn_canonical.c ../src/dtn_budget.c \
     ../src/dtn_docs.c ../src/dtn_sync.c ../src/dtn_store.c \
+    ../src/dtn_prekeys.c \
     -o build/dtn_core_tests
 exec ./build/dtn_core_tests
