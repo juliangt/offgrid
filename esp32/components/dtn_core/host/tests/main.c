@@ -16,6 +16,8 @@ void test_docs(void);
 void test_store(void);
 void test_nodeid(void);
 void test_bundle(void);
+void test_link(void);  /* P3.3 node-plane link layer (issue #33) */
+void test_mac(void);   /* P3.3 node-plane MAC v1 (issue #33) */
 
 int main(void)
 {
@@ -30,6 +32,9 @@ int main(void)
     test_store();
     test_nodeid();
     test_bundle();
+    printf("dtn_core host tests — issue #33 P3.3 (node plane)\n");
+    test_link();
+    test_mac();
     return t_summary();
 }
 

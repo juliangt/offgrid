@@ -26,9 +26,12 @@
  *   - crypto_verify_32 and the field/group arithmetic underneath it all.
  *
  * Removed: every salsa20/xsalsa20 stream, the poly1305 onetimeauth,
- * secretbox/box, the Ed25519 SIGN side (crypto_sign, crypto_sign_keypair)
- * and with it the randombytes dependency. The removed code remains
- * retrievable verbatim from the upstream download above.
+ * secretbox/box and with them the randombytes dependency. The Ed25519 SIGN
+ * side (crypto_sign, crypto_sign_keypair) was trimmed in P3.1 and RE-ADDED
+ * in P3.3 (the link-session handshake signs on both sides) — rebuilt from
+ * the file's own pieces in the same algorithm, see the sign functions at
+ * the end. The removed code remains retrievable verbatim from the upstream
+ * download above.
  *
  * DOCUMENTED DEVIATIONS (none change any cryptographic primitive):
  *   1. Renamed entry points (dtn_tn_*) and their now-static helpers.
@@ -606,4 +609,78 @@ int dtn_tn_ed25519_verify(const u8 pk[32], const u8 sig[64], const u8 *msg, u64 
   pack(t, p);
 
   return dtn_tn_crypto_verify_32(sig, t) ? -1 : 0;
+}
+
+/* --- Ed25519 SIGN path (added P3.3, see the header comment) --------------
+ *
+ * The upstream crypto_sign / crypto_sign_keypair algorithm, restated from
+ * the file's own primitives (sha512, reduce, scalarbase, pack, modL)
+ * without upstream's signed-message buffer: the caller supplies the seed
+ * and the already-derived public key, the message is hashed through a
+ * bounded stack buffer (RFC 8032 needs SHA512(prefix ‖ m) and
+ * SHA512(R ‖ pk ‖ m); transcript signatures are ≤ 60 B, the buffer bound
+ * is 223 B of message), and the signature lands in the caller's 64-byte
+ * sig. Deterministic, byte-identical to Go's crypto/ed25519 — the shared
+ * handshake vectors prove the cross-implementation identity.
+ * ----------------------------------------------------------------------- */
+
+#define DTN_TN_SIGN_MAXMSG 223
+
+int dtn_tn_ed25519_keypair(u8 pk[32], const u8 seed[32])
+{
+  u8 h[64], a[32];
+  gf p[4];
+  u64 i;
+
+  dtn_tn_sha512(h, seed, 32);
+  FOR(i, 32) a[i] = h[i];
+  a[0] &= 248;
+  a[31] &= 127;
+  a[31] |= 64;
+  scalarbase(p, a);
+  pack(pk, p);
+  return 0;
+}
+
+int dtn_tn_ed25519_sign(u8 sig[64], const u8 *msg, u64 msglen,
+                        const u8 seed[32], const u8 pk[32])
+{
+  u8 h[64], rred[64], a[32], prefix[32], buf[64 + DTN_TN_SIGN_MAXMSG];
+  gf p[4];
+  u64 i, j;
+  i64 x[64];
+
+  if (msglen > DTN_TN_SIGN_MAXMSG) return -1;
+
+  /* a = clamp(SHA512(seed)[0:32]); prefix = SHA512(seed)[32:64]. */
+  dtn_tn_sha512(h, seed, 32);
+  FOR(i, 32) a[i] = h[i];
+  a[0] &= 248;
+  a[31] &= 127;
+  a[31] |= 64;
+  FOR(i, 32) prefix[i] = h[32 + i];
+
+  /* r = SHA512(prefix ‖ m) reduced (kept aside — h is reused for k);
+   * R = r·B into sig[0:32]. */
+  FOR(i, 32) buf[i] = prefix[i];
+  FOR(i, msglen) buf[32 + i] = msg[i];
+  dtn_tn_sha512(h, buf, 32 + msglen);
+  reduce(h);
+  FOR(i, 64) rred[i] = h[i];
+
+  scalarbase(p, h);
+  pack(sig, p);
+
+  /* k = SHA512(R ‖ pk ‖ m) reduced. */
+  FOR(i, 32) buf[i] = sig[i];
+  FOR(i, 32) buf[32 + i] = pk[i];
+  FOR(i, msglen) buf[64 + i] = msg[i];
+  dtn_tn_sha512(h, buf, 64 + msglen);
+  reduce(h);
+
+  /* S = (r + k·a) mod L — upstream's own double loop into modL. */
+  FOR(i, 64) x[i] = (u64)rred[i];
+  FOR(i, 64) FOR(j, 32) x[i + j] += h[i] * a[j];
+  modL(sig + 32, x);
+  return 0;
 }

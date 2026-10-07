@@ -11,11 +11,29 @@
 #ifndef DTN_TWEETNACL_H
 #define DTN_TWEETNACL_H
 
-/* Ed25519 VERIFY ONLY (dtn_core is a verifier/consumer; the signing anchor
- * never runs on a node). Same check as upstream crypto_sign_open, minus the
- * message copy; returns 0 on a valid signature, -1 otherwise. */
+/* Ed25519 VERIFY (dtn_core was a verifier/consumer in P3.1; since P3.3 the
+ * link-session handshake signs on BOTH sides, so the sign path below is
+ * enabled too). Same check as upstream crypto_sign_open, minus the message
+ * copy; returns 0 on a valid signature, -1 otherwise. */
 int dtn_tn_ed25519_verify(const unsigned char pk[32], const unsigned char sig[64],
                           const unsigned char *msg, unsigned long long msglen);
+
+/* Ed25519 SIGN + keypair-from-seed (added P3.3). Built strictly from the
+ * upstream pieces in dtn_tweetnacl.c (sha512, reduce, scalarbase, add,
+ * pack, modL) and restating the upstream crypto_sign /
+ * crypto_sign_keypair algorithm without the signed-message buffer; the
+ * public-domain attribution covers this file in full.
+ *
+ * dtn_tn_ed25519_keypair: pk = clamp(SHA512(seed)[0:32])·B.
+ * dtn_tn_ed25519_sign: the deterministic RFC 8032 signature of msg under
+ * (seed,pk). Ed25519 signing is deterministic, so Go and C produce
+ * byte-identical signatures — the shared handshake vectors pin that.
+ * Messages up to 223 bytes are hashed in a fixed stack buffer (the
+ * transcript signatures are ≤ 60 B); longer inputs return -1. */
+int dtn_tn_ed25519_keypair(unsigned char pk[32], const unsigned char seed[32]);
+int dtn_tn_ed25519_sign(unsigned char sig[64], const unsigned char *msg,
+                        unsigned long long msglen,
+                        const unsigned char seed[32], const unsigned char pk[32]);
 
 /* Upstream crypto_sign_open, kept verbatim (renamed) as the reference
  * implementation of the same check — it also recovers the message. */

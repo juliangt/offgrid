@@ -23,5 +23,10 @@ idf_component_register(
          "src/dtn_nodeid.c"
          "src/dtn_rolecert.c"
          "src/dtn_bundle.c"
+         "src/dtn_ccm.c"
+         "src/dtn_hkdf.c"
+         "src/dtn_session.c"
+         "src/dtn_frame.c"
+         "src/dtn_mac.c"
     INCLUDE_DIRS "include"
 )
