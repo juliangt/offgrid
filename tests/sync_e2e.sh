@@ -184,6 +184,20 @@ PORT_B="${PORT_B:-18092}"
 PORT_C="${PORT_C:-18093}"
 PORT_E="${PORT_E:-18094}"
 PORT_D="${PORT_D:-18095}"
+# External-node mode (issue #39 phase 4): set NODE_A_URL / NODE_B_URL to run
+# the IDENTICAL core assertion walk against a remote node — e.g. an ESP32
+# flashed with this repo's firmware, reachable over Wi-Fi at its canonical
+# origin (http://offgrid.local:8080 via the AP, or http://10.42.0.1:8080 for
+# the redirect legs). In external mode the harness builds nothing, starts
+# no daemon, and skips the local-only sections (schema surgery, SPA-helper
+# legs, extra daemons): the operator is responsible for the nodes running
+# FRESH stores (empty envelopes + directory) before starting.
+NODE_A_URL="${NODE_A_URL:-}"
+NODE_B_URL="${NODE_B_URL:-}"
+EXTERNAL=0
+[ -n "$NODE_A_URL" ] && EXTERNAL=1
+URL_A="${NODE_A_URL:-http://127.0.0.1:$PORT_A}"
+URL_B="${NODE_B_URL:-http://127.0.0.1:$PORT_B}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -233,6 +247,17 @@ check() {
         printf 'FAIL: %s\n      expected [%s]\n      actual   [%s]\n' "$1" "$2" "$3"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
+}
+
+# wait_ready_url URL — poll GET $URL/generate_204 until it answers 302.
+wait_ready_url() {
+    local url="$1"
+    for _ in $(seq 1 60); do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' "$url/generate_204" || true)"
+        [ "$code" = "302" ] && return 0
+        sleep 0.5
+    done
+    return 1
 }
 
 # wait_ready PORT — poll GET /generate_204 until it answers 302 (§10.2).
@@ -334,6 +359,17 @@ db_fingerprint() {
 # ---------------------------------------------------------------------------
 # 0. Build the dev binary and start two daemons with separate temp DBs.
 # ---------------------------------------------------------------------------
+if [ "$EXTERNAL" = 1 ]; then
+    log "external mode: node A at $URL_A, node B at $URL_B (no local daemons)"
+    if wait_ready_url "$URL_A"; then NODE_A_READY=0; else NODE_A_READY=1; fi
+    check "node A ready: GET /generate_204 answers 302" "0" "$NODE_A_READY"
+    if wait_ready_url "$URL_B"; then NODE_B_READY=0; else NODE_B_READY=1; fi
+    check "node B ready: GET /generate_204 answers 302" "0" "$NODE_B_READY"
+    if [ "$NODE_A_READY" -ne 0 ] || [ "$NODE_B_READY" -ne 0 ]; then
+        log "external node unreachable — check Wi-Fi association and origin"
+        exit 1
+    fi
+else
 log "building the dev binary (go build in node/)"
 (cd "$ROOT/node" && go build -o "$WORK/dtn-node" .)
 
@@ -351,6 +387,7 @@ if [ "$NODE_A_READY" -ne 0 ] || [ "$NODE_B_READY" -ne 0 ]; then
     log "--- node A log ---"; cat "$WORK/node_a.log" >&2 || true
     log "--- node B log ---"; cat "$WORK/node_b.log" >&2 || true
     exit 1
+fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -418,14 +455,14 @@ BOB_DIR='{"alias":"bob","pubkey":"MAyclgO5Kks57TlYv5JAEUgE20/TcwEsDKR0MtY0Ja4=",
 printf '%s' "$ALICE_DIR" > "$WORK/reg_alice.json"
 printf '%s' "$BOB_DIR"   > "$WORK/reg_bob.json"
 
-for PORT in "$PORT_A" "$PORT_B"; do
-    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/reg_alice.json")"
-    check "register alice on node (port $PORT) -> 200" "200" "$code"
-    code="$(http POST "http://127.0.0.1:$PORT/api/v1/directory" "$WORK/reg_bob.json")"
-    check "register bob on node (port $PORT) -> 200" "200" "$code"
+for EP in "$URL_A" "$URL_B"; do
+    code="$(http POST "${EP}/api/v1/directory" "$WORK/reg_alice.json")"
+    check "register alice on node ($EP) -> 200" "200" "$code"
+    code="$(http POST "${EP}/api/v1/directory" "$WORK/reg_bob.json")"
+    check "register bob on node ($EP) -> 200" "200" "$code"
 done
 
-code="$(http GET "http://127.0.0.1:$PORT_A/api/v1/directory")"
+code="$(http GET "${URL_A}/api/v1/directory")"
 check "GET directory on node A -> 200" "200" "$code"
 DIR_COUNT="$({ grep -o '"alias"' "$WORK/last_body" || true; } | wc -l | tr -d ' ')"
 check "directory on node A lists both users" "2" "$DIR_COUNT"
@@ -434,7 +471,7 @@ check "directory on node A lists both users" "2" "$DIR_COUNT"
 # 3. Alice pushes the spec envelope to node A (§10.4 push path).
 # ---------------------------------------------------------------------------
 make_sync_body "$WORK/sync_push_a.json" "[\"$ENV_ID\"]" "[$ENV_FRESH]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_push_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_push_a.json")"
 check "alice pushes the spec envelope to node A -> 200" "200" "$code"
 check "push response pulls nothing back (own push listed in known_ids)" "0" "$(json_count_envelopes)"
 
@@ -442,7 +479,7 @@ check "push response pulls nothing back (own push listed in known_ids)" "0" "$(j
 # 4. Mule syncs with node A and picks up the envelope.
 # ---------------------------------------------------------------------------
 make_sync_body "$WORK/sync_mule_a.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_mule_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_mule_a.json")"
 check "mule syncs with node A -> 200" "200" "$code"
 check "mule pulls exactly 1 envelope from node A" "1" "$(json_count_envelopes)"
 check "pulled envelope keeps the spec id" "$ENV_ID" "$(json_id)"
@@ -453,11 +490,11 @@ log "mule recorded payload sha256: $PAYLOAD_SHA_A"
 # 5. Mule walks to node B: push what it carries, then Bob pulls.
 # ---------------------------------------------------------------------------
 make_sync_body "$WORK/sync_mule_b.json" "[\"$ENV_ID\"]" "[$ENV_FRESH]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_mule_b.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_mule_b.json")"
 check "mule drops the envelope at node B -> 200" "200" "$code"
 
 make_sync_body "$WORK/sync_bob_b.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_bob_b.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_bob_b.json")"
 check "bob pulls from node B -> 200" "200" "$code"
 check "bob pulls exactly 1 envelope from node B" "1" "$(json_count_envelopes)"
 check "bob received the envelope with the spec id" "$ENV_ID" "$(json_id)"
@@ -469,47 +506,47 @@ check "E2E byte integrity: payload sha256 identical through the mule" "$PAYLOAD_
 # ---------------------------------------------------------------------------
 # (a) INSERT OR IGNORE dedup: re-pushing the same envelope must not duplicate.
 make_sync_body "$WORK/sync_dedup.json" "[\"$ENV_ID\"]" "[$ENV_FRESH]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_dedup.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_dedup.json")"
 check "re-pushing the same envelope to node B -> 200 (dedup is silent)" "200" "$code"
 make_sync_body "$WORK/sync_after_dedup.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_after_dedup.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_after_dedup.json")"
 check "pull after duplicate push returns exactly 1 (no duplicate)" "1" "$(json_count_envelopes)"
 
 # (b) Expired TTL: the VERBATIM §3.2 envelope is accepted on push but never
 # served (§10.4 pulls only created_at + ttl >= now).
 make_sync_body "$WORK/sync_expired.json" "[]" "[$ENV_VERBATIM]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_expired.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_expired.json")"
 check "expired envelope (verbatim §3.2) accepted on push -> 200" "200" "$code"
 make_sync_body "$WORK/sync_after_expired.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_after_expired.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_after_expired.json")"
 check "expired envelope is TTL-filtered: pull still returns exactly 1" "1" "$(json_count_envelopes)"
 
 # (c) known_ids exclusion on node B (§10.4 step 3: id NOT IN known_ids).
 make_sync_body "$WORK/sync_known.json" "[\"$ENV_ID\"]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_known.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_known.json")"
 check "pull with the envelope id in known_ids excludes it (0 envelopes)" "0" "$(json_count_envelopes)"
 
 # (d) Body over 1 MiB -> 413 (§10.1 limitBody middleware).
 PAD="$(head -c 1100000 /dev/zero | tr '\0' 'a')"
 printf '{"known_ids":[],"push_envelopes":[],"limit":50,"pad":"%s"}' "$PAD" > "$WORK/oversize.json"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/oversize.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/oversize.json")"
 check "sync body > 1 MiB rejected with 413" "413" "$code"
 
 # (e) Malformed envelope (id outside ^[0-9a-f]{64}$) -> 400 (§10.5).
 make_sync_body "$WORK/sync_badid.json" "[]" "[$ENV_BADID]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_badid.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_badid.json")"
 check "envelope with malformed id (bad hex) rejected with 400" "400" "$code"
 
 # ---------------------------------------------------------------------------
 # 7. Canonical-host middleware: 301 for raw IP, 302 probe exemption (§10.2).
 #    Both requests deliberately use the default curl Host (127.0.0.1:PORT).
 # ---------------------------------------------------------------------------
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_root" -w '%{http_code}' "http://127.0.0.1:$PORT_A/")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_root" -w '%{http_code}' "${URL_A}/")"
 check "raw-IP GET / redirects with 301 to the canonical origin" "301" "$code"
 if tr -d '\r' < "$WORK/hdr_root" | grep -qi '^Location: http://offgrid\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
 check "301 Location is exactly http://offgrid.local:8080/" "canonical" "$LOC"
 
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_probe" -w '%{http_code}' "http://127.0.0.1:$PORT_A/generate_204")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_probe" -w '%{http_code}' "${URL_A}/generate_204")"
 check "captive probe with default Host answers 302 (never 204, never 301)" "302" "$code"
 if tr -d '\r' < "$WORK/hdr_probe" | grep -qi '^Location: http://offgrid\.local:8080/$'; then LOC=canonical; else LOC=missing; fi
 check "302 Location is exactly http://offgrid.local:8080/" "canonical" "$LOC"
@@ -570,18 +607,18 @@ check "node C keeps serving the FIRST stored version (v2)" "2" "$(json_v)"
 # (d) §15.7 c reverse order on node A (its copy was stored as v1 in section
 #     3): the v2 conversion must be absorbed and the served row keep v1.
 make_sync_body "$WORK/sync_v1_a.json" "[\"$ENV_ID\"]" "[$ENV_FRESH]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_v1_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_v1_a.json")"
 check "push the v1 fixture to node A (stored there first in section 3) -> 200" "200" "$code"
 make_sync_body "$WORK/sync_pull_a.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_pull_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_pull_a.json")"
 check "pull from node A -> 200" "200" "$code"
 check "node A serves exactly 1 envelope" "1" "$(json_count_envelopes)"
 check "node A serves its first stored version (v1)" "1" "$(json_v)"
 make_sync_body "$WORK/sync_v2_a.json" "[\"$ENV_ID\"]" "[$ENV_V2]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_v2_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_v2_a.json")"
 check "push the v2 conversion to node A -> 200 (absorbed: dedup is version-agnostic, §15.7 c)" "200" "$code"
 make_sync_body "$WORK/sync_pull_a2.json" "[]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_pull_a2.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_pull_a2.json")"
 check "pull from node A after the v2 push -> 200" "200" "$code"
 check "node A still holds exactly 1 envelope after the v2 push" "1" "$(json_count_envelopes)"
 check "node A keeps serving v1 (the first stored version wins)" "1" "$(json_v)"
@@ -607,7 +644,7 @@ DAEMON_C_PID=""
 # ---------------------------------------------------------------------------
 # 9. §15.5 version advertisement: GET /api/v1/capabilities on node A.
 # ---------------------------------------------------------------------------
-code="$(http GET "http://127.0.0.1:$PORT_A/api/v1/capabilities")"
+code="$(http GET "${URL_A}/api/v1/capabilities")"
 check "GET /api/v1/capabilities -> 200 (§15.5)" "200" "$code"
 check "capabilities api is \"v1\"" "v1" "$(caps_str api)"
 ENVELOPE_VERSIONS="$(grep -oE '"envelope_versions":\[[0-9,]*\]' "$WORK/last_body" | sed -E 's/^"envelope_versions"://')"
@@ -623,10 +660,28 @@ check "capabilities hint_epoch_current matches floor(node now / 86400) (§6.1)" 
     "$(( $(date +%s) / 86400 ))" "$HINT_CUR"
 if grep -q '"build":"' "$WORK/last_body"; then BUILD_ID="$(caps_str build)"; else BUILD_ID=""; fi
 check "capabilities build is non-empty (§15.5)" "non-empty" "$([ -n "$BUILD_ID" ] && echo non-empty || echo empty)"
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_caps" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/api/v1/capabilities")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_caps" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "${URL_A}/api/v1/capabilities")"
 check "POST /api/v1/capabilities rejected with 405 (§10.1 wrong method)" "405" "$code"
 if tr -d '\r' < "$WORK/hdr_caps" | grep -qi '^Allow: GET'; then ALLOW=get; else ALLOW=missing; fi
 check "capabilities 405 advertises Allow: GET (§10.1)" "get" "$ALLOW"
+
+
+# ---------------------------------------------------------------------------
+# External mode (issue #39): the core §10.3/§10.4/§10.2/§15 walk above ran
+# unchanged against NODE_A_URL/NODE_B_URL — everything below needs the
+# local binary or local database surgery (schema migrations, SPA helpers,
+# extra daemons), so the conformance run ends here with the same summary.
+# ---------------------------------------------------------------------------
+if [ "$EXTERNAL" = 1 ]; then
+    log "external mode: core conformance walk complete"
+    log "summary: $PASS_COUNT passed, $FAIL_COUNT failed"
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+        log "RESULT: FAIL"
+        exit 1
+    fi
+    log "RESULT: PASS"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 10. §15.7 a — schema migration E2E: a schema-1 database written "by an old
@@ -782,10 +837,10 @@ check "refused start left the database byte-untouched, sidecars included (§15.3
 #     The first health GET is also the FIRST one node A ever serves, so the
 #     1-second snapshot cache refreshes now and sees every prior counter.
 # ---------------------------------------------------------------------------
-code="$(http GET "http://127.0.0.1:$PORT_A/api/v1/health")"
+code="$(http GET "${URL_A}/api/v1/health")"
 check "GET /api/v1/health -> 200 (§10.7)" "200" "$code"
 cp "$WORK/last_body" "$WORK/health_body"
-curl -sS -o /dev/null -D "$WORK/hdr_health" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/api/v1/health"
+curl -sS -o /dev/null -D "$WORK/hdr_health" -H 'Host: offgrid.local:8080' "${URL_A}/api/v1/health"
 if tr -d '\r' < "$WORK/hdr_health" | grep -qi '^Content-Type: application/json; charset=utf-8'; then CT=ok; else CT=bad; fi
 check "health Content-Type is application/json; charset=utf-8" "ok" "$CT"
 check "health status is \"ok\" (liveness, no invented judgment)" "ok" "$(caps_str status)"
@@ -817,22 +872,22 @@ check "health counters.ttl_swept_envelopes is 0" "0" "$(caps_num ttl_swept_envel
 # Latency: the cached snapshot must answer far under the 50 ms budget. The
 # 0.2 s bound leaves CI headroom while still catching any regression that
 # makes the endpoint touch SQLite (or worse) per request.
-HEALTH_MS="$(curl -sS -o /dev/null -w '%{time_total}' -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/api/v1/health")"
+HEALTH_MS="$(curl -sS -o /dev/null -w '%{time_total}' -H 'Host: offgrid.local:8080' "${URL_A}/api/v1/health")"
 check "health answers in well under the 50 ms budget (< 0.2 s here)" "ok" "$(awk -v t="$HEALTH_MS" 'BEGIN {print (t < 0.2) ? "ok" : "slow (" t "s)"}')"
 
 # Wrong methods → 405 with Allow: GET, both diagnostics paths.
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_h405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/api/v1/health")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_h405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "${URL_A}/api/v1/health")"
 check "POST /api/v1/health rejected with 405 (§10.1 wrong method)" "405" "$code"
 if tr -d '\r' < "$WORK/hdr_h405" | grep -qi '^Allow: GET'; then ALLOW=get; else ALLOW=missing; fi
 check "health 405 advertises Allow: GET" "get" "$ALLOW"
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_s405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/status")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_s405" -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "${URL_A}/status")"
 check "POST /status rejected with 405" "405" "$code"
 
 # The operator status view: HTML, no JavaScript, rendered from the same
 # snapshot (the build identifier is "dev" — the E2E builds without ldflags).
-code="$(http GET "http://127.0.0.1:$PORT_A/status")"
+code="$(http GET "${URL_A}/status")"
 check "GET /status -> 200 (§10.7 operator view)" "200" "$code"
-curl -sS -o /dev/null -D "$WORK/hdr_status" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/status"
+curl -sS -o /dev/null -D "$WORK/hdr_status" -H 'Host: offgrid.local:8080' "${URL_A}/status"
 if tr -d '\r' < "$WORK/hdr_status" | grep -qi '^Content-Type: text/html; charset=utf-8'; then CT=ok; else CT=bad; fi
 check "status Content-Type is text/html; charset=utf-8" "ok" "$CT"
 cp "$WORK/last_body" "$WORK/status_body"
@@ -847,7 +902,7 @@ check "status page shows the envelope capacity" "shown" "$CAP"
 
 # The operator page must not be reachable from the portal: no link (or any
 # reference) to /status in index.html nor in any script the portal loads.
-code="$(http GET "http://127.0.0.1:$PORT_A/")"
+code="$(http GET "${URL_A}/")"
 check "GET / -> 200 (portal, for the not-linked check)" "200" "$code"
 cp "$WORK/last_body" "$WORK/index_body"
 if grep -qF '/status' "$WORK/index_body"; then LINK=yes; else LINK=no; fi
@@ -855,22 +910,22 @@ check "portal index.html does not reference /status" "no" "$LINK"
 JS_REFS="$(grep -oE 'src="/js/[^"]+"' "$WORK/index_body" | sed -E 's/src="([^"]+)"/\1/' || true)"
 NOT_LINKED=yes
 for js in $JS_REFS; do
-    curl -sS -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A$js" > "$WORK/portal_js"
+    curl -sS -H 'Host: offgrid.local:8080' "${URL_A}${js}" > "$WORK/portal_js"
     if grep -qF '/status' "$WORK/portal_js"; then NOT_LINKED=no; fi
 done
 check "no portal script references /status" "yes" "$([ "$NOT_LINKED" = yes ] && echo yes || echo no)"
 
 # Canonical-host middleware covers the diagnostics paths (§10.2); probes are
 # unaffected by any of this (§10.2).
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_h301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/api/v1/health")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_h301" -w '%{http_code}' "${URL_A}/api/v1/health")"
 check "raw-IP GET /api/v1/health redirects with 301" "301" "$code"
 if tr -d '\r' < "$WORK/hdr_h301" | grep -qi '^Location: http://offgrid\.local:8080/api/v1/health$'; then LOC=canonical; else LOC=missing; fi
 check "health 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_s301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/status")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_s301" -w '%{http_code}' "${URL_A}/status")"
 check "raw-IP GET /status redirects with 301" "301" "$code"
 if tr -d '\r' < "$WORK/hdr_s301" | grep -qi '^Location: http://offgrid\.local:8080/status$'; then LOC=canonical; else LOC=missing; fi
 check "status 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
-code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/generate_204")"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "${URL_A}/generate_204")"
 check "captive probe still answers 302 with the default Host (§10.2)" "302" "$code"
 
 # Privacy (§13 review of the diagnostics surface): neither body may carry any
@@ -895,9 +950,9 @@ check "no envelope id, hint, payload, alias or key appears in health or status (
 #      no-offline wording ships in the page, and the canonical-host 301 plus
 #      the JSON 404/405 conventions cover the new paths (§10.2, §10.1).
 # ---------------------------------------------------------------------------
-code="$(http GET "http://127.0.0.1:$PORT_A/manifest.json")"
+code="$(http GET "${URL_A}/manifest.json")"
 check "GET /manifest.json -> 200 (§12.1)" "200" "$code"
-curl -sS -o /dev/null -D "$WORK/hdr_manifest" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/manifest.json"
+curl -sS -o /dev/null -D "$WORK/hdr_manifest" -H 'Host: offgrid.local:8080' "${URL_A}/manifest.json"
 if tr -d '\r' < "$WORK/hdr_manifest" | grep -qi '^Content-Type: application/manifest+json'; then CT=ok; else CT=bad; fi
 check "manifest Content-Type is application/manifest+json" "ok" "$CT"
 if tr -d '\r' < "$WORK/hdr_manifest" | grep -qi '^Cache-Control: no-cache'; then CC=ok; else CC=bad; fi
@@ -930,10 +985,10 @@ check "manifest members: name/short_name/relative start_url+scope/standalone/192
 ICON_SPECS="icon-192.png:192 icon-512.png:512 icon-180.png:180"
 for spec in $ICON_SPECS; do
     ICON_FILE="${spec%%:*}"; ICON_SIZE="${spec##*:}"
-    code="$(http GET "http://127.0.0.1:$PORT_A/icons/$ICON_FILE")"
+    code="$(http GET "${URL_A}/icons/$ICON_FILE")"
     check "GET /icons/$ICON_FILE -> 200" "200" "$code"
     cp "$WORK/last_body" "$WORK/icon_body"
-    curl -sS -o /dev/null -D "$WORK/hdr_icon" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/icons/$ICON_FILE"
+    curl -sS -o /dev/null -D "$WORK/hdr_icon" -H 'Host: offgrid.local:8080' "${URL_A}/icons/$ICON_FILE"
     if tr -d '\r' < "$WORK/hdr_icon" | grep -qi '^Content-Type: image/png'; then CT=ok; else CT=bad; fi
     check "icon $ICON_FILE Content-Type is image/png" "ok" "$CT"
     node -e '
@@ -948,15 +1003,15 @@ process.exit(w === want && h === want ? 0 : 1);
 ' "$WORK/icon_body" "$ICON_SIZE" || ICON_RC=$?
     check "icon $ICON_FILE is a PNG of exactly ${ICON_SIZE}x${ICON_SIZE} (magic + IHDR)" "0" "${ICON_RC:-0}"
 done
-code="$(http GET "http://127.0.0.1:$PORT_A/icons/icon-64.png")"
+code="$(http GET "${URL_A}/icons/icon-64.png")"
 check "GET /icons/icon-64.png (unknown icon) -> JSON 404" "404" "$code"
-code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST -H 'Content-Type: application/json' --data '{}' "http://127.0.0.1:$PORT_A/manifest.json")"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST -H 'Content-Type: application/json' --data '{}' "${URL_A}/manifest.json")"
 check "POST /manifest.json -> 405 (wrong method, §10.1)" "405" "$code"
 
 # The portal HTML must carry the manifest link, theme-color and the iOS
 # metadata, the honesty note, and NO external URL beyond the canonical §12
 # origin reference the §13.4 banner already displays.
-code="$(http GET "http://127.0.0.1:$PORT_A/")"
+code="$(http GET "${URL_A}/")"
 cp "$WORK/last_body" "$WORK/index_pwa"
 for marker in '<link rel="manifest" href="/manifest.json">' '<meta name="theme-color"' \
     'apple-mobile-web-app-capable' 'apple-mobile-web-app-status-bar-style' \
@@ -972,17 +1027,17 @@ check "no external URL in the manifest" "" "$({ grep -oE 'https?://[^"<[:space:]
 # (grep -a treats them as text; zero matches is the pass).
 ICON_URLS=clean
 for ICON_FILE in icon-192.png icon-512.png icon-180.png; do
-    curl -sS -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/icons/$ICON_FILE" -o "$WORK/icon_urlcheck" 2>/dev/null
+    curl -sS -H 'Host: offgrid.local:8080' "${URL_A}/icons/$ICON_FILE" -o "$WORK/icon_urlcheck" 2>/dev/null
     if LC_ALL=C grep -qa 'http' "$WORK/icon_urlcheck"; then ICON_URLS=dirty; fi
 done
 check "no URL fragment in any served icon (zero external assets)" "clean" "$ICON_URLS"
 
 # Canonical-host middleware covers the new paths (§10.2).
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_m301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/manifest.json")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_m301" -w '%{http_code}' "${URL_A}/manifest.json")"
 check "raw-IP GET /manifest.json redirects with 301" "301" "$code"
 if tr -d '\r' < "$WORK/hdr_m301" | grep -qi '^Location: http://offgrid\.local:8080/manifest\.json$'; then LOC=canonical; else LOC=missing; fi
 check "manifest 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
-code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/icons/icon-192.png")"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "${URL_A}/icons/icon-192.png")"
 check "raw-IP GET /icons/icon-192.png redirects with 301" "301" "$code"
 
 # ---------------------------------------------------------------------------
@@ -995,9 +1050,9 @@ check "raw-IP GET /icons/icon-192.png redirects with 301" "301" "$code"
 #      canonical origin, and the §10.2 canonical-host redirect plus the
 #      §10.1 404/405 conventions cover the new paths.
 # ---------------------------------------------------------------------------
-code="$(http GET "http://127.0.0.1:$PORT_A/guide")"
+code="$(http GET "${URL_A}/guide")"
 check "GET /guide -> 200 (issue #23 end-user guide)" "200" "$code"
-curl -sS -o /dev/null -D "$WORK/hdr_guide" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A/guide"
+curl -sS -o /dev/null -D "$WORK/hdr_guide" -H 'Host: offgrid.local:8080' "${URL_A}/guide"
 if tr -d '\r' < "$WORK/hdr_guide" | grep -qi '^Content-Type: text/html; charset=utf-8'; then CT=ok; else CT=bad; fi
 check "guide Content-Type is text/html; charset=utf-8" "ok" "$CT"
 if tr -d '\r' < "$WORK/hdr_guide" | grep -qi '^Cache-Control: no-cache'; then CC=ok; else CC=bad; fi
@@ -1013,7 +1068,7 @@ GUIDE_STEPS="$(grep -c 'class="step"' "$WORK/guide_body" || true)"
 check "guide HTML carries the 10 numbered steps" "10" "$GUIDE_STEPS"
 
 # The print layout ships in the guide stylesheet (one-sheet core flow).
-code="$(http GET "http://127.0.0.1:$PORT_A/css/guide.css")"
+code="$(http GET "${URL_A}/css/guide.css")"
 check "GET /css/guide.css -> 200" "200" "$code"
 cp "$WORK/last_body" "$WORK/guide_css"
 for marker in "@page" "@media print" "column-count: 2"; do
@@ -1026,17 +1081,17 @@ GUIDE_IMGS="$(grep -oE 'src="/img/guide/[^"]+"' "$WORK/guide_body" | sed -E 's/s
 GUIDE_IMG_COUNT="$(printf '%s' "$GUIDE_IMGS" | grep -c . || true)"
 check "guide references at least 4 screenshots" "ok" "$([ "$GUIDE_IMG_COUNT" -ge 4 ] 2>/dev/null && echo ok || echo bad)"
 for img in $GUIDE_IMGS; do
-    code="$(http GET "http://127.0.0.1:$PORT_A$img")"
+    code="$(http GET "${URL_A}${img}")"
     check "GET $img -> 200" "200" "$code"
-    curl -sS -o /dev/null -D "$WORK/hdr_img" -H 'Host: offgrid.local:8080' "http://127.0.0.1:$PORT_A$img"
+    curl -sS -o /dev/null -D "$WORK/hdr_img" -H 'Host: offgrid.local:8080' "${URL_A}${img}"
     if tr -d '\r' < "$WORK/hdr_img" | grep -qi '^Content-Type: image/png'; then CT=ok; else CT=bad; fi
     check "$img Content-Type is image/png" "ok" "$CT"
 done
-code="$(http GET "http://127.0.0.1:$PORT_A/img/guide/nope.png")"
+code="$(http GET "${URL_A}/img/guide/nope.png")"
 check "GET /img/guide/nope.png (unknown image) -> JSON 404" "404" "$code"
 
 # The portal footer links the guide (labeled "Guide"); nothing else changed.
-code="$(http GET "http://127.0.0.1:$PORT_A/")"
+code="$(http GET "${URL_A}/")"
 cp "$WORK/last_body" "$WORK/index_guide"
 if grep -qF '<footer class="portal-footer"><a href="/guide">Guide</a></footer>' "$WORK/index_guide"; then FOOTER=yes; else FOOTER=no; fi
 check "portal footer links /guide labeled \"Guide\"" "yes" "$FOOTER"
@@ -1045,13 +1100,13 @@ GUIDE_EXTERNALS="$({ grep -oE 'https?://[^"<[:space:]]+' "$WORK/guide_body" || t
 check "no external URL in the guide HTML beyond the canonical origin" "" "$GUIDE_EXTERNALS"
 
 # §10.1 wrong method and §10.2 canonical-host redirect cover the new paths.
-code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "http://127.0.0.1:$PORT_A/guide")"
+code="$(curl -sS -o /dev/null -w '%{http_code}' -H 'Host: offgrid.local:8080' -X POST "${URL_A}/guide")"
 check "POST /guide rejected with 405 (§10.1 wrong method)" "405" "$code"
-code="$(curl -sS -o /dev/null -D "$WORK/hdr_g301" -w '%{http_code}' "http://127.0.0.1:$PORT_A/guide")"
+code="$(curl -sS -o /dev/null -D "$WORK/hdr_g301" -w '%{http_code}' "${URL_A}/guide")"
 check "raw-IP GET /guide redirects with 301" "301" "$code"
 if tr -d '\r' < "$WORK/hdr_g301" | grep -qi '^Location: http://offgrid\.local:8080/guide$'; then LOC=canonical; else LOC=missing; fi
 check "guide 301 Location preserves the path on the canonical origin" "canonical" "$LOC"
-code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT_A/img/guide/register.png")"
+code="$(curl -sS -o /dev/null -w '%{http_code}' "${URL_A}/img/guide/register.png")"
 check "raw-IP GET /img/guide/register.png redirects with 301" "301" "$code"
 
 # ---------------------------------------------------------------------------
@@ -1086,27 +1141,27 @@ node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" bodies "$WORK/chunk_fixture.json" "$WOR
 # Alice pushes ALL chunk envelopes to node A in one sync (§10.4: their ids
 # ride in known_ids — plus the §3 fixture envelope's id, still servable on
 # node A — so nothing is pulled back).
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/alice_push.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/alice_push.json")"
 check "alice pushes the 1 KiB message as $CHUNK_PARTS chunk envelopes to node A -> 200" "200" "$code"
 check "chunk push response pulls nothing back (own ids in known_ids)" "0" "$(json_count_envelopes)"
 
 # The mule pulls everything it does not know from node A and carries the
 # SERVED bytes to node B (the §3 fixture envelope is already known to it).
 make_sync_body "$WORK/sync_mule_chunk_a.json" "[\"$ENV_ID\"]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_A/api/v1/sync" "$WORK/sync_mule_chunk_a.json")"
+code="$(http POST "${URL_A}/api/v1/sync" "$WORK/sync_mule_chunk_a.json")"
 check "mule syncs with node A for the chunk envelopes -> 200" "200" "$code"
 check "mule pulls exactly $CHUNK_PARTS chunk envelopes from node A" "$CHUNK_PARTS" "$(json_count_envelopes)"
 cp "$WORK/last_body" "$WORK/mule_chunk_pull.json"
 node "$SCRIPT_DIR/helpers/chunk_e2e.mjs" carry "$WORK/mule_chunk_pull.json" "$WORK/mule_chunk_push.json" >"$WORK/chunk_carry.log" 2>&1
 check "mule carries exactly the envelopes it pulled" "$CHUNK_PARTS" "$(sed -n 's/^carried=//p' "$WORK/chunk_carry.log")"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/mule_chunk_push.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/mule_chunk_push.json")"
 check "mule drops the chunk envelopes at node B -> 200 (nothing a node would reject)" "200" "$code"
 
 # Bob pulls from node B — known_ids exclude the §3 fixture envelope; the
 # expired §6b verbatim envelope is TTL-filtered — so exactly the chunks
 # arrive, in the node's own (id-tiebreak) order.
 make_sync_body "$WORK/sync_bob_chunk.json" "[\"$ENV_ID\"]" "[]"
-code="$(http POST "http://127.0.0.1:$PORT_B/api/v1/sync" "$WORK/sync_bob_chunk.json")"
+code="$(http POST "${URL_B}/api/v1/sync" "$WORK/sync_bob_chunk.json")"
 check "bob pulls from node B -> 200" "200" "$code"
 check "bob pulls exactly the $CHUNK_PARTS chunk envelopes" "$CHUNK_PARTS" "$(json_count_envelopes)"
 cp "$WORK/last_body" "$WORK/bob_chunk_pull.json"
