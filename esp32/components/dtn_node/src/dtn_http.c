@@ -140,7 +140,8 @@ static esp_err_t serve_asset(httpd_req_t *req, const dtn_web_asset *a)
     httpd_resp_set_type(req, a->ctype);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     set_common_headers(req);
-    return httpd_resp_send(req, (const char *)a->data, (int)a->len);
+    return httpd_resp_send(req, (const char *)a->start,
+                           (int)dtn_web_asset_len(a));
 }
 
 static const dtn_web_asset *find_asset(const char *path)
