@@ -302,7 +302,7 @@ matters):
 17. The audit-deliverables docs structure test (issue #14) ends with:
 
     ```
-    PASS: <n> assertions on the security-audit and known-limitations docs and the README wiring
+    PASS: <n> assertions on the security-audit and known-limitations docs, the README wiring and the node-network spec
     ```
 
     It is pure file-structure checking (no daemon, no network): the
@@ -313,8 +313,10 @@ matters):
     and covers every accepted residual section with its source citations;
     the README links both docs, records the audit as complete and carries
     the corrected hint-linkability claim with the pre-audit overclaim gone;
-    and the suite wiring itself (Makefile `test`, the §4 step list with
-    consistent numbering) is pinned.
+    `docs/node-network.md` exists with its 1.0.0/2026-10-07 header, its
+    user-plane cross-reference, its RFC 9171 profile base and its
+    self-certifying EID scheme (issue #33 P3.0); and the suite wiring itself
+    (Makefile `test`, the §4 step list with consistent numbering) is pinned.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 

@@ -150,5 +150,15 @@ ok(/# \d+\. Audit-deliverables docs structure \(issue #14\)/.test(block),
 ok(build.includes("PASS: <n> assertions on the security-audit and known-limitations docs"),
    "§4 documents this suite's expected PASS line");
 
+console.log("== 5. node-network.md exists (issue #33 P3.0) ==");
+const nodeNetPath = path.join(docsDir, "node-network.md");
+ok(fs.existsSync(nodeNetPath), "docs/node-network.md exists");
+const nodeNet = fs.readFileSync(nodeNetPath, "utf8");
+ok(nodeNet.includes("| **Version** | 1.0.0"), "node-network header is version 1.0.0");
+ok(nodeNet.includes("| **Date** | 2026-10-07"), "node-network header is dated 2026-10-07");
+ok(nodeNet.includes("docs/protocol.md"), "node-network references the user-plane spec");
+ok(nodeNet.includes("RFC 9171"), "node-network names its BPv7 profile base (RFC 9171)");
+ok(nodeNet.includes("dtn://og."), "node-network pins the self-certifying EID scheme");
+
 console.log("== summary ==");
-console.log(`PASS: ${passed} assertions on the security-audit and known-limitations docs and the README wiring`);
+console.log(`PASS: ${passed} assertions on the security-audit and known-limitations docs, the README wiring and the node-network spec`);
