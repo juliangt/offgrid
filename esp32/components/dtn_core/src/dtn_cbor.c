@@ -258,6 +258,13 @@ int dtn_cbor_skip(dtn_cbor *c)
     }
 }
 
+int dtn_cbor_peek(const dtn_cbor *c, uint8_t *head)
+{
+    if (c->off >= c->len) return DTN_CBOR_ERR_TRUNCATED;
+    *head = c->buf[c->off];
+    return DTN_CBOR_OK;
+}
+
 int dtn_cbor_done(const dtn_cbor *c)
 {
     return c->off == c->len;

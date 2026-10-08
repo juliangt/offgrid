@@ -127,6 +127,17 @@ func (p *PinStore) PeerCount() int {
 	return len(p.peers)
 }
 
+// ResetPeerPins clears every TOFU peer pin (the P3.6 L3
+// factory_reset_node_plane executor's pin leg). The PINNED ANCHORS survive
+// on purpose: they are the §2.6 provisioning ceremony's trust root, not
+// learned state — a factory reset forgets what the node LEARNED (first
+// contacts), never what it was provisioned with (reprovisioning is a
+// re-install, never a runtime command).
+func (p *PinStore) ResetPeerPins() {
+	defer p.lock()()
+	p.peers = make(map[string][KeyLen]byte)
+}
+
 // ResolvePeer is the §6.1 session gate: a peer presenting nodeKey for eid
 // passes when the key matches its cached role certificate (the cert is the
 // authority), else the TOFU pin, else it becomes the first-contact pin.

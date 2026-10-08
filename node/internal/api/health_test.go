@@ -22,8 +22,9 @@ import (
 )
 
 // healthMembers is the exact §10.7 top-level member set of the health
-// document (the thirteen of #31 plus the five additive issue-#36 members);
-// countersMembers and rejectionMembers the nested sets.
+// document (the thirteen of #31, the five additive issue-#36 members and the
+// additive issue-#33 P3.6 node_plane member); countersMembers and
+// rejectionMembers the nested sets.
 var (
 	healthMembers = []string{
 		"status", "api", "build", "envelope_versions", "schema_version",
@@ -32,6 +33,9 @@ var (
 		"counters",
 		// Issue #36 (additive per §15.4): the field status extensions.
 		"battery", "system", "software", "store", "projections",
+		// Issue #33 P3.6 (additive per §15.4; docs/node-network.md §8): the
+		// node-plane aggregates — null when the plane is off (N/A convention).
+		"node_plane",
 	}
 	countersMembers = []string{
 		"pushes_accepted", "pushes_rejected", "pushes_rejected_by_class",

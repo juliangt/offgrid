@@ -58,4 +58,10 @@ int dtn_cbor_skip(dtn_cbor *c);                 /* skip any value (depth-bounded
  * returns 1). */
 int dtn_cbor_done(const dtn_cbor *c);
 
+/* dtn_cbor_peek — the next head byte WITHOUT consuming it (0 ok / nonzero
+ * at end of input). Callers dispatch on the major type (*head >> 5) before
+ * the typed read; the cursor is untouched. The mgmt command object's args
+ * map is the consumer (P3.6) — the Go reader's Peek is its twin. */
+int dtn_cbor_peek(const dtn_cbor *c, uint8_t *head);
+
 #endif /* DTN_CBOR_H */

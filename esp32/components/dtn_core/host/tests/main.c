@@ -19,6 +19,7 @@ void test_bundle(void);
 void test_link(void);    /* P3.3 node-plane link layer (issue #33) */
 void test_mac(void);     /* P3.3 node-plane MAC v1 (issue #33) */
 void test_forward(void); /* P3.5 forwarding engine (issue #33) */
+void test_mgmt(void);    /* P3.6 management plane (issue #33) */
 
 int main(void)
 {
@@ -37,6 +38,8 @@ int main(void)
     test_link();
     test_mac();
     test_forward();
+    printf("dtn_core host tests — issue #33 P3.6 (management plane)\n");
+    test_mgmt();
     return t_summary();
 }
 

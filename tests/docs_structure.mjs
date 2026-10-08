@@ -154,7 +154,7 @@ console.log("== 5. node-network.md exists (issue #33 P3.0) ==");
 const nodeNetPath = path.join(docsDir, "node-network.md");
 ok(fs.existsSync(nodeNetPath), "docs/node-network.md exists");
 const nodeNet = fs.readFileSync(nodeNetPath, "utf8");
-ok(nodeNet.includes("| **Version** | 1.5.0"), "node-network header is version 1.5.0 (1.0.0 = P3.0, 1.1.0 adds the P3.1 provisioning ceremony, 1.2.0 adds the P3.2 profile codec, 1.3.0 adds the P3.3 link layer/MAC/serial CL, 1.4.0 adds the P3.4 TCPCLv4 Wi-Fi plane with the pinned RFC 9174 subset in §6.3, 1.5.0 adds the P3.5 forwarding engine: the §7.1 handshake-as-bundles note, the §7.5 admission/eviction pin, the shared forward vectors and the node_plane E2E)");
+ok(nodeNet.includes("| **Version** | 1.6.0"), "node-network header is version 1.6.0 (1.0.0 = P3.0, 1.1.0 adds the P3.1 provisioning ceremony, 1.2.0 adds the P3.2 profile codec, 1.3.0 adds the P3.3 link layer/MAC/serial CL, 1.4.0 adds the P3.4 TCPCLv4 Wi-Fi plane with the pinned RFC 9174 subset in §6.3, 1.5.0 adds the P3.5 forwarding engine: the §7.1 handshake-as-bundles note, the §7.5 admission/eviction pin, the shared forward vectors and the node_plane E2E, 1.6.0 adds the P3.6 management plane: the frozen §8.1 command object + v1 command table, the §8.2 enforcement pipeline with the pinned counter set, the §8.3 reply object, the §8.5 sink-consumption/propagation contract, the shared mgmt vectors and the /status node_plane member)");
 ok(nodeNet.includes("| **Date** | 2026-10-07"), "node-network header is dated 2026-10-07");
 ok(nodeNet.includes("docs/protocol.md"), "node-network references the user-plane spec");
 ok(nodeNet.includes("RFC 9171"), "node-network names its BPv7 profile base (RFC 9171)");

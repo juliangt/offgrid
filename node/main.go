@@ -206,6 +206,12 @@ func main() {
 	tcpclStoreCap := flag.Int("tcpcl-store-cap", forward.DefaultCap, "bundle store cap (§7.5: Pi default 5000)")
 	tcpclDialInterval := flag.Int("tcpcl-dial-interval", 30, "opportunistic dial interval in seconds (±25% jitter; 0 → 30)")
 	tcpclDebug := flag.Bool("tcpcl-debug", false, "log node-plane counter snapshots every minute (RAM-only bookkeeping)")
+	// P3.6 management plane (issue #33, docs/node-network.md §8): both files
+	// come from the §2.6 provisioning kit. Without the pinned anchor the
+	// management plane is OFF (no command or cert could ever verify); without
+	// the own cert the node enforces but carries no authority of its own.
+	tcpclAnchorPub := flag.String("tcpcl-anchor-pub", "", "path to anchor.pub (the §2.6 pinned trust root); the management plane is OFF without it")
+	tcpclNodeCert := flag.String("tcpcl-node-cert", "", "path to node_cert.cbor (the §2.2 provisioned role cert; optional)")
 
 	flag.Parse()
 
@@ -266,27 +272,18 @@ func main() {
 		System:   sysres.DefaultReaders(*dbPath),
 	})
 
-	// The embedded web assets (index.html + css/js) are validated and loaded
-	// here as well: a broken embed must fail startup, not first request.
-	handler, err := api.NewWithCounters(store, counters, build, webFS, api.WithStatusEngine(statusEngine))
-	if err != nil {
-		log.Fatalf("cannot load embedded web assets: %v", err)
-	}
-
 	// Shutdown context: cancelled by SIGINT/SIGTERM; stop() restores the
 	// default signal behavior afterwards so a second signal still kills us.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
-	defer cancelCleanup()
-	cleanup.Start(cleanupCtx, recordingJanitor{store: store, counters: counters}, cleanupInterval)
-
-	// The node plane (P3.4 wiring, P3.5 forwarding core): started ONLY when
-	// -tcpcl is set; its lifetime rides the same signal context as the HTTP
-	// server, and stop() runs the §6.1 graceful SESS_TERM per live session
-	// and closes the bundle store before exit. The bundle store defaults to
-	// a sibling of the envelope database (its own §7.5 namespace).
+	// The node plane (P3.4 wiring, P3.5 forwarding core, P3.6 management
+	// plane): started ONLY when -tcpcl is set, BEFORE the HTTP handler so
+	// the diagnostics surface can read its snapshot (§10.7 node_plane).
+	// Its lifetime rides the same signal context, and stop() runs the §6.1
+	// graceful SESS_TERM per live session and closes the bundle store before
+	// exit. The bundle store defaults to a sibling of the envelope database
+	// (its own §7.5 namespace).
 	tcpclStorePath := *tcpclStore
 	if tcpclStorePath == "" {
 		tcpclStorePath = deriveStorePath(*dbPath)
@@ -294,10 +291,27 @@ func main() {
 	nodePlane, err := startNodePlane(ctx, buildTCPCLOptions(
 		*tcpclEnabled, *tcpclAddr, *tcpclPeers, *tcpclNodeSeed, *tcpclPins,
 		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive,
-		tcpclStorePath, *tcpclStoreCap, *tcpclDialInterval, *tcpclDebug), log.Default())
+		tcpclStorePath, *tcpclStoreCap, *tcpclDialInterval, *tcpclDebug,
+		*tcpclNodeCert, *tcpclAnchorPub), log.Default())
 	if err != nil {
 		log.Fatalf("cannot start the node plane: %v", err)
 	}
+	var planeStatus api.NodePlaneSource
+	if nodePlane != nil {
+		planeStatus = nodePlane // nil members inside render the §10.7 N/A way
+	}
+
+	// The embedded web assets (index.html + css/js) are validated and loaded
+	// here as well: a broken embed must fail startup, not first request.
+	handler, err := api.NewWithCounters(store, counters, build, webFS,
+		api.WithStatusEngine(statusEngine), api.WithNodePlane(planeStatus))
+	if err != nil {
+		log.Fatalf("cannot load embedded web assets: %v", err)
+	}
+
+	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
+	defer cancelCleanup()
+	cleanup.Start(cleanupCtx, recordingJanitor{store: store, counters: counters}, cleanupInterval)
 
 	statusCtx, cancelStatus := context.WithCancel(context.Background())
 	defer cancelStatus()

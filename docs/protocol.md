@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document source** | `docs/DEVELOPMENT_PLAN.md` (§1.1, §1.2, §1.3, §1.5, §1.7, §3) and `docs/MASTER_DEVELOPMENT_PROMPT.md` |
-| **Version** | 1.13.0 |
+| **Version** | 1.14.0 |
 | **Date** | 2026-10-07 |
 | **Status** | **Normative — BINDING** for all Phase 1 implementations (Modules B and C) |
 | **Normative status** | **Open questions: none.** This document is self-contained: an implementer of the node daemon (Module B) or the SPA/crypto engine (Module C) needs no further decisions to produce a conforming implementation. |
@@ -1340,6 +1340,8 @@ Phase 3's node-to-node plane (issue #33: LoRa/TCPCL bundles between nodes, link 
 - **Evolution:** future node-plane changes land in `docs/node-network.md` under its own versioning; this document only gains additive annexes of this kind. A node-plane change that would require touching a frozen section here is a breaking bump under §15.2 and is FORBIDDEN without a new spec phase.
 
 ## Changelog
+
+- **1.14.0 (2026-10-07, issue #33 P3.6 — node-plane management, additive diagnostics member):** the node-plane management plane landed in its normative home (`docs/node-network.md` v1.6.0, §8 — command object, enforcement pipeline, telemetry replies, sink consumption; this annex boundary of §17 is unchanged), and the only touch on THIS document is additive under §15.4: `GET /api/v1/health` (§10.7) gains one fixed top-level member, `node_plane` — null when the daemon runs with the node plane off (the binding N/A convention, exactly like the issue-#36 members), and otherwise aggregates only: the provisioned role/level from the node's role certificate, the §8.2 management counters (`commands_accepted`, the `dropped_*` classes, reply counters), the §2.5 cert merge counters, the node-plane bundle store fill/cap and the peer/session counts. No EIDs, no fingerprints, no addresses, no timestamps of individuals — the same §13 aggregates-only constraint the §10.7 privacy rules already bind, reviewed and asserted by tests (`node/internal/api/nodeplane_test.go`). No envelope field, limit, canonical form, existing endpoint behavior or conformance requirement changed; §3–§15 content is untouched.
 
 - **1.13.0 (2026-10-07, issue #33 P3.0 — node-plane annex):** appended §17 "Annex: node plane (normative in docs/node-network.md)": the Phase 3 node-to-node plane (issue #33) is specified in its own normative module `docs/node-network.md` v1.0.0, this document's user-plane formats stay byte-frozen, the node plane consumes only the frozen surfaces (the §14.2 envelope verbatim as mail-bundle payload, the §14.3 window grammar mirrored node-plane-side, §10.5/§15.3 admission untouched), and the two owner-approved recorded-decision amendments named by issue #33 (rfc4838-alignment §8 — verdict untouched for the user plane; offline-maintenance §2.8 — no-LoRa-capsule relaxed to budgeted) are recorded in the node-plane document, not here. No envelope field, limit, canonical form, endpoint behavior or conformance requirement changed; the header version and this entry are the only edits to existing content.
 

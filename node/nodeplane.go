@@ -27,7 +27,9 @@ import (
 	"sync"
 	"time"
 
+	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/forward"
+	"offgrid/dtn-node/internal/mgmt"
 	"offgrid/dtn-node/internal/nodeid"
 	"offgrid/dtn-node/internal/tcpcl"
 )
@@ -60,6 +62,14 @@ type tcpclOptions struct {
 	storeCap        int    // 0 → forward.DefaultCap
 	dialIntervalSec int    // 0 → 30 s; opportunistic dial cadence with jitter
 	debug           bool   // periodic counter/log snapshots
+
+	// P3.6 management plane (docs/node-network.md §8): the §2.6 ceremony
+	// files. Both optional: without the pinned anchor there is NO management
+	// plane (no cert can ever verify — fail-closed by construction); with
+	// the anchor but no own cert the node still enforces commands (it can
+	// verify managers) but carries no authority of its own.
+	nodeCertPath  string // node_cert.cbor (the §2.2 role cert)
+	anchorPubPath string // anchor.pub (the §2.6 pinned trust root)
 }
 
 // nodePlane owns the running TCPCL endpoints and the forwarding engine of
@@ -76,6 +86,19 @@ type nodePlane struct {
 	engine *forward.Engine
 	sink   *forward.Sink
 	pins   *nodeid.PinStore
+
+	// P3.6 management plane (§8): the §2.5 cert cache, the pinned anchor,
+	// the enforcement pipeline and its policy store. mgmt is nil when no
+	// anchor was provisioned — the honest "no management plane" state.
+	cache     *nodeid.Cache
+	anchorPub []byte
+	mgmt      *mgmt.Enforcer
+
+	// wake bookkeeping for the L1 trigger_sync executor: one channel per
+	// live dial loop; SyncNow sends a non-blocking token to each.
+	wakeMu   sync.Mutex
+	wakeChs  map[chan struct{}]struct{}
+	baseDial time.Duration
 }
 
 // deriveStorePath names the bundle-store file for a given envelope-store
@@ -207,14 +230,71 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 		return nil, fmt.Errorf("open bundle store: %w", err)
 	}
 	engine := forward.NewEngine(store, eid, lg)
+
+	// The P3.6 management plane (docs/node-network.md §8): the §2.5 cert
+	// cache behind the PINNED ANCHOR, the §8.2 enforcement pipeline, and the
+	// §8.1 executors wired to the store, the dial loops and the policy.
+	// Fail-closed by construction: no anchor → no enforcer → the sink keeps
+	// the exact P3.5 behavior and every command would be unverifiable anyway.
+	cache := nodeid.NewCache()
+	var anchorPub []byte
+	var enforcer *mgmt.Enforcer
+	if opts.anchorPubPath != "" {
+		anchorPub, err = loadAnchorPub(opts.anchorPubPath)
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("load anchor public key: %w", err)
+		}
+		enforcer = mgmt.NewEnforcer(cache, anchorPub, eid, kp)
+		if opts.nodeCertPath != "" {
+			seedOwnCert(cache, anchorPub, opts.nodeCertPath, lg)
+		} else {
+			lg.Printf("node-plane: no -tcpcl-node-cert provisioned — this node enforces commands but carries NO role certificate of its own (mail works, management authority does not; docs/node-network.md §2.6)")
+		}
+	} else {
+		lg.Printf("node-plane: no -tcpcl-anchor-pub pinned — the management plane is OFF (no command or certificate could ever verify; docs/node-network.md §8)")
+	}
 	sink := &forward.Sink{Store: store, Engine: engine, LocalEID: eid}
 
 	np := &nodePlane{
-		pins:     pins,
-		pinsPath: opts.pinsPath,
-		store:    store,
-		engine:   engine,
-		sink:     sink,
+		pins:      pins,
+		pinsPath:  opts.pinsPath,
+		store:     store,
+		engine:    engine,
+		sink:      sink,
+		cache:     cache,
+		anchorPub: anchorPub,
+		mgmt:      enforcer,
+		wakeChs:   make(map[chan struct{}]struct{}),
+	}
+	if enforcer != nil {
+		enforcer.Inject = func(pdu []byte) error { return store.Accept(pdu) }
+		sink.Mgmt = enforcer
+		enforcer.Exec = &mgmt.Executors{
+			Status:          planeStatusData(store, pins, enforcer),
+			Janitor:         func() (int64, error) { return store.Janitor() },
+			SyncNow:         np.wakeDialLoops,
+			SetStoreCap:     func(bundles uint64) error { return store.SetCap(int(bundles)) },
+			SetBudgets:      func(mib uint64) error { enforcer.Policy.SetContactBudgetMiB(mib); return nil },
+			SetDialInterval: func(sec uint64) error { enforcer.Policy.SetDialIntervalSec(sec); return nil },
+			SetFederation:   func(on bool) error { enforcer.Policy.SetFederation(on); return nil },
+			FactoryReset: func() error {
+				// FACTORY RESET, node plane only (docs/node-network.md §8.1):
+				// bundle store + learned TOFU peer pins. NEVER the user-plane
+				// mail (a different database file, never opened here), never
+				// the pinned anchor or the node identity (provisioning
+				// ceremony state — a re-install, not a runtime command).
+				lg.Printf("node-plane: FACTORY RESET commanded (L3): wiping the bundle store and learned peer pins " +
+					"(user-plane mail untouched; the pinned anchor and node identity survive)")
+				deleted, derr := store.DeleteAll()
+				if derr != nil {
+					return derr
+				}
+				pins.ResetPeerPins()
+				lg.Printf("node-plane: factory reset deleted %d bundle(s)", deleted)
+				return nil
+			},
+		}
 	}
 	np.cfg = tcpcl.Config{
 		EID:           eid,
@@ -324,24 +404,153 @@ func logCounters(lg *log.Logger, store *forward.Store, engine *forward.Engine) {
 	lg.Printf("node-plane: sync %+v", engine.CountersSnapshot())
 }
 
+// loadAnchorPub reads a 32-byte hex anchor public key (the §2.6 anchor.pub
+// file format).
+func loadAnchorPub(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	hx := strings.TrimSpace(string(raw))
+	if len(hx) != 2*nodeid.KeyLen {
+		return nil, fmt.Errorf("%s: want %d hex chars (a %d-byte key), got %d chars", path, 2*nodeid.KeyLen, nodeid.KeyLen, len(hx))
+	}
+	pub, err := hex.DecodeString(hx)
+	if err != nil {
+		return nil, fmt.Errorf("%s: not hex: %w", path, err)
+	}
+	return pub, nil
+}
+
+// seedOwnCert loads the §2.6 provisioned role certificate into the §2.5
+// cache (the "cert provisioned at boot" path — issuance itself stays an
+// offline anchor ceremony; the file was verified by capsuletool at
+// provision time and is verified again here against the pinned anchor).
+// Any failure is LOUD and leaves the node uncertified: mail works,
+// management authority does not (§2.6's absent-kit stance, daemon side).
+func seedOwnCert(cache *nodeid.Cache, anchorPub []byte, path string, lg *log.Logger) {
+	cose, err := os.ReadFile(path)
+	if err != nil {
+		lg.Printf("node-plane: WARNING: cannot read the provisioned role cert %s: %v (booting uncertified)", path, err)
+		return
+	}
+	st := cache.Merge(cose, anchorPub, time.Now().Unix())
+	if st.Outcome != nodeid.OutcomeReplaced {
+		lg.Printf("node-plane: WARNING: the provisioned role cert %s did not install (outcome %s) — booting uncertified", path, st.Outcome)
+		return
+	}
+	cert, state := cache.Effective(cacheEIDOf(cose, anchorPub), time.Now().Unix())
+	if cert == nil || state != nodeid.StateAuthority {
+		lg.Printf("node-plane: WARNING: the provisioned role cert %s is not effective (state %s)", path, state)
+		return
+	}
+	lg.Printf("node-plane: role certificate provisioned: %s (level %d, seq %d)", cert.EID, cert.Level, cert.Seq)
+}
+
+// cacheEIDOf re-derives the EID of a just-merged cert (the merge outcome
+// carries no EID; the node's own EID is the only lookup this needs and it is
+// already known to the caller — this helper keeps seedOwnCert honest by
+// deriving, never assuming).
+func cacheEIDOf(cose, anchorPub []byte) string {
+	c, err := nodeid.VerifyCert(cose, anchorPub, time.Now().Unix())
+	if err != nil {
+		return ""
+	}
+	return c.EID
+}
+
+// planeStatusData is the get_status executor's data source: aggregates only
+// (§10.7): this node's provisioned role/level, the bundle store fill/cap and
+// the peer count. No EIDs, no fingerprints, no per-user anything.
+func planeStatusData(store *forward.Store, pins *nodeid.PinStore, enforcer *mgmt.Enforcer) func() map[string]mgmt.Arg {
+	return func() map[string]mgmt.Arg {
+		data := map[string]mgmt.Arg{}
+		if cert, state := enforcer.OwnCertState(); cert != nil && state == nodeid.StateAuthority && len(cert.Roles) > 0 {
+			data["role"] = mgmt.Arg{Kind: mgmt.ArgTstr, Str: cert.Roles[0]}
+			data["level"] = mgmt.Arg{Kind: mgmt.ArgUint, Uint: cert.Level}
+		} else {
+			data["role"] = mgmt.Arg{Kind: mgmt.ArgTstr, Str: "uncertified"}
+			data["level"] = mgmt.Arg{Kind: mgmt.ArgUint, Uint: 0}
+		}
+		if n, err := store.Count(); err == nil {
+			data["store_fill"] = mgmt.Arg{Kind: mgmt.ArgUint, Uint: uint64(n)}
+		}
+		data["store_cap"] = mgmt.Arg{Kind: mgmt.ArgUint, Uint: uint64(store.Cap())}
+		data["peer_count"] = mgmt.Arg{Kind: mgmt.ArgUint, Uint: uint64(pins.PeerCount())}
+		return data
+	}
+}
+
+// wakeDialLoops is the L1 trigger_sync executor: one non-blocking token per
+// live dial loop (a full inbox is dropped — the next interval dials anyway).
+func (np *nodePlane) wakeDialLoops() {
+	np.wakeMu.Lock()
+	defer np.wakeMu.Unlock()
+	for ch := range np.wakeChs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// registerWake adds this dial loop's wake channel (removed on exit).
+func (np *nodePlane) registerWake(ch chan struct{}) {
+	np.wakeMu.Lock()
+	np.wakeChs[ch] = struct{}{}
+	np.wakeMu.Unlock()
+}
+
+func (np *nodePlane) unregisterWake(ch chan struct{}) {
+	np.wakeMu.Lock()
+	delete(np.wakeChs, ch)
+	np.wakeMu.Unlock()
+}
+
+// dialIntervalOf computes this iteration's wait: the L2 policy value when
+// set (set_dial_interval), else the flag default — with the ±25 % jitter.
+func (np *nodePlane) dialIntervalOf(base time.Duration) time.Duration {
+	if np.mgmt != nil {
+		if sec := np.mgmt.Policy.DialIntervalSec(); sec > 0 {
+			base = time.Duration(sec) * time.Second
+		}
+	}
+	j := base + time.Duration(rand.Int63n(int64(base/2))) - base/4 //nolint:gosec // de-synchronization jitter, not security
+	if j < time.Second {
+		j = time.Second
+	}
+	return j
+}
+
 // dialLoop keeps one outbound contact cadence alive: dial, hold the
 // session for the §7.1 contact window, terminate (§6.1 graceful), then
 // wait the configured interval with ±25 % jitter (a fleet of nodes must
-// not sync in lockstep). Config.ExpectedPeer is deliberately NOT set: the
-// TOFU pin (first contact records, change fails loudly) is the v1 trust
-// anchor.
+// not sync in lockstep). The L1 trigger_sync command wakes the loop early
+// and the L2 set_dial_interval / set_budgets policies are re-read every
+// iteration (a new contact opens with the current policy). Config.
+// ExpectedPeer is deliberately NOT set: the TOFU pin (first contact
+// records, change fails loudly) is the v1 trust anchor.
 func (np *nodePlane) dialLoop(ctx context.Context, peer string, interval time.Duration, lg *log.Logger) {
 	defer np.wg.Done()
+	wake := make(chan struct{}, 1)
+	np.registerWake(wake)
+	defer np.unregisterWake(wake)
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		cfg := np.cfg
+		if np.mgmt != nil {
+			if mib := np.mgmt.Policy.ContactBudgetMiB(); mib > 0 {
+				cfg.ContactBudget = int64(mib) << 20 // applies from this contact on
+			}
+		}
 		dialCtx, cancel := context.WithTimeout(ctx, tcpcl.HandshakeTimeout)
-		sess, err := tcpcl.Dial(dialCtx, "tcp", peer, np.cfg)
+		sess, err := tcpcl.Dial(dialCtx, "tcp", peer, cfg)
 		cancel()
 		if err != nil {
 			lg.Printf("node-plane: dial %s failed (%v); retry in ~%s", peer, err, interval)
-			if !sleepJitter(ctx, interval) {
+			if !np.sleepDial(ctx, np.dialIntervalOf(interval), wake) {
 				return
 			}
 			continue
@@ -361,26 +570,24 @@ func (np *nodePlane) dialLoop(ctx context.Context, peer string, interval time.Du
 			// goodbye); the window elapsed — the next contact re-diffs.
 			_ = sess.Terminate(tcpcl.TermUnknown)
 		}
-		if !sleepJitter(ctx, interval) {
+		if !np.sleepDial(ctx, np.dialIntervalOf(interval), wake) {
 			return
 		}
 	}
 }
 
-// sleepJitter waits interval ± 25 % (jittered), interruptibly; false when
-// the context ended first.
-func sleepJitter(ctx context.Context, interval time.Duration) bool {
-	j := interval + time.Duration(rand.Int63n(int64(interval/2))) - interval/4 //nolint:gosec // de-synchronization jitter, not security
-	if j < time.Second {
-		j = time.Second
-	}
-	t := time.NewTimer(j)
+// sleepDial waits the interval, interruptibly by ctx or a trigger_sync
+// wake token; false when the context ended first.
+func (np *nodePlane) sleepDial(ctx context.Context, d time.Duration, wake chan struct{}) bool {
+	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
 		return false
 	case <-t.C:
 		return true
+	case <-wake:
+		return true // trigger_sync: dial again immediately
 	}
 }
 
@@ -421,9 +628,50 @@ func (np *nodePlane) addr() string {
 	return np.ln.Addr().String()
 }
 
+// NodePlaneSnapshot implements api.NodePlaneSource: one plain read of the
+// plane's operational state for the §10.7 diagnostics member. Aggregates
+// only (no EIDs, no fingerprints, no addresses — the reasoning lives in
+// internal/api/nodeplane.go). Safe on a nil plane and on a plane whose
+// management half is off (no pinned anchor): the caller renders null/0s.
+func (np *nodePlane) NodePlaneSnapshot() api.NodePlaneSnapshot {
+	snap := api.NodePlaneSnapshot{}
+	if np == nil {
+		return snap
+	}
+	if n, err := np.store.Count(); err == nil {
+		snap.StoreFill = int64(n)
+	}
+	snap.StoreCap = np.store.Cap()
+	snap.PeerCount = np.pins.PeerCount()
+	snap.ActiveSess = np.ln.ActiveSessions()
+	if np.mgmt != nil {
+		c := np.mgmt.CountersSnapshot()
+		snap.Mgmt = api.NodePlaneSnapshotMgmt{
+			Accepted:        c.Accepted,
+			DroppedShape:    c.DroppedShape,
+			DroppedSig:      c.DroppedSig,
+			DroppedTarget:   c.DroppedTarget,
+			DroppedUnknown:  c.DroppedUnknown,
+			DroppedByLevel:  c.DroppedByLevel,
+			DroppedSeq:      c.DroppedSeq,
+			DroppedExpired:  c.DroppedExpired,
+			RepliesSent:     c.RepliesSent,
+			RepliesReceived: c.RepliesReceived,
+			ExecErrors:      c.ExecErrors,
+		}
+		snap.CertStaleDropped, snap.CertConflicts = np.mgmt.CertCountersSnapshot()
+		if cert, state := np.mgmt.OwnCertState(); cert != nil && state == nodeid.StateAuthority && len(cert.Roles) > 0 {
+			snap.HasCert = true
+			snap.Role = cert.Roles[0]
+			snap.Level = cert.Level
+		}
+	}
+	return snap
+}
+
 // buildTCPCLOptions maps the flags (kept here so main stays readable).
 func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, budgetMiB, keepaliveSec int,
-	storePath string, storeCap, dialIntervalSec int, debug bool) tcpclOptions {
+	storePath string, storeCap, dialIntervalSec int, debug bool, nodeCert, anchorPub string) tcpclOptions {
 	var peerList []string
 	if peers != "" {
 		peerList = strings.Split(peers, ",")
@@ -441,5 +689,7 @@ func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, b
 		storeCap:        storeCap,
 		dialIntervalSec: dialIntervalSec,
 		debug:           debug,
+		nodeCertPath:    nodeCert,
+		anchorPubPath:   anchorPub,
 	}
 }

@@ -49,6 +49,17 @@ func NewCborReader(b []byte) *CborReader { return newCborReader(b) }
 // a value started or how many bytes remain).
 func (r *cborReader) Pos() int { return r.off }
 
+// Peek returns the next head byte WITHOUT consuming it (ok=false at end of
+// input). Callers dispatch on the major type (b>>5) before the typed read —
+// the mgmt command object's args map is the consumer (P3.6); the cursor is
+// untouched, so the typed read follows normally.
+func (r *cborReader) Peek() (byte, bool) {
+	if r.off >= len(r.buf) {
+		return 0, false
+	}
+	return r.buf[r.off], true
+}
+
 func (r *cborReader) errAt(format string, a ...any) error {
 	return fmt.Errorf("cbor at offset %d: %s", r.off, fmt.Sprintf(format, a...))
 }

@@ -82,10 +82,13 @@ func (c Class) String() string {
 //     node EID), group addresses other than og-mail, capsule chunks (§9.1),
 //     directory cards (§9.3), and the §7.1 sync summaries themselves.
 //
-// The issue's "source carries a role cert" clause of the management class
-// is NOT EID-based and lands with P3.6 (which parses COSE payloads); until
-// then an identified bundle addressed anywhere but og-admin is bulk, which
-// only ever affects queue priority, never delivery.
+// The issue's "source carries a role cert" clause of the management class is
+// realized by P3.6's consumption path (internal/mgmt): management payloads
+// (COSE commands, certs, replies) are consumed by the sink BEFORE admission,
+// so the store only ever carries management cargo addressed onward — a
+// dtn://og-admin/ broadcast (propagated island-wide by epidemic sync) or a
+// relayed point-to-point bundle. Classification stays EID-based by design:
+// it must stay cheap (no payload parsing on the store path).
 func Classify(dest, src bundle.EID) Class {
 	if dest.String() == AdminEID {
 		return ClassManagement
@@ -187,7 +190,7 @@ type Config struct {
 // concurrent use.
 type Store struct {
 	db       *sql.DB
-	cap      int
+	cap      atomic.Int64
 	now      func() time.Time
 	log      *log.Logger
 	counters Counters
@@ -233,7 +236,9 @@ func Open(cfg Config) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("forward: journal_mode is %q, want wal", mode)
 	}
-	return &Store{db: db, cap: cap, now: now, log: cfg.Log}, nil
+	s := &Store{db: db, now: now, log: cfg.Log}
+	s.cap.Store(int64(cap))
+	return s, nil
 }
 
 // schemaV1 is the node-plane bundles table of §7.5: bundle_id PK (64 hex of
@@ -288,7 +293,21 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Cap reports the enforced bundle cap (§7.5 honesty: the cap admission
 // enforces is the one this returns).
-func (s *Store) Cap() int { return s.cap }
+func (s *Store) Cap() int { return int(s.cap.Load()) }
+
+// SetCap applies a new bundle cap at runtime (the P3.6 L2 set_store_cap
+// executor). Values ≤ 0 are refused — a cap must always be a real number
+// (the §7.5 honesty rule cuts both ways); the previous cap survives an
+// invalid request. The NEXT admission evaluates against the new value;
+// a store already over the new cap stops accepting until the janitor and
+// evictions bring it back under (nothing is deleted by a cap change).
+func (s *Store) SetCap(bundles int) error {
+	if bundles <= 0 {
+		return fmt.Errorf("forward: bundle cap must be > 0, got %d", bundles)
+	}
+	s.cap.Store(int64(bundles))
+	return nil
+}
 
 // Accept implements the admission pipeline and satisfies the tcpcl.BundleSink
 // seam: Parse (fail-closed), the skew rule is Parse's (P-6, against the
@@ -355,7 +374,7 @@ func (s *Store) accept(pdu []byte) (Verdict, error) {
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM bundles`).Scan(&count); err != nil {
 		return VerdictAtCap, fmt.Errorf("forward: count bundles: %w", err)
 	}
-	if count > s.cap {
+	if count > int(s.cap.Load()) {
 		// §7.5 cap, priority-aware eviction (see evictOne): make room by
 		// evicting the soonest-expiring bundle of the lowest-priority class
 		// at-or-below the newcomer's importance; refuse when nothing may be
@@ -478,6 +497,26 @@ func (s *Store) Janitor() (int64, error) {
 	}
 	if n > 0 {
 		s.counters.Expired.Add(uint64(n))
+	}
+	return n, nil
+}
+
+// DeleteAll wipes the bundle store (every row, live or not) and returns the
+// number of rows deleted. This is the P3.6 L3 factory_reset_node_plane
+// executor's store leg: NODE-PLANE cargo only — the user-plane envelope
+// store is a different database file and is never touched. Counted as
+// evictions (the honest bucket: cargo left this node by an explicit act).
+func (s *Store) DeleteAll() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM bundles`)
+	if err != nil {
+		return 0, fmt.Errorf("forward: delete all: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("forward: delete all rows affected: %w", err)
+	}
+	if n > 0 {
+		s.counters.Evicted.Add(uint64(n))
 	}
 	return n, nil
 }

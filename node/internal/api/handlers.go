@@ -87,6 +87,11 @@ type server struct {
 	healthCachedAt time.Time
 
 	status *status.Engine
+
+	// nodePlane is the optional P3.6 node-plane status source (nil on
+	// servers built without WithNodePlane — the node_plane member then
+	// renders null, the §10.7 N/A convention).
+	nodePlane NodePlaneSource
 }
 
 // Option customizes a server built by New/NewWithCounters.

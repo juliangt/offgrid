@@ -98,6 +98,10 @@ type healthResponse struct {
 	Software    *softwareJSON    `json:"software"`
 	StoreStatus *storeJSON       `json:"store"`
 	Projections *projectionsJSON `json:"projections"`
+
+	// NodePlane is the P3.6 additive member (docs/node-network.md §8; null
+	// when the node plane is off or no source is wired — the N/A convention).
+	NodePlane *nodePlaneJSON `json:"node_plane"`
 }
 
 // healthCountersJSON is the "counters" member of the health document: the
@@ -453,6 +457,22 @@ var statusTemplate = template.Must(template.New("status").Parse(`<!DOCTYPE html>
     </dl>
   </div>
   <div class="card">
+    <h2>Node plane (issue #33)</h2>
+    <dl>
+      <dt>Provisioned role / level</dt><dd>{{.NodePlaneRoleText}}</dd>
+      <dt>Bundle store (fill / cap)</dt><dd>{{.NodePlaneStoreText}}</dd>
+      <dt>Pinned peers (count only — no identities)</dt><dd>{{.NodePlanePeersText}}</dd>
+      <dt>Established sessions</dt><dd>{{.NodePlaneSessionsText}}</dd>
+      <dt>Commands accepted (since process start)</dt><dd>{{.NodePlaneAcceptedText}}</dd>
+      <dt>Commands dropped</dt><dd>{{.NodePlaneDroppedText}}</dd>
+      <dt>Telemetry replies sent / received</dt><dd>{{.NodePlaneRepliesText}}</dd>
+      <dt>Cert merges stale-dropped / conflicts</dt><dd>{{.NodePlaneCertText}}</dd>
+    </dl>
+    <p class="hint">Aggregates only: this card holds no node or peer identities, no command
+    content and no per-user data (docs/protocol.md §10.7). Cert conflicts &gt; 0 mean two
+    different certificates at one sequence — investigate before trusting the island.</p>
+  </div>
+  <div class="card">
     <h2>Load projections</h2>
     <p>{{.ProjectionsIntro}}</p>
     <dl>
@@ -524,6 +544,15 @@ type statusView struct {
 	DaysToDiskFullText string
 	EquilibriumText    string
 	BatteryNetText     string
+
+	NodePlaneRoleText     string
+	NodePlaneStoreText    string
+	NodePlanePeersText    string
+	NodePlaneSessionsText string
+	NodePlaneAcceptedText string
+	NodePlaneDroppedText  string
+	NodePlaneRepliesText  string
+	NodePlaneCertText     string
 }
 
 // buildStatusView pre-renders every template line from the snapshot (the
@@ -569,6 +598,15 @@ func buildStatusView(snap *healthResponse) statusView {
 		DaysToDiskFullText: notEnoughDataText,
 		EquilibriumText:    notEnoughDataText,
 		BatteryNetText:     notEnoughDataText,
+
+		NodePlaneRoleText:     naText,
+		NodePlaneStoreText:    naText,
+		NodePlanePeersText:    naText,
+		NodePlaneSessionsText: naText,
+		NodePlaneAcceptedText: naText,
+		NodePlaneDroppedText:  naText,
+		NodePlaneRepliesText:  naText,
+		NodePlaneCertText:     naText,
 	}
 
 	if snap.Battery != nil {
@@ -672,6 +710,25 @@ func buildStatusView(snap *healthResponse) statusView {
 			v.DeltasText = fmt.Sprintf("accepted %d, rejected %d, dedup %d, swept %d",
 				d.PushesAccepted, d.PushesRejected, d.DedupHits, d.TTLSweptEnvelopes)
 		}
+	}
+
+	if snap.NodePlane != nil {
+		np := snap.NodePlane
+		if np.Role != nil && np.Level != nil {
+			v.NodePlaneRoleText = fmt.Sprintf("%s / L%d", *np.Role, *np.Level)
+		} else {
+			v.NodePlaneRoleText = "no role certificate — mail works, management does not"
+		}
+		v.NodePlaneStoreText = fmt.Sprintf("%d / %d", np.StoreFill, np.StoreCap)
+		v.NodePlanePeersText = fmt.Sprintf("%d", np.PeerCount)
+		v.NodePlaneSessionsText = fmt.Sprintf("%d", np.ActiveSessions)
+		v.NodePlaneAcceptedText = fmt.Sprintf("%d", np.Mgmt.CommandsAccepted)
+		v.NodePlaneDroppedText = fmt.Sprintf(
+			"by level %d, seq %d, signature/authority %d, expired %d, unknown %d, target %d, shape %d",
+			np.Mgmt.DroppedByLevel, np.Mgmt.DroppedSeq, np.Mgmt.DroppedSig,
+			np.Mgmt.DroppedExpired, np.Mgmt.DroppedUnknown, np.Mgmt.DroppedTarget, np.Mgmt.DroppedShape)
+		v.NodePlaneRepliesText = fmt.Sprintf("%d / %d", np.Mgmt.RepliesSent, np.Mgmt.RepliesReceived)
+		v.NodePlaneCertText = fmt.Sprintf("%d / %d", np.CertStaleDropped, np.CertConflicts)
 	}
 
 	if snap.Projections != nil {
@@ -800,6 +857,9 @@ func (s *server) snapshot() (*healthResponse, error) {
 		statusSnap = &ss
 	}
 	snap.Battery, snap.System, snap.Software, snap.StoreStatus, snap.Projections = statusFromSnapshot(statusSnap)
+	if s.nodePlane != nil {
+		snap.NodePlane = nodePlaneFromSnapshot(s.nodePlane.NodePlaneSnapshot())
+	}
 	s.healthCache = snap
 	s.healthCachedAt = now
 	return snap, nil

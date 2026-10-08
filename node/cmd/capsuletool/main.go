@@ -80,6 +80,8 @@ func run(args []string, _ io.Reader, out, errw io.Writer) int {
 		return cmdCert(args[1:], out, errw)
 	case "bundle":
 		return cmdBundle(args[1:], out, errw)
+	case "admin":
+		return cmdAdmin(args[1:], out, errw)
 	case "-h", "--help", "help":
 		usage(out)
 		return exitOK
@@ -122,6 +124,15 @@ node plane (node-network §6.3/§7.1, issue #33 P3.5):
               explicit loopback-only escape hatch), one bundle transfer,
               graceful termination. Prints peer=, bundle_id= (the P-7
               dedup key the receiving store rows are keyed by), bytes=.
+
+management plane (node-network §8, issue #33 P3.6):
+  admin sign --seed F --cmd NAME [--args JSON] [--target EID] [--cert F]
+             [--issued-ts T] [--expiry T] --seq N [--out F]
+             sign one §8.1 admin command (authority = the signer's cached
+             role cert on the receivers; install_cert carries an ALREADY
+             ANCHOR-SIGNED cert via --cert). Defaults: issued now,
+             expires now+1h. The command's level gate is the v1 table.
+  admin show --in F          shape-parse a signed command, print its fields
 `)
 }
 
@@ -288,16 +299,18 @@ func cmdRolecert(args []string, out, errw io.Writer) int {
 	}
 }
 
-// parseRoleList validates the --roles comma list against the closed §2.3 set.
+// parseRoleList validates the --roles comma list against the closed §2.3
+// set. The literal "none" (or an empty value) means NO roles — the §2.5
+// rule-4 revocation record, which must carry --level 0.
 func parseRoleList(s string) ([]string, error) {
 	var roles []string
 	for _, r := range strings.Split(s, ",") {
 		r = strings.TrimSpace(r)
-		if r == "" {
+		if r == "" || r == "none" {
 			continue
 		}
 		if !nodeid.ValidRoles[r] {
-			return nil, fmt.Errorf("role %q is not one of edge|relay|bridge|manager|anchor", r)
+			return nil, fmt.Errorf("role %q is not one of edge|relay|bridge|manager|anchor (or \"none\" for a revocation)", r)
 		}
 		roles = append(roles, r)
 	}

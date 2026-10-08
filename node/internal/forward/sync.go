@@ -435,15 +435,30 @@ func (e *Engine) deliverSummary(fromEID string, s *Summary) {
 }
 
 // HandleSession is invoked per session; Accept is the receiving half.
-// Sink is the tcpcl.BundleSink the daemon wires into tcpcl.Config: profile
-// summary bundles addressed to US are routed to the Engine, everything else
-// is admitted into the Store. (Parse has already accepted the PDU at the
-// session layer; the Store re-validates fail-closed.)
+// Sink is the tcpcl.BundleSink the daemon wires into tcpcl.Config. The P3.6
+// management plane (docs/node-network.md §8.5) sits IN FRONT of the store:
+// bundles whose destination is this node's EID or dtn://og-admin/ are offered
+// to the Enforcer first (commands execute or drop silently; certs merge into
+// the §2.5 cache; replies to us are recorded), and broadcast-class cargo is
+// re-admitted into the store BY the Enforcer so epidemic sync propagates it
+// island-wide. Fields Store and Engine are required; Mgmt is optional (nil =
+// the P3.5 behavior, exactly).
 type Sink struct {
 	Store    *Store
 	Engine   *Engine
 	LocalEID string
 	Now      func() time.Time
+	Mgmt     MgmtConsumer
+}
+
+// MgmtConsumer is the management-plane seam (internal/mgmt.Enforcer satisfies
+// it). An interface — not the concrete type — keeps forward importable by
+// everything that imports mgmt without a cycle in future phases.
+type MgmtConsumer interface {
+	// Consume reports whether the received bundle was management business
+	// (consumed — never store cargo; broadcast copies the Enforcer re-admits
+	// for propagation go through its own Inject path).
+	Consume(b *bundle.Bundle) (handled bool)
 }
 
 // Accept implements tcpcl.BundleSink.
@@ -455,6 +470,12 @@ func (s *Sink) Accept(pdu []byte) error {
 	b, err := bundle.Parse(pdu, now())
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrMalformed, err)
+	}
+	// §8.5: the management plane consumes destination-bound bundles BEFORE
+	// the store (and before the §3.1 hop ceiling — a hop-7 broadcast command
+	// still executes where it arrived; only its further relay dies there).
+	if s.Mgmt != nil && s.Mgmt.Consume(b) {
+		return nil
 	}
 	if payload, ok := s.summaryPayload(b); ok {
 		if summary, ok := ParseSummaryPDU(payload); ok {
@@ -473,7 +494,9 @@ func (s *Sink) Accept(pdu []byte) error {
 // The exact-length rule is what keeps the dispatch unambiguous: any other
 // payload addressed to us (a P3.6 admin command, a directory card) falls
 // through to the store even when its first byte is 0x01. The hop octet sits
-// at ContentOff, the payload at ContentOff+1.
+// at ContentOff, the payload at ContentOff+1. (The §8.5 Mgmt gate above
+// takes precedence when wired: commands and certs addressed to us are
+// management business and never reach here.)
 func (s *Sink) summaryPayload(b *bundle.Bundle) ([]byte, bool) {
 	if b.Destination.String() != s.LocalEID {
 		return nil, false
