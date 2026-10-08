@@ -1,6 +1,7 @@
 // capsuletool — the offline identity and capsule ceremonies of the
-// off-grid DTN node (docs/node-network.md §2.6; the capsule family of
-// docs/offline-maintenance.md §2 lands with its own implementing issue).
+// off-grid DTN node (docs/node-network.md §2.6; the release-capsule family
+// of docs/offline-maintenance.md §2.1/§2.2, reused verbatim by the node
+// plane per §9 of that spec, issue #33 P3.7).
 //
 // This binary is deliberately boring: deterministic flags in, files/bytes
 // out, no network, no prompts, Unix-honest permissions (seeds 0600).
@@ -82,6 +83,8 @@ func run(args []string, _ io.Reader, out, errw io.Writer) int {
 		return cmdBundle(args[1:], out, errw)
 	case "admin":
 		return cmdAdmin(args[1:], out, errw)
+	case "capsule":
+		return cmdCapsule(args[1:], out, errw)
 	case "-h", "--help", "help":
 		usage(out)
 		return exitOK
@@ -133,6 +136,17 @@ management plane (node-network §8, issue #33 P3.6):
              ANCHOR-SIGNED cert via --cert). Defaults: issued now,
              expires now+1h. The command's level gate is the v1 table.
   admin show --in F          shape-parse a signed command, print its fields
+
+release capsules (offline-maintenance §2.1/§2.2, node-network §9; #33 P3.7):
+  capsule keygen --out DIR [--force]           release.seed (0600) + release.pub
+  capsule sign --priv F --arch A --release N --semver TAG [--vcs REV]
+               [--min-upgrade-from N] [--created-at T]
+               (--bin F | --payload-text S) [--out F]
+                                               build + sign one §2.1.1 capsule
+  capsule verify --pub F --in F [--now T]      full parse+sha+signature check
+  capsule show --in F                          inspect fields + fingerprint
+
+archs: armv6, armv7, arm64, esp32s3, esp32 (node-network §9.1 enum)
 `)
 }
 

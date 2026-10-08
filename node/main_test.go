@@ -395,7 +395,7 @@ func TestDeriveStorePath(t *testing.T) {
 // TestBuildTCPCLOptionsPinsPeers pins the flag-to-options mapping.
 func TestBuildTCPCLOptionsParsesPeers(t *testing.T) {
 	opts := buildTCPCLOptions(true, ":4556", "10.0.0.1:4556, 10.0.0.2:4556", "s", "p", "optional", 32, 60,
-		"bundles.db", 5000, 15, true, "", "")
+		"bundles.db", 5000, 15, true, "", "", tcpclUpdatesOptions{Enabled: true, Dir: "staged", OwnRelease: 1012000})
 	if !opts.enabled || opts.addr != ":4556" || opts.mtls != "optional" || opts.budgetMiB != 32 || opts.keepaliveSec != 60 {
 		t.Fatalf("scalar mapping: %+v", opts)
 	}
@@ -404,6 +404,11 @@ func TestBuildTCPCLOptionsParsesPeers(t *testing.T) {
 	}
 	if opts.storePath != "bundles.db" || opts.storeCap != 5000 || opts.dialIntervalSec != 15 || !opts.debug {
 		t.Fatalf("P3.5 options: %+v", opts)
+	}
+	// P3.7: the updates options ride through untouched (the policy lever
+	// and the §2.4.3 release stamp).
+	if !opts.updates.Enabled || opts.updates.Dir != "staged" || opts.updates.OwnRelease != 1012000 {
+		t.Fatalf("P3.7 updates options: %+v", opts.updates)
 	}
 }
 

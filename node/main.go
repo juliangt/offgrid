@@ -18,6 +18,8 @@
 //	            [-tcpcl-mtls required|optional] [-tcpcl-budget-mib 64]
 //	            [-tcpcl-keepalive 30] [-tcpcl-store node_bundles.db]
 //	            [-tcpcl-store-cap 5000] [-tcpcl-dial-interval 30]
+//	            [-tcpcl-updates -tcpcl-release-key release.pub
+//	             [-tcpcl-updates-dir staged/] [-tcpcl-updates-arch esp32s3]
 //	            [-tcpcl-debug]]
 //
 // The daemon is a single static binary (see build.sh): the web UI travels
@@ -45,6 +47,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -84,6 +87,37 @@ const cleanupInterval = 15 * time.Minute
 // resolve. node/build.sh stamps exactly this way (issue #22: the upgrade
 // health gate identities the serving binary by this member).
 var build = "dev"
+
+// releaseVersion is this build's own §2.1.2 release integer (the anti-
+// rollback floor of offline-maintenance §2.6; the node-network §9.1
+// staging gate). It is stamped at link time as a STRING (the -X linker
+// flag only writes strings) and parsed once at boot:
+//
+//	go build -ldflags "-X main.releaseVersion=1012000"
+//
+// Empty (the default) or 0 means "unknown": a build that predates the
+// capsule stamp — the anti-rollback floor then rests on the staged capsule
+// alone, and a capsule whose min_upgrade_from exceeds the (unknown)
+// running release is refused rather than blind-staged (internal/capsule
+// Stager.RunningRelease). Stamping this from build.sh is #37 §2.4.3's
+// work; the variable and its parsing exist now so the node plane is
+// already version-aware.
+var releaseVersion = ""
+
+// parseReleaseVersion decodes the -X main.releaseVersion stamp (a decimal
+// string; empty or malformed = 0 = unknown, the pre-capsule-build stance —
+// never a boot failure: version knowledge degrades, the daemon does not).
+func parseReleaseVersion(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
 
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
@@ -212,6 +246,16 @@ func main() {
 	// the own cert the node enforces but carries no authority of its own.
 	tcpclAnchorPub := flag.String("tcpcl-anchor-pub", "", "path to anchor.pub (the §2.6 pinned trust root); the management plane is OFF without it")
 	tcpclNodeCert := flag.String("tcpcl-node-cert", "", "path to node_cert.cbor (the §2.2 provisioned role cert; optional)")
+	// P3.7 updates over the plane (issue #33, docs/node-network.md §9):
+	// updates_enabled is OFF by default — updates are L2/L3 policy. When on,
+	// capsule-chunk bundles are accepted, reassembled and — after signature
+	// verification against the PINNED RELEASE KEY and the anti-rollback
+	// check — staged atomically into -tcpcl-updates-dir. Nothing is ever
+	// AUTO-APPLIED over the plane (the #22 apply path stays operator-gated).
+	tcpclUpdates := flag.Bool("tcpcl-updates", false, "accept capsule-chunk bundles (§9.4 updates_enabled; default OFF — chunk cargo is refused and counted)")
+	tcpclUpdatesDir := flag.String("tcpcl-updates-dir", "", "staging directory (§2.4.4: <data>/staged/update.capsule; default: the -db directory + /staged)")
+	tcpclReleaseKey := flag.String("tcpcl-release-key", "", "path to release.pub (the pinned release key, offline-maintenance §2.2.3); WITHOUT it staging is unavailable and every capsule is refused + counted (fail-closed)")
+	tcpclUpdatesArch := flag.String("tcpcl-updates-arch", "", "this node's arch (§9.1 enum: armv6|armv7|arm64|esp32s3|esp32); empty disables the arch gate (stamp from provisioning when #37 lands)")
 
 	flag.Parse()
 
@@ -288,11 +332,27 @@ func main() {
 	if tcpclStorePath == "" {
 		tcpclStorePath = deriveStorePath(*dbPath)
 	}
+	// The §2.4.4 staging directory defaults to a sibling of the envelope
+	// database: on a provisioned Pi (-db /var/lib/dtn-node/node_storage.db,
+	// ReadWritePaths=/var/lib/dtn-node) that is exactly the #22 convention
+	// /var/lib/dtn-node/staged/update.capsule — the file the upgrade
+	// machinery and the future #37 boot-apply unit consume.
+	tcpclUpdatesPath := *tcpclUpdatesDir
+	if tcpclUpdatesPath == "" {
+		tcpclUpdatesPath = filepath.Join(filepath.Dir(*dbPath), "staged")
+	}
 	nodePlane, err := startNodePlane(ctx, buildTCPCLOptions(
 		*tcpclEnabled, *tcpclAddr, *tcpclPeers, *tcpclNodeSeed, *tcpclPins,
 		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive,
 		tcpclStorePath, *tcpclStoreCap, *tcpclDialInterval, *tcpclDebug,
-		*tcpclNodeCert, *tcpclAnchorPub), log.Default())
+		*tcpclNodeCert, *tcpclAnchorPub,
+		tcpclUpdatesOptions{
+			Enabled:    *tcpclUpdates,
+			Dir:        tcpclUpdatesPath,
+			ReleaseKey: *tcpclReleaseKey,
+			Arch:       *tcpclUpdatesArch,
+			OwnRelease: parseReleaseVersion(releaseVersion),
+		}), log.Default())
 	if err != nil {
 		log.Fatalf("cannot start the node plane: %v", err)
 	}

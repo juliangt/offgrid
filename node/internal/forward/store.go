@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"offgrid/dtn-node/internal/bundle"
+	"offgrid/dtn-node/internal/capsule"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no CGO); registers "sqlite" via init
 )
@@ -71,30 +72,40 @@ func (c Class) String() string {
 	return "bulk"
 }
 
-// Classify pins the v1 EID-based admission classification (deliberately
-// SIMPLE; P3.6/P3.7 extend it in place):
+// Classify pins the v1 admission classification (§7.5's "P3.6/P3.7
+// extend" — the P3.7 extension is the chunk peek):
 //
-//   - management: destination is the well-known admin EID dtn://og-admin/
-//     (§8.1 — commands, and the admin records that ride the same address);
 //   - mail: source is dtn:none AND destination is the og-mail group (the
 //     P-4 anonymous mail shape — the §14.2 envelope's bundle wrapper);
+//   - management: destination is the well-known admin EID dtn://og-admin/
+//     (§8.1 — commands, and the admin records that ride the same address);
+//   - P3.7 (§9.4): a payload that starts with a valid capsule-chunk
+//     header (docs/node-network.md §9.4 — total/idx arithmetic holds)
+//     classifies BULK whenever the mail shape does not claim it, even
+//     when the destination is og-admin: update cargo never rides the
+//     management class (bulk can never evict mail or management, §7.5 —
+//     letting a capsule chunk pose as management would buy exactly that);
 //   - everything else is bulk: identified point-to-point bundles (node →
-//     node EID), group addresses other than og-mail, capsule chunks (§9.1),
-//     directory cards (§9.3), and the §7.1 sync summaries themselves.
+//     node EID), group addresses other than og-mail, directory cards
+//     (§9.3), and the §7.1 sync summaries themselves.
 //
 // The issue's "source carries a role cert" clause of the management class is
 // realized by P3.6's consumption path (internal/mgmt): management payloads
 // (COSE commands, certs, replies) are consumed by the sink BEFORE admission,
 // so the store only ever carries management cargo addressed onward — a
 // dtn://og-admin/ broadcast (propagated island-wide by epidemic sync) or a
-// relayed point-to-point bundle. Classification stays EID-based by design:
-// it must stay cheap (no payload parsing on the store path).
-func Classify(dest, src bundle.EID) Class {
-	if dest.String() == AdminEID {
-		return ClassManagement
-	}
+// relayed point-to-point bundle. The chunk peek is arithmetic-only
+// (capsule.LooksLikeChunk): no payload parsing beyond two fixed-offset
+// integers, so classification stays cheap on the store path.
+func Classify(dest, src bundle.EID, payload []byte) Class {
 	if src.IsNone() && dest.String() == MailGroupEID {
 		return ClassMail
+	}
+	if capsule.LooksLikeChunk(payload) {
+		return ClassBulk
+	}
+	if dest.String() == AdminEID {
+		return ClassManagement
 	}
 	return ClassBulk
 }
@@ -103,11 +114,12 @@ func Classify(dest, src bundle.EID) Class {
 type Verdict int
 
 const (
-	VerdictAccepted  Verdict = iota // stored
-	VerdictDup                      // bundle_id already present — absorbed (P-7)
-	VerdictExpired                  // creation + lifetime already past the local clock
-	VerdictHopCapped                // hop octet at the §3.1 ceiling (7) — dead cargo
-	VerdictAtCap                    // store at cap and nothing evictable — refused
+	VerdictAccepted   Verdict = iota // stored
+	VerdictDup                       // bundle_id already present — absorbed (P-7)
+	VerdictExpired                   // creation + lifetime already past the local clock
+	VerdictHopCapped                 // hop octet at the §3.1 ceiling (7) — dead cargo
+	VerdictAtCap                     // store at cap and nothing evictable — refused
+	VerdictUpdatesOff                // §9.4: chunk cargo with updates disabled — refused
 )
 
 func (v Verdict) String() string {
@@ -120,6 +132,8 @@ func (v Verdict) String() string {
 		return "expired"
 	case VerdictHopCapped:
 		return "hop_capped"
+	case VerdictUpdatesOff:
+		return "updates_off"
 	}
 	return "at_cap"
 }
@@ -127,8 +141,9 @@ func (v Verdict) String() string {
 // Sentinel errors Accept can return. Dup/expired/hop-capped are POLICY
 // drops, not failures: the transfer is acknowledged (the receiver processed
 // the bytes and disposed of them per §7.2) — a sender must never retry
-// them, so they are not refusals. Only capacity (ErrCapacity) and malformed
-// PDUs (ErrMalformed) refuse the transfer at the TCPCL layer.
+// them, so they are not refusals. Capacity (ErrCapacity), malformed PDUs
+// (ErrMalformed) and the §9.4 updates-disabled policy (ErrUpdatesDisabled)
+// refuse the transfer at the TCPCL layer.
 var (
 	// ErrCapacity is the store-at-cap refusal (the TCPCL layer answers
 	// XFER_REFUSE "No Resources").
@@ -137,6 +152,12 @@ var (
 	// re-validation (the session layer already refuses those; reaching the
 	// store with one is a contract break).
 	ErrMalformed = errors.New("forward: not a profile bundle")
+	// ErrUpdatesDisabled is the §9.4 admission policy: a node with
+	// updates_enabled OFF (the default — updates are L2/L3 policy) refuses
+	// capsule-chunk cargo at admission (the TCPCL layer answers
+	// XFER_REFUSE "No Resources", the sender defers; the bytes are never
+	// stored, never relayed, never reassembled here).
+	ErrUpdatesDisabled = errors.New("forward: capsule chunks refused (updates disabled)")
 )
 
 // Counters is the RAM-only bookkeeping of every admission path (the §10.7
@@ -149,11 +170,13 @@ type Counters struct {
 	HopCapped     atomic.Uint64
 	AtCapRejected atomic.Uint64
 	Evicted       atomic.Uint64
+	UpdatesOff    atomic.Uint64 // chunk cargo refused while updates are disabled (§9.4)
 }
 
 // Snapshot is a plain read of the counters at one instant.
 type CountersSnapshot struct {
 	Accepted, Dup, Expired, HopCapped, AtCapRejected, Evicted uint64
+	UpdatesOff                                                uint64
 }
 
 // Snapshot renders the current values.
@@ -165,6 +188,7 @@ func (c *Counters) Snapshot() CountersSnapshot {
 		HopCapped:     c.HopCapped.Load(),
 		AtCapRejected: c.AtCapRejected.Load(),
 		Evicted:       c.Evicted.Load(),
+		UpdatesOff:    c.UpdatesOff.Load(),
 	}
 }
 
@@ -194,6 +218,11 @@ type Store struct {
 	now      func() time.Time
 	log      *log.Logger
 	counters Counters
+
+	// updatesEnabled is the §9.4 `updates_enabled` policy (default OFF):
+	// when false, capsule-chunk cargo (capsule.LooksLikeChunk) is refused
+	// at admission — never stored, never relayed, never reassembled here.
+	updatesEnabled atomic.Bool
 }
 
 // Open creates or opens the bundle store at cfg.Path. The database is
@@ -309,6 +338,15 @@ func (s *Store) SetCap(bundles int) error {
 	return nil
 }
 
+// SetUpdatesEnabled applies the §9.4 `updates_enabled` policy (the L2
+// administration plane's "enable network staging" lever, §2.4 level
+// table). Default OFF: chunk cargo is refused and counted until an
+// operator (or provisioned policy) turns it on.
+func (s *Store) SetUpdatesEnabled(on bool) { s.updatesEnabled.Store(on) }
+
+// UpdatesEnabled reports the current §9.4 policy.
+func (s *Store) UpdatesEnabled() bool { return s.updatesEnabled.Load() }
+
 // Accept implements the admission pipeline and satisfies the tcpcl.BundleSink
 // seam: Parse (fail-closed), the skew rule is Parse's (P-6, against the
 // local clock), the hop ceiling, dedup by bundle_id, classification, and the
@@ -344,7 +382,19 @@ func (s *Store) accept(pdu []byte) (Verdict, error) {
 		s.counters.Expired.Add(1)
 		return VerdictExpired, nil
 	}
-	class := Classify(b.Destination, b.Source)
+	// §9.4 admission policy: updates_enabled is OFF by default and chunk
+	// cargo (the capsule-chunk header arithmetic) is refused before it can
+	// cost storage or airtime. The refusal is transfer-level ("No
+	// Resources") — the sender learns the node does not take updates.
+	// The policy touches IDENTIFIED bundles only (§3 P-5 — chunk cargo is
+	// always identified): an anonymous bundle (P-4 mail, and any other
+	// dtn:none shape) whose bytes merely PASS the arithmetic peek is never
+	// refused — the user plane must not care whether updates are on.
+	if !s.updatesEnabled.Load() && !b.Source.IsNone() && capsule.LooksLikeChunk(b.Payload) {
+		s.counters.UpdatesOff.Add(1)
+		return VerdictUpdatesOff, fmt.Errorf("%w (§9.4)", ErrUpdatesDisabled)
+	}
+	class := Classify(b.Destination, b.Source, b.Payload)
 	id := sha256.Sum256(b.Payload) // P-7: SHA-256 over the PDU after the hop octet
 	pduCopy := append([]byte(nil), pdu...)
 

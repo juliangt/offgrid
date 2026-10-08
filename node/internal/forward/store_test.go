@@ -70,20 +70,37 @@ func TestClassifyPinsTheEIDRules(t *testing.T) {
 	node, _ := bundle.ParseEID("dtn://og.0123456789abcdef/")
 	other, _ := bundle.ParseEID("dtn:og-updates")
 
+	// A payload whose first 16 bytes pass the §9.4 chunk-header arithmetic
+	// (a fake capsule chunk): total=1 (bytes 8..11), idx=0 (bytes 12..15).
+	chunk := make([]byte, 40)
+	chunk[11] = 1    // total = 1
+	chunk[16] = 0xEE // chunk bytes
+
 	cases := []struct {
 		dest, src bundle.EID
+		payload   []byte
 		want      Class
 	}{
-		{mail, none, ClassMail},
-		{mail, node, ClassBulk}, // identified source is NOT mail (P-4 is anonymous)
-		{admin, node, ClassManagement},
-		{admin, none, ClassManagement}, // the dest decides management
-		{node, node, ClassBulk},        // identified point-to-point: bulk in v1 (P3.6 extends)
-		{other, none, ClassBulk},
+		{mail, none, []byte("envelope"), ClassMail},
+		{mail, node, []byte("envelope"), ClassBulk}, // identified source is NOT mail (P-4 is anonymous)
+		{admin, node, []byte("cose"), ClassManagement},
+		{admin, none, []byte("cose"), ClassManagement}, // the dest decides management
+		{node, node, []byte("p2p"), ClassBulk},         // identified point-to-point: bulk in v1 (P3.6 extends)
+		{other, none, []byte("x"), ClassBulk},
+		// §9.4 (P3.7): chunk cargo is BULK even when addressed to the admin
+		// group — update cargo never rides the management class (a bulk
+		// bundle can never evict mail or management, §7.5; letting a chunk
+		// pose as management would buy exactly that).
+		{node, node, chunk, ClassBulk},
+		{admin, node, chunk, ClassBulk},
+		// An anonymous bundle whose bytes happen to pass the arithmetic is
+		// classified by the EID rules as before (the chunk peek never
+		// overrides the anonymous shapes — the user plane is never touched).
+		{other, none, chunk, ClassBulk},
 	}
 	for _, tc := range cases {
-		if got := Classify(tc.dest, tc.src); got != tc.want {
-			t.Fatalf("Classify(%s, %s) = %s, want %s", tc.dest, tc.src, got, tc.want)
+		if got := Classify(tc.dest, tc.src, tc.payload); got != tc.want {
+			t.Fatalf("Classify(%s, %s, %x…) = %s, want %s", tc.dest, tc.src, tc.payload[:8], got, tc.want)
 		}
 	}
 }

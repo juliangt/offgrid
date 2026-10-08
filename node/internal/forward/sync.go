@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"offgrid/dtn-node/internal/bundle"
+	"offgrid/dtn-node/internal/capsule"
 	"offgrid/dtn-node/internal/tcpcl"
 )
 
@@ -442,13 +443,16 @@ func (e *Engine) deliverSummary(fromEID string, s *Summary) {
 // the §2.5 cache; replies to us are recorded), and broadcast-class cargo is
 // re-admitted into the store BY the Enforcer so epidemic sync propagates it
 // island-wide. Fields Store and Engine are required; Mgmt is optional (nil =
-// the P3.5 behavior, exactly).
+// the P3.5 behavior, exactly). P3.7 adds Updates (§9.4): the capsule.Receiver
+// that consumes chunk cargo addressed to this node — nil = updates disabled,
+// the store refuses chunk bundles at admission (UpdatesOff).
 type Sink struct {
 	Store    *Store
 	Engine   *Engine
 	LocalEID string
 	Now      func() time.Time
 	Mgmt     MgmtConsumer
+	Updates  *capsule.Receiver
 }
 
 // MgmtConsumer is the management-plane seam (internal/mgmt.Enforcer satisfies
@@ -485,6 +489,14 @@ func (s *Sink) Accept(pdu []byte) error {
 		s.Engine.counters.SummariesDropped.Add(1)
 		return nil // our shape, unknown version: consumed and dropped
 	}
+	// §9.4 (P3.7): chunk cargo addressed to THIS node (or the og-admin
+	// group) is fed to the updates receiver — reassembly + staging are the
+	// capsule's delivery here — and then RE-ADMITTED into the store like
+	// §8.5's consumed management copies, so this node's §7.1 summaries
+	// cover the chunks and peers never re-deliver them. With Updates nil
+	// (updates disabled) the dispatch declines and the store's admission
+	// refusal below is the §9.4 policy.
+	s.dispatchUpdates(b)
 	return s.Store.Accept(pdu)
 }
 

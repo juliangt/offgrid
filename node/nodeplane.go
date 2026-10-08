@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"offgrid/dtn-node/internal/api"
+	"offgrid/dtn-node/internal/capsule"
 	"offgrid/dtn-node/internal/forward"
 	"offgrid/dtn-node/internal/mgmt"
 	"offgrid/dtn-node/internal/nodeid"
@@ -70,6 +71,23 @@ type tcpclOptions struct {
 	// verify managers) but carries no authority of its own.
 	nodeCertPath  string // node_cert.cbor (the §2.2 role cert)
 	anchorPubPath string // anchor.pub (the §2.6 pinned trust root)
+
+	// P3.7 updates over the plane (docs/node-network.md §9, §9.4): the
+	// `updates_enabled` policy (default OFF) and the staging seams. Without
+	// the pinned release key the Receiver is STILL constructed when enabled
+	// — the Stager answers unpinned for every capsule (the §2.4.1 "staging
+	// unavailable, not misbehaving" state, honestly counted).
+	updates tcpclUpdatesOptions
+}
+
+// tcpclUpdatesOptions carries the -tcpcl-updates-* flag set (built by main,
+// consumed by startNodePlane so tests drive the wiring without flags).
+type tcpclUpdatesOptions struct {
+	Enabled    bool   // `updates_enabled` (§9.4; the L2/L3 policy lever)
+	Dir        string // the §2.4.4 staging directory (<data>/staged)
+	ReleaseKey string // release.pub path ("" = unpinned — refuse + count)
+	Arch       string // the §9.1 arch gate ("" = gate disabled)
+	OwnRelease uint64 // the §2.4.3 release stamp (0 = unknown/pre-capsule build)
 }
 
 // nodePlane owns the running TCPCL endpoints and the forwarding engine of
@@ -93,6 +111,11 @@ type nodePlane struct {
 	cache     *nodeid.Cache
 	anchorPub []byte
 	mgmt      *mgmt.Enforcer
+
+	// P3.7 (§9.4): the updates consumer when the updates_enabled policy is
+	// on (nil = off; the /status `update` member stays #37 §2.6.2's — until
+	// then these counters are -tcpcl-debug observability).
+	updates *capsule.Receiver
 
 	// wake bookkeeping for the L1 trigger_sync executor: one channel per
 	// live dial loop; SyncNow sends a non-blocking token to each.
@@ -256,6 +279,41 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 	}
 	sink := &forward.Sink{Store: store, Engine: engine, LocalEID: eid}
 
+	// The P3.7 updates consumer (docs/node-network.md §9.4): constructed
+	// ONLY when the updates_enabled policy is on (default OFF — with the
+	// policy off there is no receiver and the store refuses chunk cargo at
+	// admission, counted). An unpinned release key degrades to the §2.4.1
+	// state: reassembly runs, every capsule is refused unpinned + counted,
+	// nothing is written.
+	if opts.updates.Enabled {
+		store.SetUpdatesEnabled(true)
+		stager := &capsule.Stager{
+			Dir:            opts.updates.Dir,
+			Arch:           opts.updates.Arch,
+			RunningRelease: opts.updates.OwnRelease,
+		}
+		if opts.updates.ReleaseKey != "" {
+			pub, kerr := loadAnchorPub(opts.updates.ReleaseKey) // same 32-byte hex file format
+			if kerr != nil {
+				store.Close()
+				return nil, fmt.Errorf("load pinned release key: %w", kerr)
+			}
+			stager.Pub = pub
+		} else {
+			lg.Printf("node-plane: updates ON without -tcpcl-release-key — staging is UNAVAILABLE (§2.4.1): every capsule is refused + counted, nothing is written")
+		}
+		if err := stager.Load(); err != nil {
+			// A capsule staged by a previous life that no longer parses is
+			// left in place (the apply path re-verifies, §2.5); the operator
+			// hears about it.
+			lg.Printf("node-plane: WARNING: staged capsule did not parse at boot: %v", err)
+		}
+		receiver := capsule.NewReceiver(capsule.NewReassembler(), stager)
+		sink.Updates = receiver
+		lg.Printf("node-plane: updates_enabled=ON (§9.4): capsule chunks accepted, staging to %s (arch gate %q, own release %d, apply stays the #22 operator path)",
+			opts.updates.Dir, opts.updates.Arch, opts.updates.OwnRelease)
+	}
+
 	np := &nodePlane{
 		pins:      pins,
 		pinsPath:  opts.pinsPath,
@@ -266,6 +324,9 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 		anchorPub: anchorPub,
 		mgmt:      enforcer,
 		wakeChs:   make(map[chan struct{}]struct{}),
+	}
+	if sink.Updates != nil {
+		np.updates = sink.Updates
 	}
 	if enforcer != nil {
 		enforcer.Inject = func(pdu []byte) error { return store.Accept(pdu) }
@@ -364,7 +425,7 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 				}
 			case <-time.After(time.Minute):
 				if opts.debug {
-					logCounters(lg, store, engine)
+					logCounters(lg, store, engine, np.updates)
 				}
 			}
 		}
@@ -395,13 +456,16 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 }
 
 // logCounters is the -tcpcl-debug snapshot: store admission counters,
-// engine sync counters, session counters — one honest log line each.
-func logCounters(lg *log.Logger, store *forward.Store, engine *forward.Engine) {
+// engine sync counters, updates counters — one honest log line each.
+func logCounters(lg *log.Logger, store *forward.Store, engine *forward.Engine, updates *capsule.Receiver) {
 	n, err := store.Count()
 	if err == nil {
 		lg.Printf("node-plane: store %d bundle(s) (cap %d), admission %+v", n, store.Cap(), store.CountersSnapshot())
 	}
 	lg.Printf("node-plane: sync %+v", engine.CountersSnapshot())
+	if updates != nil {
+		lg.Printf("node-plane: updates %+v (reassembly %+v)", updates.CountersSnapshot(), updates.Reasm.Counters())
+	}
 }
 
 // loadAnchorPub reads a 32-byte hex anchor public key (the §2.6 anchor.pub
@@ -671,7 +735,8 @@ func (np *nodePlane) NodePlaneSnapshot() api.NodePlaneSnapshot {
 
 // buildTCPCLOptions maps the flags (kept here so main stays readable).
 func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, budgetMiB, keepaliveSec int,
-	storePath string, storeCap, dialIntervalSec int, debug bool, nodeCert, anchorPub string) tcpclOptions {
+	storePath string, storeCap, dialIntervalSec int, debug bool, nodeCert, anchorPub string,
+	updates tcpclUpdatesOptions) tcpclOptions {
 	var peerList []string
 	if peers != "" {
 		peerList = strings.Split(peers, ",")
@@ -691,5 +756,6 @@ func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, b
 		debug:           debug,
 		nodeCertPath:    nodeCert,
 		anchorPubPath:   anchorPub,
+		updates:         updates,
 	}
 }
