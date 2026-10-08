@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 )
 
 // The pin store: anchor trust roots + TOFU peer pins (docs/node-network.md
@@ -25,8 +26,12 @@ var ErrAnchorPinConflict = fmt.Errorf("nodeid: a different anchor key was offere
 // higher-seq role certificate to explain the change.
 var ErrPeerKeyChanged = fmt.Errorf("nodeid: pinned peer key changed with no higher-seq certificate (TOFU)")
 
-// PinStore is the in-memory pin set. Zero value is ready to use.
+// PinStore is the in-memory pin set. Zero value is ready to use. It is
+// SAFE FOR CONCURRENT USE: several TCPCL/link sessions share one store and
+// a first contact can TOFU-pin while another session reads (1.4.0 — the
+// pin checks run inside concurrent TLS handshakes).
 type PinStore struct {
+	mu      sync.Mutex
 	anchors map[[FingerprintLen]byte][KeyLen]byte // anchor fp -> anchor pub
 	peers   map[string][KeyLen]byte               // peer EID -> node key
 }
@@ -37,6 +42,13 @@ func NewPinStore() *PinStore {
 		anchors: make(map[[FingerprintLen]byte][KeyLen]byte),
 		peers:   make(map[string][KeyLen]byte),
 	}
+}
+
+// lock returns the maps with the mutex held (internal helper discipline:
+// public methods lock exactly once, the lock* helpers never re-lock).
+func (p *PinStore) lock() func() {
+	p.mu.Lock()
+	return p.mu.Unlock
 }
 
 // PinAnchor pins an anchor public key (TOFU: first sight records it, the
@@ -51,6 +63,7 @@ func (p *PinStore) PinAnchor(pub []byte) error {
 	fp := Fingerprint(pub)
 	var key [KeyLen]byte
 	copy(key[:], pub)
+	defer p.lock()()
 	if cur, ok := p.anchors[fp]; ok {
 		if cur != key {
 			return fmt.Errorf("%w: fingerprint %s", ErrAnchorPinConflict, hex.EncodeToString(fp[:]))
@@ -63,6 +76,7 @@ func (p *PinStore) PinAnchor(pub []byte) error {
 
 // Anchor returns the pinned public key for a fingerprint.
 func (p *PinStore) Anchor(fp [FingerprintLen]byte) ([]byte, bool) {
+	defer p.lock()()
 	if key, ok := p.anchors[fp]; ok {
 		return append([]byte(nil), key[:]...), true
 	}
@@ -70,7 +84,10 @@ func (p *PinStore) Anchor(fp [FingerprintLen]byte) ([]byte, bool) {
 }
 
 // AnchorCount is the number of pinned anchors.
-func (p *PinStore) AnchorCount() int { return len(p.anchors) }
+func (p *PinStore) AnchorCount() int {
+	defer p.lock()()
+	return len(p.anchors)
+}
 
 // PinPeer records a peer's node key for its EID (TOFU first contact).
 // Same key again: no-op. Different key: ErrPeerKeyChanged — the loud
@@ -84,6 +101,7 @@ func (p *PinStore) PinPeer(eid string, nodeKey []byte) error {
 	}
 	var key [KeyLen]byte
 	copy(key[:], nodeKey)
+	defer p.lock()()
 	if cur, ok := p.peers[eid]; ok {
 		if cur != key {
 			return fmt.Errorf("%w: %s", ErrPeerKeyChanged, eid)
@@ -96,6 +114,7 @@ func (p *PinStore) PinPeer(eid string, nodeKey []byte) error {
 
 // Peer returns the pinned node key for an EID.
 func (p *PinStore) Peer(eid string) ([]byte, bool) {
+	defer p.lock()()
 	if key, ok := p.peers[eid]; ok {
 		return append([]byte(nil), key[:]...), true
 	}
@@ -103,7 +122,10 @@ func (p *PinStore) Peer(eid string) ([]byte, bool) {
 }
 
 // PeerCount is the number of pinned peers.
-func (p *PinStore) PeerCount() int { return len(p.peers) }
+func (p *PinStore) PeerCount() int {
+	defer p.lock()()
+	return len(p.peers)
+}
 
 // ResolvePeer is the §6.1 session gate: a peer presenting nodeKey for eid
 // passes when the key matches its cached role certificate (the cert is the
@@ -149,6 +171,8 @@ type pinStoreDoc struct {
 
 // Marshal renders the store in the documented format.
 func (p *PinStore) Marshal() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	doc := pinStoreDoc{V: 1}
 	fps := make([][FingerprintLen]byte, 0, len(p.anchors))
 	for fp := range p.anchors {

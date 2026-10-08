@@ -9,7 +9,9 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -383,4 +385,98 @@ func TestSignDefaults(t *testing.T) {
 	if !strings.EqualFold(hex.EncodeToString([]byte(stdout)), hex.EncodeToString(refBytes)) {
 		t.Fatal("stdout bytes differ from --out bytes")
 	}
+}
+
+// TestCertCommand exercises the §6.3 TCPCL/TLS certificate ceremony: the
+// self-signed X.509 is derived from the node seed, carries the EID as CN
+// and URI SAN, and is byte-stable per seed+validity (the deterministic
+// serial). The PEM parses with the stdlib and verifies against its own
+// public key.
+func TestCertCommand(t *testing.T) {
+	dir := t.TempDir()
+	nodeSeed := seedFile(t, dir, "node.seed", vecNodeSeed)
+	wantEID := eidOfPub(t, pubHexOfSeed(t, vecNodeSeed))
+
+	// To --out: PEM file plus a clean status line on stdout.
+	outPem := filepath.Join(dir, "node_cert.pem")
+	status := mustSucceed(t, "cert", "--seed", nodeSeed, "--validity-hours", "24", "--out", outPem)
+	if kv(t, status, "eid") != wantEID {
+		t.Fatalf("status eid: %s", status)
+	}
+	certFP := kv(t, status, "cert_fp")
+	if len(certFP) != 64 {
+		t.Fatalf("cert_fp must be 64 hex chars, got %q", certFP)
+	}
+	if _, err := os.Stat(outPem); err != nil {
+		t.Fatalf("pem file: %v", err)
+	}
+	raw, err := os.ReadFile(outPem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(raw, []byte("-----BEGIN CERTIFICATE-----")) {
+		t.Fatalf("the --out file must be PEM, got %q", raw[:32])
+	}
+
+	// The PEM parses; the certificate covers the seed's key and EID.
+	pemBytes, _ := pem.Decode(raw)
+	if pemBytes == nil {
+		t.Fatalf("no PEM block in the file")
+	}
+	parsed, err := x509.ParseCertificate(pemBytes.Bytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed.Subject.CommonName != wantEID {
+		t.Fatalf("CN %q, want %q", parsed.Subject.CommonName, wantEID)
+	}
+	pub, err := nodeid.CertNodeKey(parsed)
+	if err != nil {
+		t.Fatalf("CertNodeKey: %v", err)
+	}
+	if hex.EncodeToString(pub) != pubHexOfSeed(t, vecNodeSeed) {
+		t.Fatalf("the certificate must bind the seed's own key")
+	}
+	if err := nodeid.CertCoversEID(parsed, wantEID); err != nil {
+		t.Fatalf("SAN binding: %v", err)
+	}
+	if d := parsed.NotAfter.Sub(parsed.NotBefore); d != 24*time.Hour+time.Hour {
+		t.Fatalf("validity window %v (24 h + the 1 h backdate)", d)
+	}
+	// Self-signature verifies.
+	if err := parsed.CheckSignature(parsed.SignatureAlgorithm, parsed.RawTBSCertificate, parsed.Signature); err != nil {
+		t.Fatalf("self-signature: %v", err)
+	}
+	if got := nodeid.CertFingerprintHex(pemBytes.Bytes); got != certFP {
+		t.Fatalf("cert_fp mismatch: %s vs %s", got, certFP)
+	}
+
+	// To stdout (no --out): the PEM stream is clean; the status line goes
+	// to stderr so `capsuletool cert --seed F > node.pem` keeps working.
+	stdout, stderr, code := runTool(t, "cert", "--seed", nodeSeed)
+	if code != 0 {
+		t.Fatalf("stdout mode failed: %s", stderr)
+	}
+	if !bytes.HasPrefix([]byte(stdout), []byte("-----BEGIN CERTIFICATE-----")) {
+		t.Fatalf("stdout must carry the PEM, got %q", stdout[:32])
+	}
+	if !strings.Contains(stderr, "eid="+wantEID) {
+		t.Fatalf("stderr must carry the status line, got %q", stderr)
+	}
+
+	// Determinism: the same seed + same validity window regenerate the
+	// identical DER.
+	again := filepath.Join(dir, "again.pem")
+	mustSucceed(t, "cert", "--seed", nodeSeed, "--validity-hours", "24", "--out", again)
+	againBytes, err := os.ReadFile(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, againBytes) {
+		t.Fatalf("the ceremony must be deterministic per seed+validity")
+	}
+
+	// Argument honesty.
+	mustFail(t, "not a positive number", "cert", "--seed", nodeSeed, "--validity-hours", "0")
+	mustFail(t, "no such file", "cert", "--seed", filepath.Join(dir, "missing.seed"))
 }

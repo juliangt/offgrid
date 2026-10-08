@@ -13,12 +13,19 @@
 //	           [-battery-i2c /dev/i2c-1] [-battery-addr 0x40]
 //	           [-battery-capacity-wh 128] [-battery-dod-floor 20]
 //	           [-battery-full-v 13.6] [-battery-empty-v 12.0]
+//	           [-tcpcl -tcpcl-node-seed nodeid/node.seed [-tcpcl-addr :4556]
+//	            [-tcpcl-peers host:port,...] [-tcpcl-pins node_tcpcl_pins.json]
+//	            [-tcpcl-mtls required|optional] [-tcpcl-budget-mib 64]
+//	            [-tcpcl-keepalive 30]]
 //
 // The daemon is a single static binary (see build.sh): the web UI travels
 // inside it via go:embed, so a node is deployed by copying one file. Every
 // battery flag is optional — with none set the status page renders the
 // battery section as N/A (the reading chain degrades gracefully and never
-// becomes a dependency, docs/protocol.md §10.7).
+// becomes a dependency, docs/protocol.md §10.7). The node-plane flags
+// (issue #33 P3.4) are OFF by default: the daemon is a pure user-plane
+// mailbox until -tcpcl turns on the Wi-Fi convergence layer (nodeplane.go;
+// the received bundles are validated and counted, forwarding lands P3.5).
 package main
 
 import (
@@ -179,6 +186,18 @@ func main() {
 	batteryFullV := flag.Float64("battery-full-v", 13.6, "resting full voltage of the pack (4S LiFePO4 default; SoC voltage-estimate anchor)")
 	batteryEmptyV := flag.Float64("battery-empty-v", 12.0, "resting empty voltage of the pack (4S LiFePO4 default; SoC voltage-estimate anchor)")
 
+	// Node-plane TCPCLv4 (issue #33 P3.4, docs/node-network.md §6.3) —
+	// OPTIONAL and OFF by default: the fleet behavior and every existing
+	// test are untouched unless the operator turns it on.
+	tcpclEnabled := flag.Bool("tcpcl", false, "serve + dial the node plane (TCPCLv4, RFC 9174 subset) over Wi-Fi/IP; default off")
+	tcpclAddr := flag.String("tcpcl-addr", ":4556", "TCPCL listen address (4556 is the IANA TCPCL port)")
+	tcpclPeers := flag.String("tcpcl-peers", "", "comma-separated host:port list of node-plane peers to dial opportunistically")
+	tcpclNodeSeed := flag.String("tcpcl-node-seed", "", "path to node.seed (64-hex Ed25519 seed, the §2.6 ceremony file); required with -tcpcl")
+	tcpclPins := flag.String("tcpcl-pins", "node_tcpcl_pins.json", "path to the TOFU pin store (0600, checkpointed every minute and on shutdown)")
+	tcpclMTLS := flag.String("tcpcl-mtls", "required", "client-certificate policy: required|optional (§6.2 item 4: mTLS optional-but-defined)")
+	tcpclBudgetMiB := flag.Int("tcpcl-budget-mib", 64, "per-contact transfer budget in MiB (§7.4: 64 MiB, enforced on ingress and egress)")
+	tcpclKeepalive := flag.Int("tcpcl-keepalive", 30, "advertised keepalive interval in seconds (RFC 9174 §5.1.1 recommends 30–600; 0 → 30)")
+
 	flag.Parse()
 
 	// Cold start: create the -db parent directory when missing (log it, since
@@ -254,6 +273,16 @@ func main() {
 	defer cancelCleanup()
 	cleanup.Start(cleanupCtx, recordingJanitor{store: store, counters: counters}, cleanupInterval)
 
+	// The node plane (P3.4): started ONLY when -tcpcl is set; its lifetime
+	// rides the same signal context as the HTTP server, and stop() runs
+	// the §6.1 graceful SESS_TERM per live session before exit.
+	nodePlane, err := startNodePlane(ctx, buildTCPCLOptions(
+		*tcpclEnabled, *tcpclAddr, *tcpclPeers, *tcpclNodeSeed, *tcpclPins,
+		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive), log.Default())
+	if err != nil {
+		log.Fatalf("cannot start the node plane: %v", err)
+	}
+
 	statusCtx, cancelStatus := context.WithCancel(context.Background())
 	defer cancelStatus()
 	statusEngine.Run(statusCtx, 0) // 0 → the default one-minute cadence
@@ -302,6 +331,9 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("graceful shutdown timed out: %v", err)
+		}
+		if nodePlane != nil {
+			nodePlane.stop() // §6.1 SESS_TERM per session + the pin checkpoint
 		}
 		cancelCleanup() // stop the janitor before the database handle
 		cancelStatus()  // stop the status sampler (issue #36)

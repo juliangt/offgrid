@@ -33,10 +33,20 @@
 //
 //	capsuletool rolecert id --seed FILE
 //	    Prints the node's self-certifying EID (dtn://og.<fp>/).
+//
+//	capsuletool cert --seed FILE [--validity-hours H] [--out FILE]
+//	    Builds the node's self-signed X.509 certificate for the TCPCL/TLS
+//	    plane (node-network §6.2 item 4, §6.3): the Ed25519 node key bound
+//	    to its EID (CN + URI SAN), PureEd25519-signed, PEM to stdout or
+//	    --out (0644). Prints eid= and cert_fp= (the certificate's own
+//	    SHA-256, distinct from the node fingerprint the PinStore pins).
+//	    Deterministic per seed and validity window.
 package main
 
 import (
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
@@ -66,6 +76,8 @@ func run(args []string, _ io.Reader, out, errw io.Writer) int {
 		return cmdAnchor(args[1:], out, errw)
 	case "rolecert":
 		return cmdRolecert(args[1:], out, errw)
+	case "cert":
+		return cmdCert(args[1:], out, errw)
 	case "-h", "--help", "help":
 		usage(out)
 		return exitOK
@@ -93,6 +105,9 @@ identity ceremonies (docs/node-network.md §2.6):
 
 roles: edge, relay, bridge, manager, anchor (docs/node-network.md §2.3)
 levels: 0 telemetry, 1 operations, 2 administration, 3 ownership (§2.4)
+
+tcpcl/tls plane (node-network §6.3):
+  cert --seed F [--validity-hours H] [--out F]  self-signed X.509 (PEM) + eid + cert_fp
 `)
 }
 
@@ -502,5 +517,65 @@ func rolecertID(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "%v", err)
 	}
 	fmt.Fprintf(out, "eid=%s\n", eid)
+	return exitOK
+}
+
+// --- cert (the TCPCL/TLS plane certificate, node-network §6.3) --------------
+
+func cmdCert(args []string, out, errw io.Writer) int {
+	f, code := parseFlags(args, errw, map[string]bool{"seed": true, "validity-hours": true, "out": true})
+	if code >= 0 {
+		return code
+	}
+	seedPath, code := f.req(errw, "seed")
+	if code >= 0 {
+		return code
+	}
+	seed, err := readSeedFile(seedPath)
+	if err != nil {
+		return fatalf(errw, "%v", err)
+	}
+	kp, err := nodeid.NewKeyPairFromSeed(seed)
+	if err != nil {
+		return fatalf(errw, "%v", err)
+	}
+	eid, err := nodeid.EIDFromPub(kp.Public)
+	if err != nil {
+		return fatalf(errw, "%v", err)
+	}
+	validity := nodeid.DefaultCertValidity
+	if v, ok := f["validity-hours"]; ok {
+		var hours int64
+		if _, err := fmt.Sscanf(v, "%d", &hours); err != nil || hours <= 0 {
+			return fatalf(errw, "--validity-hours %q is not a positive number of hours", v)
+		}
+		validity = time.Duration(hours) * time.Hour
+	}
+	cert, err := nodeid.SelfSignedX509(kp, eid, validity)
+	if err != nil {
+		return fatalf(errw, "%v", err)
+	}
+	pemBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
+	if p, ok := f["out"]; ok {
+		if err := os.WriteFile(p, pemBlock, 0o644); err != nil {
+			return fatalf(errw, "%v", err)
+		}
+	} else {
+		if _, err := out.Write(pemBlock); err != nil {
+			return fatalf(errw, "%v", err)
+		}
+	}
+	// The status line goes to stderr when the PEM goes to stdout, so the
+	// PEM stream stays clean for `>` redirection; to a file, stdout is free.
+	status := io.Writer(out)
+	if _, ok := f["out"]; !ok {
+		status = errw
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fatalf(errw, "parse own certificate: %v", err)
+	}
+	fmt.Fprintf(status, "eid=%s\ncert_fp=%s\nnot_after=%s\n",
+		eid, nodeid.CertFingerprintHex(cert.Certificate[0]), parsed.NotAfter.UTC().Format(time.RFC3339))
 	return exitOK
 }
