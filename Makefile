@@ -89,21 +89,25 @@ test-esp32-core:
 
 .PHONY: test-esp32-core
 
-# Field-session entry point (issue #20): the physical acceptance cases of
-# docs/field-test.md CANNOT be automated here — this target only verifies the
-# kit is complete and prints what to bring/print. Execution results go into
-# docs/field-test.md by hand, on site.
+# Field-session entry point (issue #20, extended by issue #33 P3.9): the
+# physical acceptance cases of docs/field-test.md CANNOT be automated here —
+# this target only verifies the kit is complete and prints what to bring/print.
+# Execution results go into docs/field-test.md by hand, on site.
 field-kit:
-	@echo "field kit — issue #20 session checklist"
+	@echo "field kit — issue #20 session checklist (+ the issue #33 P3.9 node-plane session, §15)"
 	@test -f docs/field-test.md || { echo "MISSING docs/field-test.md"; exit 1; }
 	@test -f docs/quick-start.md || { echo "MISSING docs/quick-start.md"; exit 1; }
 	@test -f docs/BUILD.md && grep -q 'Path 4' docs/BUILD.md \
 		|| { echo "MISSING the release-kit path (docs/BUILD.md §5 Path 4)"; exit 1; }
+	@grep -q '## 15. Phase 3 node-plane session' docs/field-test.md \
+		|| { echo "MISSING the Phase 3 node-plane session in docs/field-test.md (issue #33 P3.9 §15)"; exit 1; }
 	@echo "  [ok] docs/field-test.md   — the T1..T10 protocol + report scaffold (print 2)"
+	@echo "  [ok] docs/field-test.md   — the Phase 3 node-plane session N1..N14 (issue #33 P3.9; §15.2 kit; boundary: needs P3.3 bring-up)"
 	@echo "  [ok] docs/quick-start.md  — the end-user guide (print 2; also served at /guide)"
 	@echo "  [ok] release USB kit      — build per docs/BUILD.md §5 Path 4 (offline checklist there)"
 	@echo "  hardware, phones and meter: see docs/field-test.md §1 (prerequisites table)"
-	@echo "  after the session: fill the §12 matrices + §13 defect log, sign §14."
+	@echo "  node-plane hardware: see docs/field-test.md §15.2 (heads, attenuator, solar repeater kit)"
+	@echo "  after a session: fill the §12/§15.6 matrices + the §13/§15.7 defect logs, sign §14/§15.8."
 
 # Lint gates (docs/BUILD.md §4): gofmt must report nothing, vet nothing.
 lint:

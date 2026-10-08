@@ -281,7 +281,7 @@ matters):
 15. The field-equivalents test (issue #20) ends with:
 
     ```
-    PASS: 62 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
+    PASS: 100 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
     ```
 
 16. The install-node guide structure test (issue #35) ends with:
