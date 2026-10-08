@@ -159,6 +159,12 @@ func (e *cbor) eid(x eid) {
 // dtnEpochUnix is 2000-01-01T00:00:00Z, the BPv7 DTN time epoch.
 const dtnEpochUnix = 946684800
 
+// DTNEpochUnixS is the exported form of the DTN epoch (2000-01-01Z, unix
+// seconds): the conversion anchor consumers need to turn a parsed bundle's
+// CreationDTNms back into wall-clock time (e.g. the P-6 local expiry of the
+// forwarding store, docs/node-network.md §7.5).
+const DTNEpochUnixS = int64(dtnEpochUnix)
+
 // dtnTime converts unix seconds to DTN time (milliseconds since the DTN
 // epoch, RFC 9171 §4.2.9) as used in the creation timestamp.
 func dtnTime(unixSec int64) uint64 { return uint64((unixSec - dtnEpochUnix) * 1000) }

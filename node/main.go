@@ -16,16 +16,19 @@
 //	           [-tcpcl -tcpcl-node-seed nodeid/node.seed [-tcpcl-addr :4556]
 //	            [-tcpcl-peers host:port,...] [-tcpcl-pins node_tcpcl_pins.json]
 //	            [-tcpcl-mtls required|optional] [-tcpcl-budget-mib 64]
-//	            [-tcpcl-keepalive 30]]
+//	            [-tcpcl-keepalive 30] [-tcpcl-store node_bundles.db]
+//	            [-tcpcl-store-cap 5000] [-tcpcl-dial-interval 30]
+//	            [-tcpcl-debug]]
 //
 // The daemon is a single static binary (see build.sh): the web UI travels
 // inside it via go:embed, so a node is deployed by copying one file. Every
 // battery flag is optional — with none set the status page renders the
 // battery section as N/A (the reading chain degrades gracefully and never
 // becomes a dependency, docs/protocol.md §10.7). The node-plane flags
-// (issue #33 P3.4) are OFF by default: the daemon is a pure user-plane
+// (issue #33 P3.4/P3.5) are OFF by default: the daemon is a pure user-plane
 // mailbox until -tcpcl turns on the Wi-Fi convergence layer (nodeplane.go;
-// the received bundles are validated and counted, forwarding lands P3.5).
+// received bundles land in the §7.5 bundle store and epidemic-sync at every
+// contact — docs/node-network.md §7).
 package main
 
 import (
@@ -47,6 +50,7 @@ import (
 
 	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/cleanup"
+	"offgrid/dtn-node/internal/forward"
 	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/power"
 	"offgrid/dtn-node/internal/sdnotify"
@@ -188,7 +192,8 @@ func main() {
 
 	// Node-plane TCPCLv4 (issue #33 P3.4, docs/node-network.md §6.3) —
 	// OPTIONAL and OFF by default: the fleet behavior and every existing
-	// test are untouched unless the operator turns it on.
+	// test are untouched unless the operator turns it on. P3.5 wires the
+	// real forwarding core behind it (§7 store + sync).
 	tcpclEnabled := flag.Bool("tcpcl", false, "serve + dial the node plane (TCPCLv4, RFC 9174 subset) over Wi-Fi/IP; default off")
 	tcpclAddr := flag.String("tcpcl-addr", ":4556", "TCPCL listen address (4556 is the IANA TCPCL port)")
 	tcpclPeers := flag.String("tcpcl-peers", "", "comma-separated host:port list of node-plane peers to dial opportunistically")
@@ -197,6 +202,10 @@ func main() {
 	tcpclMTLS := flag.String("tcpcl-mtls", "required", "client-certificate policy: required|optional (§6.2 item 4: mTLS optional-but-defined)")
 	tcpclBudgetMiB := flag.Int("tcpcl-budget-mib", 64, "per-contact transfer budget in MiB (§7.4: 64 MiB, enforced on ingress and egress)")
 	tcpclKeepalive := flag.Int("tcpcl-keepalive", 30, "advertised keepalive interval in seconds (RFC 9174 §5.1.1 recommends 30–600; 0 → 30)")
+	tcpclStore := flag.String("tcpcl-store", "", "bundle store path (§7.5; default: the -db path with _bundles.db)")
+	tcpclStoreCap := flag.Int("tcpcl-store-cap", forward.DefaultCap, "bundle store cap (§7.5: Pi default 5000)")
+	tcpclDialInterval := flag.Int("tcpcl-dial-interval", 30, "opportunistic dial interval in seconds (±25% jitter; 0 → 30)")
+	tcpclDebug := flag.Bool("tcpcl-debug", false, "log node-plane counter snapshots every minute (RAM-only bookkeeping)")
 
 	flag.Parse()
 
@@ -273,12 +282,19 @@ func main() {
 	defer cancelCleanup()
 	cleanup.Start(cleanupCtx, recordingJanitor{store: store, counters: counters}, cleanupInterval)
 
-	// The node plane (P3.4): started ONLY when -tcpcl is set; its lifetime
-	// rides the same signal context as the HTTP server, and stop() runs
-	// the §6.1 graceful SESS_TERM per live session before exit.
+	// The node plane (P3.4 wiring, P3.5 forwarding core): started ONLY when
+	// -tcpcl is set; its lifetime rides the same signal context as the HTTP
+	// server, and stop() runs the §6.1 graceful SESS_TERM per live session
+	// and closes the bundle store before exit. The bundle store defaults to
+	// a sibling of the envelope database (its own §7.5 namespace).
+	tcpclStorePath := *tcpclStore
+	if tcpclStorePath == "" {
+		tcpclStorePath = deriveStorePath(*dbPath)
+	}
 	nodePlane, err := startNodePlane(ctx, buildTCPCLOptions(
 		*tcpclEnabled, *tcpclAddr, *tcpclPeers, *tcpclNodeSeed, *tcpclPins,
-		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive), log.Default())
+		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive,
+		tcpclStorePath, *tcpclStoreCap, *tcpclDialInterval, *tcpclDebug), log.Default())
 	if err != nil {
 		log.Fatalf("cannot start the node plane: %v", err)
 	}

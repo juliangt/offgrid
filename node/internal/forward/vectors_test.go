@@ -1,0 +1,564 @@
+package forward
+
+// Shared conformance vectors for P3.5 (tests/vectors/forward/vectors.json)
+// — the single source of truth executed by BOTH the Go suite (this test)
+// and the C host suite (esp32/components/dtn_core/host/tests/test_forward.c
+// via the generated header host/tests/forward_vectors.h). The #39/P3.1/P3.2
+// pattern: one committed JSON + one generated C header, both rewritten by
+// this test's -regen flag and never allowed to drift.
+//
+// What the vectors pin across implementations:
+//   - bloom: byte-exact 512-byte §7.1 summaries of fixed id sets;
+//   - diff: the transfer list computed from a summary + an id set;
+//   - store: admission SCENARIOS (cap, clock, ordered admits) with the
+//     per-step verdict (accepted / dup / expired / hop_capped / at_cap)
+//     and the surviving id set — covering dedup, the hop ceiling, local
+//     expiry, at-cap refusal and the priority-aware eviction ORDER.
+//
+// Provenance: the rules implemented are docs/node-network.md §7 (v1
+// epidemic sync, priority discipline, bundle store); the Bloom parameter
+// set and the byte layout are frozen there (§7.1: 4096 bits, k = 4).
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"testing"
+	"time"
+
+	"offgrid/dtn-node/internal/bundle"
+)
+
+const forwardRegenCmd = "cd node && go test ./internal/forward -run TestForwardVectorsStable -regen"
+
+// vecNow is the repo fixture clock (the same instant the bundle and link
+// vector sets use).
+const vecNowS = int64(1791072000)
+
+// JSON schema types (field order = marshal order = deterministic bytes).
+type (
+	vecBloom struct {
+		Name             string   `json:"name"`
+		IDsHex           []string `json:"ids_hex"`
+		ExpectSummaryHex string   `json:"expect_summary_hex"`
+	}
+	vecDiff struct {
+		Name             string   `json:"name"`
+		SummaryHex       string   `json:"summary_hex"`
+		IDsHex           []string `json:"ids_hex"`
+		ExpectMissingHex []string `json:"expect_missing_hex"`
+	}
+	vecStoreStep struct {
+		PDUHex        string `json:"pdu_hex"`
+		ExpectVerdict string `json:"expect_verdict"`
+	}
+	vecStore struct {
+		Name           string         `json:"name"`
+		Cap            int            `json:"cap"`
+		NowUnixS       int64          `json:"now_unix_s"`
+		Steps          []vecStoreStep `json:"steps"`
+		ExpectSurvivor []string       `json:"expect_surviving_ids_hex"`
+	}
+	forwardVectorSet struct {
+		Provenance   string     `json:"provenance"`
+		RegenCommand string     `json:"regen_command"`
+		Now          int64      `json:"now"`
+		Bloom        []vecBloom `json:"bloom"`
+		Diff         []vecDiff  `json:"diff"`
+		Store        []vecStore `json:"store"`
+	}
+)
+
+// Paths resolve from THIS file's location, never from the test process's
+// working directory.
+func forwardVecRoot() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(thisFile))))
+}
+
+func forwardVecJSONPath() string {
+	return filepath.Join(forwardVecRoot(), "tests", "vectors", "forward", "vectors.json")
+}
+
+func forwardVecHeaderPath() string {
+	return filepath.Join(forwardVecRoot(), "esp32", "components", "dtn_core", "host", "tests", "forward_vectors.h")
+}
+
+var regenForwardVectors = flag.Bool("regen", false, "regenerate tests/vectors/forward/vectors.json and the C host header")
+
+// vecID derives a deterministic 32-byte bundle id from a name — the ids in
+// the bloom/diff sections are plain fixture digests (the store sections'
+// ids come from real PDUs).
+func vecID(name string) [32]byte {
+	return sha256Sum([]byte("offgrid-forward-vector:" + name))
+}
+
+func vecHexIDs(names ...string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		id := vecID(n)
+		out[i] = hex.EncodeToString(id[:])
+	}
+	return out
+}
+
+// vecPDU encodes a deterministic profile bundle: kind mail/management/p2p,
+// payload = n repeats of byte b, created at vecNow-createdOffset, the given
+// ttl and hop. Same inputs → byte-identical PDU on both implementations.
+func vecPDU(kind string, b byte, n int, createdUnix int64, ttl uint64, hop byte) []byte {
+	payload := bytes.Repeat([]byte{b}, n)
+	var out *bundle.Bundle
+	var err error
+	switch kind {
+	case "mail":
+		out, err = bundle.NewMail(payload, createdUnix*1000, ttl)
+	case "management":
+		out, err = bundle.NewManagement("dtn://og.0123456789abcdef/", AdminEID, createdUnix*1000, ttl, 1, payload)
+	case "p2p":
+		out, err = bundle.NewManagement("dtn://og.0123456789abcdef/", "dtn://og.dac073e0123bdea5/", createdUnix*1000, ttl, 1, payload)
+	default:
+		panic("vecPDU kind " + kind)
+	}
+	if err != nil {
+		panic(err)
+	}
+	out.Hop = hop
+	enc, err := bundle.Encode(out)
+	if err != nil {
+		panic(err)
+	}
+	return enc
+}
+
+func buildForwardVectorSet(t *testing.T) *forwardVectorSet {
+	t.Helper()
+	set := &forwardVectorSet{
+		Provenance: "Generated by node/internal/forward (issue #33 P3.5) from docs/node-network.md §7: " +
+			"the §7.1 Bloom summary (4096 bits, k = 4, unsalted over opaque SHA-256 bundle ids), the §7.1 diff, " +
+			"and the §7.5 store admission scenarios (dedup, hop ceiling, local expiry, at-cap refusal, " +
+			"priority-aware eviction order). Deterministic; committed copies MUST NOT be hand-edited.",
+		RegenCommand: forwardRegenCmd,
+		Now:          vecNowS,
+	}
+
+	// --- bloom: byte-exact summaries over fixed id sets.
+	bloomSets := []struct {
+		name     string
+		vertices []string
+	}{
+		{"empty", nil},
+		{"single", []string{"alpha"}},
+		{"pair", []string{"alpha", "bravo"}},
+		{"five", []string{"alpha", "bravo", "charlie", "delta", "echo"}},
+		{"twenty", []string{
+			"id00", "id01", "id02", "id03", "id04", "id05", "id06", "id07", "id08", "id09",
+			"id10", "id11", "id12", "id13", "id14", "id15", "id16", "id17", "id18", "id19",
+		}},
+	}
+	for _, bs := range bloomSets {
+		ids := vecHexIDs(bs.vertices...)
+		sum := &Summary{}
+		for _, hx := range ids {
+			raw, err := hex.DecodeString(hx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var id [32]byte
+			copy(id[:], raw)
+			sum.Add(&id)
+		}
+		set.Bloom = append(set.Bloom, vecBloom{
+			Name:             bs.name,
+			IDsHex:           ids,
+			ExpectSummaryHex: hex.EncodeToString(sum.Bits[:]),
+		})
+	}
+
+	// --- diff: transfer lists against fixed summaries.
+	mkDiff := func(name string, known []string, probe []string) {
+		sum := &Summary{}
+		for _, hx := range known {
+			raw, _ := hex.DecodeString(hx)
+			var id [32]byte
+			copy(id[:], raw)
+			sum.Add(&id)
+		}
+		ids := make([][32]byte, 0, len(probe))
+		for _, hx := range probe {
+			raw, _ := hex.DecodeString(hx)
+			var id [32]byte
+			copy(id[:], raw)
+			ids = append(ids, id)
+		}
+		missing := Missing(ids, sum)
+		got := make([]string, len(missing))
+		for i, id := range missing {
+			got[i] = hex.EncodeToString(id[:])
+		}
+		set.Diff = append(set.Diff, vecDiff{
+			Name:             name,
+			SummaryHex:       hex.EncodeToString(sum.Bits[:]),
+			IDsHex:           probe,
+			ExpectMissingHex: got,
+		})
+	}
+	known := vecHexIDs("alpha", "bravo")
+	mkDiff("peer_has_two_we_have_five", known,
+		vecHexIDs("alpha", "bravo", "charlie", "delta", "echo"))
+	mkDiff("converged", known, known)
+	mkDiff("we_have_all_they_have_none", nil, vecHexIDs("charlie", "delta"))
+
+	// --- store scenarios: admission verdicts + survivors.
+	ttlH := uint64(3600)
+	day := uint64(24 * 3600)
+
+	// Scenario 1: the admission pipeline (dedup incl. the hop-rewritten
+	// copy, local expiry, the hop ceiling).
+	{
+		mail := vecPDU("mail", 0xA0, 40, vecNowS, ttlH, 0)
+		rew, err := bundle.RewriteHop(mail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expired := vecPDU("mail", 0xA1, 40, vecNowS-2*int64(ttlH), ttlH, 0)
+		capped := vecPDU("mail", 0xA2, 40, vecNowS, ttlH, 7)
+		set.Store = append(set.Store, vecStore{
+			Name:     "admission_pipeline",
+			Cap:      100,
+			NowUnixS: vecNowS,
+			Steps: []vecStoreStep{
+				{hex.EncodeToString(mail), "accepted"},
+				{hex.EncodeToString(mail), "dup"},
+				{hex.EncodeToString(rew), "dup"}, // P-7 excludes the hop octet
+				{hex.EncodeToString(expired), "expired"},
+				{hex.EncodeToString(capped), "hop_capped"},
+			},
+		})
+	}
+
+	// Scenario 2: the priority-aware eviction order (cap 3; mirrors the Go
+	// store test): bulk evicts bulk; mail evicts bulk; management evicts
+	// the soonest-expiring mail; bulk into a management+mail full store is
+	// REFUSED (never trades down).
+	{
+		mgmt := vecPDU("management", 0xB0, 40, vecNowS, 7*day, 0)
+		mail := vecPDU("mail", 0xB1, 40, vecNowS, 2*day, 0)
+		bulk := vecPDU("p2p", 0xB2, 40, vecNowS, 1*day, 0)
+		bulk2 := vecPDU("p2p", 0xB3, 40, vecNowS, 3*day, 0)
+		mail2 := vecPDU("mail", 0xB4, 40, vecNowS, 8*day, 0)
+		mgmt2 := vecPDU("management", 0xB5, 40, vecNowS, 9*day, 0)
+		bulk3 := vecPDU("p2p", 0xB6, 40, vecNowS, ttlH, 0)
+		set.Store = append(set.Store, vecStore{
+			Name:     "priority_eviction_order",
+			Cap:      3,
+			NowUnixS: vecNowS,
+			Steps: []vecStoreStep{
+				{hex.EncodeToString(mgmt), "accepted"},
+				{hex.EncodeToString(mail), "accepted"},
+				{hex.EncodeToString(bulk), "accepted"},
+				{hex.EncodeToString(bulk2), "accepted"}, // evicts bulk (class rule)
+				{hex.EncodeToString(mail2), "accepted"}, // evicts bulk2 (bulk lane)
+				{hex.EncodeToString(mgmt2), "accepted"}, // evicts mail (soonest in mail lane)
+				{hex.EncodeToString(bulk3), "at_cap"},   // refuses: nothing evictable for bulk
+			},
+		})
+	}
+
+	// Compute survivors for every store scenario by RUNNING the Go store.
+	for i := range set.Store {
+		sc := &set.Store[i]
+		clock := &testClock{t: time.Unix(sc.NowUnixS, 0)}
+		st, err := Open(Config{Path: filepath.Join(t.TempDir(), "vectors.db"), Cap: sc.Cap, Now: clock.Now})
+		if err != nil {
+			t.Fatalf("vector store: %v", err)
+		}
+		for _, step := range sc.Steps {
+			pdu, err := hex.DecodeString(step.PDUHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v, aerr := st.accept(pdu)
+			wantErr := v == VerdictAtCap && aerr != nil
+			_ = wantErr
+			if v.String() != step.ExpectVerdict {
+				t.Fatalf("scenario %s: verdict %s, want %s", sc.Name, v, step.ExpectVerdict)
+			}
+			if v == VerdictAtCap && aerr == nil {
+				t.Fatalf("scenario %s: at_cap must carry ErrCapacity", sc.Name)
+			}
+		}
+		entries, err := st.Entries()
+		if err != nil {
+			t.Fatal(err)
+		}
+		survivors := make([]string, len(entries))
+		for j, en := range entries {
+			survivors[j] = hex.EncodeToString(en.ID[:])
+		}
+		sort.Strings(survivors)
+		sc.ExpectSurvivor = survivors
+		_ = st.Close()
+	}
+	return set
+}
+
+// --- generated C header -----------------------------------------------------
+
+// cHexArray renders a C byte-array literal from hex, 8 bytes per line.
+// An EMPTY set renders a single placeholder byte (C99 has no zero-length
+// arrays); the paired *_COUNT fields gate every read.
+func cHexArray(t *testing.T, hx string) string {
+	t.Helper()
+	raw, err := hex.DecodeString(hx)
+	if err != nil {
+		t.Fatalf("vector hex: %v", err)
+	}
+	var buf bytes.Buffer
+	buf.WriteString("{\n")
+	if len(raw) == 0 {
+		buf.WriteString("    0x00, /* placeholder: the paired COUNT is 0 */\n")
+	}
+	for i := 0; i < len(raw); i += 8 {
+		end := i + 8
+		if end > len(raw) {
+			end = len(raw)
+		}
+		buf.WriteString("    ")
+		for _, b := range raw[i:end] {
+			fmt.Fprintf(&buf, "0x%02x,", b)
+		}
+		buf.WriteString("\n")
+	}
+	buf.WriteString("}")
+	return buf.String()
+}
+
+// buildForwardHeader renders the generated C header for a vector set.
+func buildForwardHeader(t *testing.T, set *forwardVectorSet) []byte {
+	t.Helper()
+	var hdr bytes.Buffer
+	fmt.Fprintf(&hdr, `/* forward_vectors.h — P3.5 forwarding-engine test vectors for the C host
+ * suite. GENERATED from tests/vectors/forward/vectors.json by the Go vector
+ * test:
+ *   %s
+ * Do not edit by hand — regenerate (docs/node-network.md §7 rules: the
+ * §7.1 Bloom parameters and diff, the §7.5 admission/eviction semantics).
+ * Sharing one generated file is the Go<->C interop contract: the summaries
+ * below were ENCODED in Go and must be reproduced byte for byte in C, and
+ * the store verdicts must match step for step.
+ */
+#ifndef DTN_TEST_FORWARD_VECTORS_H
+#define DTN_TEST_FORWARD_VECTORS_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define FORWARD_VEC_NOW %dll
+
+`, forwardRegenCmd, vecNowS)
+
+	// bloom vectors
+	fmt.Fprintf(&hdr, "/* bloom: id sets -> byte-exact 512-byte summaries. */\n")
+	fmt.Fprintf(&hdr, "#define FORWARD_BLOOM_VEC_N %d\n", len(set.Bloom))
+	for i, v := range set.Bloom {
+		fmt.Fprintf(&hdr, "\n/* bloom[%d]: %s */\n", i, v.Name)
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_BLOOM_%d_IDS[] = %s;\n", i, cHexArray(t, concatHex(t, v.IDsHex)))
+		fmt.Fprintf(&hdr, "static const uint16_t FORWARD_BLOOM_%d_ID_COUNT = %d;\n", i, len(v.IDsHex))
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_BLOOM_%d_EXPECT[] = %s;\n", i, cHexArray(t, v.ExpectSummaryHex))
+	}
+
+	// diff vectors
+	fmt.Fprintf(&hdr, "\n/* diff: (summary, id set) -> transfer list. */\n")
+	fmt.Fprintf(&hdr, "#define FORWARD_DIFF_VEC_N %d\n", len(set.Diff))
+	for i, v := range set.Diff {
+		fmt.Fprintf(&hdr, "\n/* diff[%d]: %s */\n", i, v.Name)
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_DIFF_%d_SUMMARY[] = %s;\n", i, cHexArray(t, v.SummaryHex))
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_DIFF_%d_IDS[] = %s;\n", i, cHexArray(t, concatHex(t, v.IDsHex)))
+		fmt.Fprintf(&hdr, "static const uint16_t FORWARD_DIFF_%d_ID_COUNT = %d;\n", i, len(v.IDsHex))
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_DIFF_%d_MISSING[] = %s;\n", i, cHexArray(t, concatHex(t, v.ExpectMissingHex)))
+		fmt.Fprintf(&hdr, "static const uint16_t FORWARD_DIFF_%d_MISSING_COUNT = %d;\n", i, len(v.ExpectMissingHex))
+	}
+
+	// store scenarios
+	fmt.Fprintf(&hdr, "\n/* store: admission scenarios — verdict per step + surviving ids. */\n")
+	fmt.Fprintf(&hdr, "#define FORWARD_STORE_VEC_N %d\n", len(set.Store))
+	fmt.Fprintf(&hdr, "#define FORWARD_STORE_MAX_STEPS %d\n", maxSteps(set.Store))
+	for i, v := range set.Store {
+		fmt.Fprintf(&hdr, "\n/* store[%d]: %s (cap %d) */\n", i, v.Name, v.Cap)
+		fmt.Fprintf(&hdr, "static const int FORWARD_STORE_%d_CAP = %d;\n", i, v.Cap)
+		fmt.Fprintf(&hdr, "static const int FORWARD_STORE_%d_STEP_N = %d;\n", i, len(v.Steps))
+		for j, step := range v.Steps {
+			fmt.Fprintf(&hdr, "static const uint8_t FORWARD_STORE_%d_STEP_%d_PDU[] = %s;\n", i, j, cHexArray(t, step.PDUHex))
+			fmt.Fprintf(&hdr, "static const uint16_t FORWARD_STORE_%d_STEP_%d_LEN = %d;\n", i, j, len(step.PDUHex)/2)
+			fmt.Fprintf(&hdr, "static const char FORWARD_STORE_%d_STEP_%d_VERDICT[] = \"%s\";\n", i, j, step.ExpectVerdict)
+		}
+		fmt.Fprintf(&hdr, "static const uint16_t FORWARD_STORE_%d_SURVIVOR_N = %d;\n", i, len(v.ExpectSurvivor))
+		fmt.Fprintf(&hdr, "static const uint8_t FORWARD_STORE_%d_SURVIVORS[] = %s;\n", i, cHexArray(t, concatHex(t, v.ExpectSurvivor)))
+	}
+
+	hdr.WriteString("\n#endif /* DTN_TEST_FORWARD_VECTORS_H */\n")
+
+	return hdr.Bytes()
+}
+
+func concatHex(t *testing.T, hexes []string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, hx := range hexes {
+		raw, err := hex.DecodeString(hx)
+		if err != nil {
+			t.Fatalf("vector id hex: %v", err)
+		}
+		buf.Write(raw)
+	}
+	return hex.EncodeToString(buf.Bytes())
+}
+
+func maxSteps(v []vecStore) int {
+	n := 0
+	for _, s := range v {
+		if len(s.Steps) > n {
+			n = len(s.Steps)
+		}
+	}
+	return n
+}
+
+// writeIfChanged writes path only when the content differs (keeps go test
+// mtime-clean on unchanged runs).
+func writeIfChanged(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, content) {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("regenerated %s", path)
+}
+
+// TestForwardVectorsStable pins the committed JSON and C header to this
+// exact recomputation; -regen rewrites both (the only sanctioned way to
+// change them).
+func TestForwardVectorsStable(t *testing.T) {
+	set := buildForwardVectorSet(t)
+	jsonBytes, err := json.MarshalIndent(set, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonBytes = append(jsonBytes, '\n')
+	headerBytes := buildForwardHeader(t, set)
+
+	if regenForwardVectors != nil && *regenForwardVectors {
+		writeIfChanged(t, forwardVecJSONPath(), jsonBytes)
+		writeIfChanged(t, forwardVecHeaderPath(), headerBytes)
+		return
+	}
+	committed, err := os.ReadFile(forwardVecJSONPath())
+	if err != nil {
+		t.Fatalf("committed vectors missing (run the -regen command in the provenance field): %v", err)
+	}
+	if !bytes.Equal(committed, jsonBytes) {
+		t.Fatalf("tests/vectors/forward/vectors.json drifted from the recomputation — regenerate: %s", forwardRegenCmd)
+	}
+	committedHdr, err := os.ReadFile(forwardVecHeaderPath())
+	if err != nil {
+		t.Fatalf("the generated C header is missing: %v", err)
+	}
+	if !bytes.Equal(committedHdr, headerBytes) {
+		t.Fatalf("forward_vectors.h drifted from the recomputation — regenerate: %s", forwardRegenCmd)
+	}
+}
+
+// sha256Sum is the local alias (keeps the vector helpers self-documenting).
+func sha256Sum(b []byte) [32]byte { return sha256.Sum256(b) }
+
+// TestForwardVectorSmoke executes the committed vectors through the GO side
+// (the C side consumes the generated header) — the same assertions the C
+// host suite runs, so a one-sided drift fails here first.
+func TestForwardVectorSmoke(t *testing.T) {
+	raw, err := os.ReadFile(forwardVecJSONPath())
+	if err != nil {
+		t.Skipf("vectors not generated yet: %v", err)
+	}
+	var set forwardVectorSet
+	if err := json.Unmarshal(raw, &set); err != nil {
+		t.Fatalf("committed vectors do not parse: %v", err)
+	}
+	if len(set.Bloom) == 0 || len(set.Diff) == 0 || len(set.Store) == 0 {
+		t.Fatalf("committed vector set is empty")
+	}
+	for _, v := range set.Bloom {
+		sum := &Summary{}
+		for _, hx := range v.IDsHex {
+			b, _ := hex.DecodeString(hx)
+			var id [32]byte
+			copy(id[:], b)
+			sum.Add(&id)
+		}
+		if got := hex.EncodeToString(sum.Bits[:]); got != v.ExpectSummaryHex {
+			t.Fatalf("bloom %s drifted", v.Name)
+		}
+	}
+	for _, v := range set.Diff {
+		b, _ := hex.DecodeString(v.SummaryHex)
+		sum := &Summary{}
+		copy(sum.Bits[:], b)
+		ids := make([][32]byte, len(v.IDsHex))
+		for i, hx := range v.IDsHex {
+			raw, _ := hex.DecodeString(hx)
+			copy(ids[i][:], raw)
+		}
+		missing := Missing(ids, sum)
+		if len(missing) != len(v.ExpectMissingHex) {
+			t.Fatalf("diff %s: %d missing, want %d", v.Name, len(missing), len(v.ExpectMissingHex))
+		}
+		for i, id := range missing {
+			if hex.EncodeToString(id[:]) != v.ExpectMissingHex[i] {
+				t.Fatalf("diff %s drifted at %d", v.Name, i)
+			}
+		}
+	}
+	for _, sc := range set.Store {
+		clock := &testClock{t: time.Unix(sc.NowUnixS, 0)}
+		st, err := Open(Config{Path: filepath.Join(t.TempDir(), "smoke.db"), Cap: sc.Cap, Now: clock.Now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, step := range sc.Steps {
+			pdu, _ := hex.DecodeString(step.PDUHex)
+			v, aerr := st.accept(pdu)
+			if v.String() != step.ExpectVerdict {
+				t.Fatalf("store %s: verdict %s, want %s", sc.Name, v, step.ExpectVerdict)
+			}
+			if v == VerdictAtCap && aerr == nil {
+				t.Fatalf("store %s: at_cap must carry ErrCapacity", sc.Name)
+			}
+		}
+		entries, _ := st.Entries()
+		var got []string
+		for _, en := range entries {
+			got = append(got, hex.EncodeToString(en.ID[:]))
+		}
+		sort.Strings(got)
+		if len(got) != len(sc.ExpectSurvivor) {
+			t.Fatalf("store %s: %d survivors, want %d", sc.Name, len(got), len(sc.ExpectSurvivor))
+		}
+		for i := range got {
+			if got[i] != sc.ExpectSurvivor[i] {
+				t.Fatalf("store %s: survivor %d drifted", sc.Name, i)
+			}
+		}
+		st.Close()
+	}
+}

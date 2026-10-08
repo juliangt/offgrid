@@ -13,7 +13,7 @@ $CC -std=c99 -Wall -Wextra -Werror -O1 -D_POSIX_C_SOURCE=200809L \
     tests/main.c tests/test_json.c tests/test_envelope.c tests/test_sync.c \
     tests/test_canonical.c tests/test_budget.c tests/test_docs.c \
     tests/test_store.c tests/test_nodeid.c tests/test_bundle.c \
-    tests/test_link.c tests/test_mac.c tests/radio_fake.c \
+    tests/test_link.c tests/test_mac.c tests/test_forward.c tests/radio_fake.c \
     ../src/dtn_core.c ../src/dtn_json.c ../src/dtn_base64.c \
     ../src/dtn_envelope.c ../src/dtn_canonical.c ../src/dtn_budget.c \
     ../src/dtn_docs.c ../src/dtn_sync.c ../src/dtn_store.c \
@@ -23,5 +23,6 @@ $CC -std=c99 -Wall -Wextra -Werror -O1 -D_POSIX_C_SOURCE=200809L \
     ../src/dtn_rolecert.c ../src/dtn_bundle.c \
     ../src/dtn_ccm.c ../src/dtn_hkdf.c ../src/dtn_session.c \
     ../src/dtn_frame.c ../src/dtn_mac.c \
+    ../src/dtn_epidemic.c ../src/dtn_bundlestore.c \
     -o build/dtn_core_tests
 exec ./build/dtn_core_tests

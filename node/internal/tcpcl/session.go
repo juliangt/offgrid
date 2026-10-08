@@ -102,6 +102,12 @@ type Config struct {
 	TermLinger time.Duration
 	// Sink receives validated bundles (ingress). Required.
 	Sink BundleSink
+	// OnEstablished, when non-nil, runs ONCE per established session in its
+	// own goroutine, on BOTH the active and passive side, after the session
+	// loops started (SendBundle is safe from it). The P3.5 sync engine uses
+	// it to run the §7.1 summary exchange; it is a pure local hook — no
+	// wire byte, no RFC 9174 message, is added by it.
+	OnEstablished func(*Session)
 	// Counters is the shared, optional counter set (nil-safe).
 	Counters *Counters
 	// Log is optional (nil → discard).
@@ -534,11 +540,15 @@ func (s *Session) Err() error {
 func (s *Session) Done() <-chan struct{} { return s.done }
 
 // startLoops launches the read loop and (when keepalives are negotiated)
-// the keepalive writer. Exactly two goroutines, both tied to s.done.
+// the keepalive writer, then the OnEstablished hook in its own goroutine.
+// Exactly two goroutines in the no-hook case, both tied to s.done.
 func (s *Session) startLoops() {
 	go s.readLoop()
 	if s.keepalive > 0 {
 		go s.keepaliveLoop()
+	}
+	if h := s.cfg.OnEstablished; h != nil {
+		go h(s)
 	}
 }
 

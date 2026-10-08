@@ -78,6 +78,8 @@ func run(args []string, _ io.Reader, out, errw io.Writer) int {
 		return cmdRolecert(args[1:], out, errw)
 	case "cert":
 		return cmdCert(args[1:], out, errw)
+	case "bundle":
+		return cmdBundle(args[1:], out, errw)
 	case "-h", "--help", "help":
 		usage(out)
 		return exitOK
@@ -108,6 +110,18 @@ levels: 0 telemetry, 1 operations, 2 administration, 3 ownership (§2.4)
 
 tcpcl/tls plane (node-network §6.3):
   cert --seed F [--validity-hours H] [--out F]  self-signed X.509 (PEM) + eid + cert_fp
+
+node plane (node-network §6.3/§7.1, issue #33 P3.5):
+  bundle make --out F (--payload-text S | --payload F) [--ttl S]
+              [--created-unix-ms T]   encode an anonymous mail bundle (P-4)
+                                      and print its bundle_id=
+  bundle send --host H:PORT --pdu F --seed F
+              (--pins F | --insecure-skip-pin) [--timeout S]
+              one-shot TCPCLv4 contact: TLS 1.3, mTLS, TOFU pin (--pins is
+              the SAME store the daemon keeps; --insecure-skip-pin is the
+              explicit loopback-only escape hatch), one bundle transfer,
+              graceful termination. Prints peer=, bundle_id= (the P-7
+              dedup key the receiving store rows are keyed by), bytes=.
 `)
 }
 

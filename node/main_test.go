@@ -17,6 +17,7 @@ import (
 
 	"offgrid/dtn-node/internal/bundle"
 	"offgrid/dtn-node/internal/envelope"
+	"offgrid/dtn-node/internal/forward"
 	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/nodeid"
 	"offgrid/dtn-node/internal/storage"
@@ -235,10 +236,11 @@ func TestNodePlaneRequiresSeed(t *testing.T) {
 	}
 }
 
-// TestNodePlaneEndToEnd is the daemon-level leg of §11 row h: the real
-// wiring (listener + TOFU pin store + forwarding stub) receives a bundle
-// from a client session, refuses a malformed one, checkpoints the pin
-// store, and shuts down gracefully.
+// TestNodePlaneEndToEnd is the daemon-level leg of §11 rows g/h: the real
+// wiring (listener + TOFU pin store + the P3.5 forwarding core) receives a
+// bundle from a client session into the §7.5 store, refuses a malformed
+// one, answers the §7.1 summary exchange with its own summary bundle,
+// checkpoints the pin store, and shuts down gracefully (store closed).
 func TestNodePlaneEndToEnd(t *testing.T) {
 	dir := t.TempDir()
 
@@ -256,17 +258,21 @@ func TestNodePlaneEndToEnd(t *testing.T) {
 		t.Fatalf("eid: %v", err)
 	}
 	pinsPath := filepath.Join(dir, "pins.json")
+	storePath := filepath.Join(dir, "bundles.db")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	np, err := startNodePlane(ctx, tcpclOptions{
-		enabled:      true,
-		addr:         "127.0.0.1:0",
-		nodeSeedPath: seedPath,
-		pinsPath:     pinsPath,
-		mtls:         "required",
-		budgetMiB:    1,
-		keepaliveSec: 5,
+		enabled:         true,
+		addr:            "127.0.0.1:0",
+		nodeSeedPath:    seedPath,
+		pinsPath:        pinsPath,
+		mtls:            "required",
+		budgetMiB:       1,
+		keepaliveSec:    5,
+		storePath:       storePath,
+		storeCap:        100,
+		dialIntervalSec: 30,
 	}, testLogger(t))
 	if err != nil {
 		t.Fatalf("start node plane: %v", err)
@@ -276,7 +282,7 @@ func TestNodePlaneEndToEnd(t *testing.T) {
 	}
 
 	// A client node: fresh identity, pinning the daemon on first contact
-	// (TOFU — the exact §6.1 bootstrapping path).
+	// (TOFU — the exact §6.1 bootstrapping path). Its sink only counts.
 	ckp, err := nodeid.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("client keygen: %v", err)
@@ -305,20 +311,28 @@ func TestNodePlaneEndToEnd(t *testing.T) {
 		t.Fatalf("the daemon's certified EID must be %s, got %q", daemonEID, got)
 	}
 
-	// One valid bundle lands in the stub sink (valid + counted).
+	// One valid bundle lands in the §7.5 store (valid + stored).
 	pdu := validMailBundle(t, []byte("daemon-bound envelope"))
 	if err := sess.SendBundle(context.Background(), pdu); err != nil {
 		t.Fatalf("send to daemon: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
-	for np.sink.accepted.Load() == 0 && time.Now().Before(deadline) {
+	for time.Now().Before(deadline) {
+		if n, _ := np.store.Count(); n == 1 {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got := np.sink.accepted.Load(); got != 1 {
-		t.Fatalf("the stub sink must have accepted exactly one bundle, got %d", got)
+	if n, _ := np.store.Count(); n != 1 {
+		t.Fatalf("the store must hold exactly one bundle, got %d", n)
 	}
-	if got := clientSink.total(); got != 0 {
-		t.Fatalf("the daemon sent nothing yet, client sink has %d", got)
+	if snap := np.store.CountersSnapshot(); snap.Accepted != 1 {
+		t.Fatalf("admission counter: %+v", snap)
+	}
+	// The §7.1 handshake ran: the daemon sent its summary bundle to the
+	// client (an ordinary profile bundle; a non-sync peer just absorbs it).
+	if got := np.engine.CountersSnapshot().SummariesSent; got != 1 {
+		t.Fatalf("the daemon must have sent one summary bundle, got %d", got)
 	}
 
 	// A malformed transfer is refused fail-closed.
@@ -326,7 +340,8 @@ func TestNodePlaneEndToEnd(t *testing.T) {
 		t.Fatalf("the malformed transfer must be refused")
 	}
 
-	// The §6.1 goodbye, then the plane's own shutdown (idempotent).
+	// The §6.1 goodbye, then the plane's own shutdown (idempotent; the
+	// bundle store closes last).
 	if err := sess.Terminate(tcpcl.TermUnknown); err != nil {
 		t.Fatalf("client terminate: %v", err)
 	}
@@ -348,16 +363,47 @@ func TestNodePlaneEndToEnd(t *testing.T) {
 	if _, ok := pins.Peer(ceid); !ok {
 		t.Fatalf("the daemon must have pinned its first-contact peer %s", ceid)
 	}
+
+	// The store survived the shutdown and still holds the bundle (WAL
+	// commit on close).
+	st, err := forward.Open(forward.Config{Path: storePath})
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st.Close()
+	if n, _ := st.Count(); n != 1 {
+		t.Fatalf("reopened store holds %d bundles, want 1", n)
+	}
 }
 
-// TestBuildTCPCLOptionsParsesPeers pins the flag-to-options mapping.
+// TestDeriveStorePath pins the §7.5 namespace rule: the bundle store is a
+// sibling of the envelope database, never inside it.
+func TestDeriveStorePath(t *testing.T) {
+	cases := map[string]string{
+		"node_storage.db":        "node_storage_bundles.db",
+		"/var/lib/dtn/node.db":   "/var/lib/dtn/node_bundles.db",
+		"plainname":              "plainname_bundles.db",
+		"/tmp/x/node_storage.db": "/tmp/x/node_storage_bundles.db",
+	}
+	for in, want := range cases {
+		if got := deriveStorePath(in); got != want {
+			t.Fatalf("deriveStorePath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestBuildTCPCLOptionsPinsPeers pins the flag-to-options mapping.
 func TestBuildTCPCLOptionsParsesPeers(t *testing.T) {
-	opts := buildTCPCLOptions(true, ":4556", "10.0.0.1:4556, 10.0.0.2:4556", "s", "p", "optional", 32, 60)
+	opts := buildTCPCLOptions(true, ":4556", "10.0.0.1:4556, 10.0.0.2:4556", "s", "p", "optional", 32, 60,
+		"bundles.db", 5000, 15, true)
 	if !opts.enabled || opts.addr != ":4556" || opts.mtls != "optional" || opts.budgetMiB != 32 || opts.keepaliveSec != 60 {
 		t.Fatalf("scalar mapping: %+v", opts)
 	}
 	if len(opts.peers) != 2 || opts.peers[0] != "10.0.0.1:4556" || opts.peers[1] != " 10.0.0.2:4556" {
 		t.Fatalf("peer list: %+v", opts.peers)
+	}
+	if opts.storePath != "bundles.db" || opts.storeCap != 5000 || opts.dialIntervalSec != 15 || !opts.debug {
+		t.Fatalf("P3.5 options: %+v", opts)
 	}
 }
 

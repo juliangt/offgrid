@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"offgrid/dtn-node/internal/bundle"
 	"offgrid/dtn-node/internal/nodeid"
 )
 
@@ -479,4 +480,81 @@ func TestCertCommand(t *testing.T) {
 	// Argument honesty.
 	mustFail(t, "not a positive number", "cert", "--seed", nodeSeed, "--validity-hours", "0")
 	mustFail(t, "no such file", "cert", "--seed", filepath.Join(dir, "missing.seed"))
+}
+
+// TestBundleMake pins the P3.5 `bundle make` command: the P-4 anonymous
+// mail shape, the printed bundle_id equal to the P-7 digest of the written
+// PDU, run-time creation with the given TTL, and the honest argument
+// errors. (The `bundle send` leg is the E2E's: tests/node_plane_e2e.sh
+// drives it against three real daemons, and TestNodePlaneEndToEnd in the
+// daemon package covers the wire against the real session engine.)
+func TestBundleMake(t *testing.T) {
+	dir := t.TempDir()
+	pduPath := filepath.Join(dir, "cargo.pdu")
+
+	stdout, stderr, code := runTool(t, "bundle", "make",
+		"--out", pduPath, "--payload-text", "offgrid-test-cargo", "--ttl", "3600")
+	if code != 0 {
+		t.Fatalf("bundle make: %s", stderr)
+	}
+	_ = stderr
+	raw, err := os.ReadFile(pduPath)
+	if err != nil {
+		t.Fatalf("read pdu: %v", err)
+	}
+	b, err := bundle.Parse(raw, time.Now())
+	if err != nil {
+		t.Fatalf("the minted PDU must parse as a profile bundle: %v", err)
+	}
+	if b.Destination.String() != "dtn:og-mail" || !b.Source.IsNone() {
+		t.Fatalf("the minted bundle must be the P-4 anonymous mail shape, got %s → %s", b.Source, b.Destination)
+	}
+	if b.Hop != 0 || string(b.Payload) != "offgrid-test-cargo" {
+		t.Fatalf("payload/hop mismatch: hop %d payload %q", b.Hop, b.Payload)
+	}
+	if b.Lifetime != 3600 {
+		t.Fatalf("ttl %d, want 3600", b.Lifetime)
+	}
+	// Creation derives from run time (within a minute of the test's clock).
+	createdUnix := int64(b.CreationDTNms)/1000 + bundle.DTNEpochUnixS
+	if d := time.Since(time.Unix(createdUnix, 0)); d < -time.Minute || d > time.Minute {
+		t.Fatalf("creation timestamp %d is not the run time (%v off)", createdUnix, d)
+	}
+	// The printed id IS the P-7 key of the written bytes.
+	wantID, err := bundle.BundleIDOf(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout, "bundle_id="+hex.EncodeToString(wantID[:])) {
+		t.Fatalf("stdout must carry the P-7 id, got %q", stdout)
+	}
+
+	// Deterministic for fixed inputs (--created-unix-ms).
+	fixed := filepath.Join(dir, "fixed.pdu")
+	mustSucceed(t, "bundle", "make", "--out", fixed,
+		"--payload-text", "offgrid-test-cargo", "--ttl", "3600",
+		"--created-unix-ms", "1791072000000")
+	fixed2 := filepath.Join(dir, "fixed2.pdu")
+	mustSucceed(t, "bundle", "make", "--out", fixed2,
+		"--payload-text", "offgrid-test-cargo", "--ttl", "3600",
+		"--created-unix-ms", "1791072000000")
+	a, _ := os.ReadFile(fixed)
+	bb, _ := os.ReadFile(fixed2)
+	if !bytes.Equal(a, bb) {
+		t.Fatalf("fixed inputs must produce byte-identical PDUs")
+	}
+
+	// A payload FILE works too.
+	pl := filepath.Join(dir, "payload.bin")
+	if err := os.WriteFile(pl, []byte("file-payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSucceed(t, "bundle", "make", "--out", filepath.Join(dir, "fromfile.pdu"), "--payload", pl)
+
+	// Argument honesty.
+	mustFail(t, "exactly one of --payload-text", "bundle", "make", "--out", filepath.Join(dir, "x.pdu"))
+	mustFail(t, "is not a positive number of seconds", "bundle", "make", "--out", filepath.Join(dir, "x.pdu"),
+		"--payload-text", "x", "--ttl", "0")
+	mustFail(t, "unknown subcommand", "bundle", "dance")
+	_ = stdout
 }
