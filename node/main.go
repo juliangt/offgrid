@@ -19,8 +19,8 @@
 //	            [-tcpcl-keepalive 30] [-tcpcl-store node_bundles.db]
 //	            [-tcpcl-store-cap 5000] [-tcpcl-dial-interval 30]
 //	            [-tcpcl-updates -tcpcl-release-key release.pub
-//	             [-tcpcl-updates-dir staged/] [-tcpcl-updates-arch esp32s3]
-//	            [-tcpcl-debug]]
+//	             [-tcpcl-updates-dir staged/] [-tcpcl-updates-arch esp32s3]]
+//	            [-tcpcl-federation] [-tcpcl-debug]]
 //
 // The daemon is a single static binary (see build.sh): the web UI travels
 // inside it via go:embed, so a node is deployed by copying one file. Every
@@ -256,6 +256,7 @@ func main() {
 	tcpclUpdatesDir := flag.String("tcpcl-updates-dir", "", "staging directory (§2.4.4: <data>/staged/update.capsule; default: the -db directory + /staged)")
 	tcpclReleaseKey := flag.String("tcpcl-release-key", "", "path to release.pub (the pinned release key, offline-maintenance §2.2.3); WITHOUT it staging is unavailable and every capsule is refused + counted (fail-closed)")
 	tcpclUpdatesArch := flag.String("tcpcl-updates-arch", "", "this node's arch (§9.1 enum: armv6|armv7|arm64|esp32s3|esp32); empty disables the arch gate (stamp from provisioning when #37 lands)")
+	tcpclFederation := flag.Bool("tcpcl-federation", false, "directory federation over the node plane (§9.3; default OFF for the fleet: no card emission, no card absorption — transit relay stays unconditional; the L2 federation_on/off commands flip it at runtime when a management plane is provisioned)")
 
 	flag.Parse()
 
@@ -352,7 +353,7 @@ func main() {
 			ReleaseKey: *tcpclReleaseKey,
 			Arch:       *tcpclUpdatesArch,
 			OwnRelease: parseReleaseVersion(releaseVersion),
-		}), log.Default())
+		}, *tcpclFederation, store), log.Default())
 	if err != nil {
 		log.Fatalf("cannot start the node plane: %v", err)
 	}
@@ -363,8 +364,16 @@ func main() {
 
 	// The embedded web assets (index.html + css/js) are validated and loaded
 	// here as well: a broken embed must fail startup, not first request.
+	// WithDirectoryCard wires the §9.3 emission hook: a registration card
+	// becomes an og-dir bundle when the federation policy is on (nil plane →
+	// nil hook → registrations behave exactly as before).
+	var cardEmitter func([]byte)
+	if nodePlane != nil {
+		cardEmitter = nodePlane.emitCard
+	}
 	handler, err := api.NewWithCounters(store, counters, build, webFS,
-		api.WithStatusEngine(statusEngine), api.WithNodePlane(planeStatus))
+		api.WithStatusEngine(statusEngine), api.WithNodePlane(planeStatus),
+		api.WithDirectoryCard(cardEmitter))
 	if err != nil {
 		log.Fatalf("cannot load embedded web assets: %v", err)
 	}

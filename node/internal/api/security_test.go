@@ -50,7 +50,7 @@ func TestDirectoryCapShedsNewRegistrationsWithNodeFull(t *testing.T) {
 	}
 	capEntries := storage.MaxDirectoryEntries()
 	for i := 0; i < capEntries; i++ {
-		if err := store.UpsertDirectory(keyAt(i), keyAt(i), "user", 100, 0, nil); err != nil {
+		if err := store.UpsertDirectory(keyAt(i), keyAt(i), "user", 100, 0, nil, ""); err != nil {
 			t.Fatalf("fill directory entry %d: %v", i, err)
 		}
 	}

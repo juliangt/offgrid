@@ -25,13 +25,16 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/capsule"
+	"offgrid/dtn-node/internal/directory"
 	"offgrid/dtn-node/internal/forward"
 	"offgrid/dtn-node/internal/mgmt"
 	"offgrid/dtn-node/internal/nodeid"
+	"offgrid/dtn-node/internal/storage"
 	"offgrid/dtn-node/internal/tcpcl"
 )
 
@@ -78,6 +81,17 @@ type tcpclOptions struct {
 	// — the Stager answers unpinned for every capsule (the §2.4.1 "staging
 	// unavailable, not misbehaving" state, honestly counted).
 	updates tcpclUpdatesOptions
+
+	// P3.8 directory federation (docs/node-network.md §9.3): the boot value
+	// of the federation policy (default OFF for the fleet — the L2
+	// federation_on/off commands flip it at runtime when a management plane
+	// is provisioned) and the user-plane directory store the §3.4 merges
+	// land in (the SAME storage.Store the HTTP API serves — the property
+	// that makes a federated row indistinguishable from a registered one).
+	// A nil userStore degrades honestly: the federation consumer is not
+	// wired, og-dir cargo is ordinary bulk transit.
+	federation bool
+	userStore  *storage.Store
 }
 
 // tcpclUpdatesOptions carries the -tcpcl-updates-* flag set (built by main,
@@ -116,6 +130,16 @@ type nodePlane struct {
 	// on (nil = off; the /status `update` member stays #37 §2.6.2's — until
 	// then these counters are -tcpcl-debug observability).
 	updates *capsule.Receiver
+
+	// P3.8 (§9.3): the directory federation consumer (nil when no user-plane
+	// store was supplied — og-dir cargo then rides as ordinary bulk
+	// transit), the boot value of the federation policy, this node's EID
+	// (card bundles are identified bundles sourced from it) and the
+	// per-source bundle sequence of emitted cards (§3 P-3, RAM-only).
+	fed     *directory.Federator
+	fedBoot bool
+	eid     string
+	cardSeq atomic.Uint64
 
 	// wake bookkeeping for the L1 trigger_sync executor: one channel per
 	// live dial loop; SyncNow sends a non-blocking token to each.
@@ -269,6 +293,10 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 			return nil, fmt.Errorf("load anchor public key: %w", err)
 		}
 		enforcer = mgmt.NewEnforcer(cache, anchorPub, eid, kp)
+		// The federation flag seeds the L2 policy store (§9.3: one flag,
+		// flippable at runtime by the federation_on/federation_off
+		// commands); without a management plane the boot flag IS the state.
+		enforcer.Policy.SetFederation(opts.federation)
 		if opts.nodeCertPath != "" {
 			seedOwnCert(cache, anchorPub, opts.nodeCertPath, lg)
 		} else {
@@ -278,6 +306,42 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 		lg.Printf("node-plane: no -tcpcl-anchor-pub pinned — the management plane is OFF (no command or certificate could ever verify; docs/node-network.md §8)")
 	}
 	sink := &forward.Sink{Store: store, Engine: engine, LocalEID: eid}
+
+	// The P3.8 directory federation consumer (docs/node-network.md §9.3):
+	// wired when a user-plane directory store was supplied. The §3.4 merges
+	// land in the SAME storage the HTTP API serves; emission is the API's
+	// card hook (see emitCard), gated by the same policy the consumer reads.
+	// Fail-soft by construction: no user store → no consumer → og-dir cargo
+	// is ordinary bulk transit (relayed, never merged).
+	np := &nodePlane{
+		pins:      pins,
+		pinsPath:  opts.pinsPath,
+		store:     store,
+		engine:    engine,
+		sink:      sink,
+		cache:     cache,
+		anchorPub: anchorPub,
+		mgmt:      enforcer,
+		fedBoot:   opts.federation,
+		eid:       eid,
+		wakeChs:   make(map[chan struct{}]struct{}),
+	}
+	if opts.userStore != nil {
+		np.fed = &directory.Federator{
+			Store:   opts.userStore,
+			Enabled: np.federationEnabled,
+			Inject:  func(pdu []byte) error { return store.Accept(pdu) },
+		}
+		sink.Directory = np.fed
+		if opts.federation {
+			lg.Printf("node-plane: directory federation ON (§9.3): cards merge into the user-plane directory; emission follows the same policy")
+		} else {
+			lg.Printf("node-plane: directory federation OFF (§9.3 default): cards are relayed as bulk transit but never emitted or merged (the L2 federation_on command enables)")
+		}
+	}
+	if sink.Updates != nil {
+		np.updates = sink.Updates
+	}
 
 	// The P3.7 updates consumer (docs/node-network.md §9.4): constructed
 	// ONLY when the updates_enabled policy is on (default OFF — with the
@@ -310,23 +374,9 @@ func startNodePlane(ctx context.Context, opts tcpclOptions, lg *log.Logger) (*no
 		}
 		receiver := capsule.NewReceiver(capsule.NewReassembler(), stager)
 		sink.Updates = receiver
+		np.updates = receiver
 		lg.Printf("node-plane: updates_enabled=ON (§9.4): capsule chunks accepted, staging to %s (arch gate %q, own release %d, apply stays the #22 operator path)",
 			opts.updates.Dir, opts.updates.Arch, opts.updates.OwnRelease)
-	}
-
-	np := &nodePlane{
-		pins:      pins,
-		pinsPath:  opts.pinsPath,
-		store:     store,
-		engine:    engine,
-		sink:      sink,
-		cache:     cache,
-		anchorPub: anchorPub,
-		mgmt:      enforcer,
-		wakeChs:   make(map[chan struct{}]struct{}),
-	}
-	if sink.Updates != nil {
-		np.updates = sink.Updates
 	}
 	if enforcer != nil {
 		enforcer.Inject = func(pdu []byte) error { return store.Accept(pdu) }
@@ -545,6 +595,53 @@ func planeStatusData(store *forward.Store, pins *nodeid.PinStore, enforcer *mgmt
 	}
 }
 
+// federationEnabled reads the §9.3 policy: the L2 store when a management
+// plane is provisioned (federation_on/federation_off flip it at runtime;
+// the boot flag seeded it), else the boot flag alone. One flag gates BOTH
+// emission and absorption (§9.3: an operator's "this node does not
+// participate" must be true in both directions); transit relay of cards is
+// unconditional DTN duty, like mail relay.
+func (np *nodePlane) federationEnabled() bool {
+	if np == nil {
+		return false
+	}
+	if np.mgmt != nil {
+		return np.mgmt.Policy.Federation()
+	}
+	return np.fedBoot
+}
+
+// emitCard is the §9.3 emission hook the API's card callback reaches: a
+// blind-validated registration card becomes ONE identified bundle to
+// dtn://og-dir/ (directory.EmitCardBundle), admitted into the local bundle
+// store so the §7.1 epidemic sync carries it island-wide on the next
+// contacts. The issuing node does NOT consume its own card through the
+// sink (the §8.5 self-consume pattern does not apply: its directory row is
+// already the local truth via the HTTP door — a self-merge could only tick
+// the duplicate counter). Every failure is logged and swallowed: emission
+// is best-effort propagation, never part of the registration's contract
+// (the HTTP 200 already happened).
+func (np *nodePlane) emitCard(cardCose []byte) {
+	if np == nil || len(cardCose) == 0 {
+		return
+	}
+	if !np.federationEnabled() {
+		return
+	}
+	pdu, err := directory.EmitCardBundle(np.eid, cardCose, time.Now().UnixMilli(), np.cardSeq.Add(1))
+	if err != nil {
+		np.cfg.Log.Printf("node-plane: directory card emission failed: %v", err)
+		return
+	}
+	if err := np.store.Accept(pdu); err != nil {
+		np.cfg.Log.Printf("node-plane: directory card admission failed (%v) — the card rides the next registration's republication", err)
+		return
+	}
+	if np.cfg.Log != nil {
+		np.cfg.Log.Printf("node-plane: directory card emitted to %s (hop 0, %d payload bytes)", directory.DirEID, len(cardCose))
+	}
+}
+
 // wakeDialLoops is the L1 trigger_sync executor: one non-blocking token per
 // live dial loop (a full inbox is dropped — the next interval dials anyway).
 func (np *nodePlane) wakeDialLoops() {
@@ -736,7 +833,7 @@ func (np *nodePlane) NodePlaneSnapshot() api.NodePlaneSnapshot {
 // buildTCPCLOptions maps the flags (kept here so main stays readable).
 func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, budgetMiB, keepaliveSec int,
 	storePath string, storeCap, dialIntervalSec int, debug bool, nodeCert, anchorPub string,
-	updates tcpclUpdatesOptions) tcpclOptions {
+	updates tcpclUpdatesOptions, federation bool, userStore *storage.Store) tcpclOptions {
 	var peerList []string
 	if peers != "" {
 		peerList = strings.Split(peers, ",")
@@ -757,5 +854,7 @@ func buildTCPCLOptions(enabled bool, addr, peers, nodeSeed, pins, mtls string, b
 		nodeCertPath:    nodeCert,
 		anchorPubPath:   anchorPub,
 		updates:         updates,
+		federation:      federation,
+		userStore:       userStore,
 	}
 }

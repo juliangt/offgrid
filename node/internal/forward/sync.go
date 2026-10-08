@@ -445,14 +445,18 @@ func (e *Engine) deliverSummary(fromEID string, s *Summary) {
 // island-wide. Fields Store and Engine are required; Mgmt is optional (nil =
 // the P3.5 behavior, exactly). P3.7 adds Updates (§9.4): the capsule.Receiver
 // that consumes chunk cargo addressed to this node — nil = updates disabled,
-// the store refuses chunk bundles at admission (UpdatesOff).
+// the store refuses chunk bundles at admission (UpdatesOff). P3.8 adds
+// Directory (§9.3): the federation consumer for bundles addressed to the
+// dtn://og-dir/ group — nil = the P3.5 behavior (og-dir cargo is ordinary
+// bulk transit).
 type Sink struct {
-	Store    *Store
-	Engine   *Engine
-	LocalEID string
-	Now      func() time.Time
-	Mgmt     MgmtConsumer
-	Updates  *capsule.Receiver
+	Store     *Store
+	Engine    *Engine
+	LocalEID  string
+	Now       func() time.Time
+	Mgmt      MgmtConsumer
+	Updates   *capsule.Receiver
+	Directory DirectoryConsumer
 }
 
 // MgmtConsumer is the management-plane seam (internal/mgmt.Enforcer satisfies
@@ -463,6 +467,18 @@ type MgmtConsumer interface {
 	// (consumed — never store cargo; broadcast copies the Enforcer re-admits
 	// for propagation go through its own Inject path).
 	Consume(b *bundle.Bundle) (handled bool)
+}
+
+// DirectoryConsumer is the P3.8 federation seam (internal/directory.Federator
+// satisfies it): the §9.3 consumer for dtn://og-dir/ bundles. An interface —
+// not the concrete type — keeps forward free of the directory storage layer.
+type DirectoryConsumer interface {
+	// ConsumeDirectory reports whether the og-dir bundle was directory
+	// business (consumed — verified, merged, and re-admitted through the
+	// consumer's own Inject). false = the federation gate is off: the sink
+	// falls through to the store, which relays the bundle as ordinary bulk
+	// transit while this node absorbs nothing.
+	ConsumeDirectory(b *bundle.Bundle) (handled bool)
 }
 
 // Accept implements tcpcl.BundleSink.
@@ -497,6 +513,15 @@ func (s *Sink) Accept(pdu []byte) error {
 	// (updates disabled) the dispatch declines and the store's admission
 	// refusal below is the §9.4 policy.
 	s.dispatchUpdates(b)
+	// §9.3 (P3.8): directory cards addressed to the og-dir group are offered
+	// to the federation consumer before the store — verified, merged into
+	// the user-plane directory per the §3.4 rules, and re-admitted for
+	// epidemic convergence by the consumer itself. A declined dispatch
+	// (federation off) falls through: the store relays the card as ordinary
+	// bulk transit, this node absorbs nothing.
+	if s.Directory != nil && b.Destination.String() == DirEID && s.Directory.ConsumeDirectory(b) {
+		return nil
+	}
 	return s.Store.Accept(pdu)
 }
 

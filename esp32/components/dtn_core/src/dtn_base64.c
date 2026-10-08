@@ -87,3 +87,48 @@ long dtn_base64_decode(const char *src, size_t src_len,
     }
     return total;
 }
+
+/* dtn_base64_encode — canonical padded standard-alphabet Base64 (the §3.3
+ * wire encoding; byte-parity with Go's encoding/base64 StdEncoding). Added
+ * for P3.8: the directory merge keys rows by the Base64 TEXT the directory
+ * table stores (the Go side encodes; the C mirror must produce the exact
+ * same strings). */
+long dtn_base64_encode(const uint8_t *src, size_t src_len,
+                       char *out, size_t cap)
+{
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t groups = (src_len + 2) / 3;
+    size_t total = groups * 4;
+    size_t o = 0, i = 0;
+
+    if (total + 1 > cap) {
+        return -1;
+    }
+    while (i + 3 <= src_len) {
+        uint32_t v = ((uint32_t)src[i] << 16) |
+                     ((uint32_t)src[i + 1] << 8) |
+                     (uint32_t)src[i + 2];
+        out[o++] = alphabet[(v >> 18) & 0x3F];
+        out[o++] = alphabet[(v >> 12) & 0x3F];
+        out[o++] = alphabet[(v >> 6) & 0x3F];
+        out[o++] = alphabet[v & 0x3F];
+        i += 3;
+    }
+    if (i < src_len) {
+        uint32_t v = (uint32_t)src[i] << 16;
+        int rem = (int)(src_len - i);
+        if (rem == 2) v |= (uint32_t)src[i + 1] << 8;
+        out[o++] = alphabet[(v >> 18) & 0x3F];
+        out[o++] = alphabet[(v >> 12) & 0x3F];
+        if (rem == 2) {
+            out[o++] = alphabet[(v >> 6) & 0x3F];
+            out[o++] = '=';
+        } else {
+            out[o++] = '=';
+            out[o++] = '=';
+        }
+    }
+    out[o] = '\0';
+    return (long)o;
+}

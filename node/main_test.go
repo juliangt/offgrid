@@ -395,7 +395,7 @@ func TestDeriveStorePath(t *testing.T) {
 // TestBuildTCPCLOptionsPinsPeers pins the flag-to-options mapping.
 func TestBuildTCPCLOptionsParsesPeers(t *testing.T) {
 	opts := buildTCPCLOptions(true, ":4556", "10.0.0.1:4556, 10.0.0.2:4556", "s", "p", "optional", 32, 60,
-		"bundles.db", 5000, 15, true, "", "", tcpclUpdatesOptions{Enabled: true, Dir: "staged", OwnRelease: 1012000})
+		"bundles.db", 5000, 15, true, "", "", tcpclUpdatesOptions{Enabled: true, Dir: "staged", OwnRelease: 1012000}, true, nil)
 	if !opts.enabled || opts.addr != ":4556" || opts.mtls != "optional" || opts.budgetMiB != 32 || opts.keepaliveSec != 60 {
 		t.Fatalf("scalar mapping: %+v", opts)
 	}

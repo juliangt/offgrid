@@ -12,17 +12,21 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"offgrid/dtn-node/internal/directory"
 	"offgrid/dtn-node/internal/envelope"
 
 	"modernc.org/sqlite" // pure-Go SQLite driver (no CGO), registered as "sqlite"
@@ -40,6 +44,15 @@ import (
 // Version 4 adds the nullable directory.prekeys column (§4.6, issue #27):
 // the client-published prekey bundle stored verbatim after blind shape
 // validation (§10.3), NULL on entries whose owners published none.
+// The §9.3 identity cards do NOT touch this schema: protocol.md §17 pins
+// node storage (§9) as untouched by the node plane, so a federated card
+// lives in the node-plane namespace table `directory_cards` (created at
+// open, no user_version bump), keyed by pubkey with the §3.4 row-provenance
+// flag. #37's §3.2 storage shape (the card/source COLUMNS inside §9's
+// directory table) remains that spec's own §9-revision work; until then a
+// federated row and an HTTP-registered row are indistinguishable in §9's
+// table AND on the wire (GET /api/v1/directory serves neither the card nor
+// the provenance — the SPA continuity rules see one row shape).
 const SchemaVersion = 4
 
 // HintEpochSeconds is the §6.1 epoch length: a 24-hour UTC epoch. The
@@ -53,10 +66,10 @@ const HintEpochSeconds = 86400
 
 // schemaV4 is the complete schema of storage version 4 (§9 as amended by
 // §15.3, §6.1 and §4.6): the §9 tables plus envelopes.v plus
-// directory.epoch plus the nullable directory.prekeys bundle column. It
-// is applied in one transaction to fresh databases only — existing
-// databases reach version 4 exclusively through the migration chain, and a
-// database already marked version 4 is trusted as-is (the marker is
+// directory.epoch plus the nullable directory.prekeys bundle column.
+// It is applied in one transaction to fresh databases only — existing
+// databases reach version 5 exclusively through the migration chain, and a
+// database already marked version 5 is trusted as-is (the marker is
 // authoritative, §15.3).
 const schemaV4 = `
 CREATE TABLE IF NOT EXISTS envelopes (
@@ -89,9 +102,9 @@ CREATE TABLE IF NOT EXISTS directory (
 // migration 1→2 is historically correct (every pre-existing row predates v2),
 // the DEFAULT 0 backfill of 2→3 is epoch-0 (1970) — deliberately stale:
 // senders reading such an entry fall back to the legacy static hint (§6.1)
-// until the entry is refreshed by an upsert — and 3→4 adds the nullable
-// prekeys column: every pre-existing row reads NULL (bundle-less) until its
-// owner's next upsert (§4.6).
+// until the entry is refreshed by an upsert (§4.6). The chain ends at 4 —
+// the §9.3 identity cards live in the node-plane namespace table created at
+// open (see SchemaVersion), never in a §9 migration.
 var migrations = map[int][]string{
 	1: {`ALTER TABLE envelopes ADD COLUMN v INTEGER NOT NULL DEFAULT 1`},
 	2: {`ALTER TABLE directory ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`},
@@ -239,9 +252,12 @@ func open(path string) (*Store, error) {
 	// to tune. Under a push flood the checkpoint cadence means writers stall
 	// briefly every ~4 MiB of WAL — acceptable, and the WAL never becomes an
 	// unbounded disk-exhaustion vector by itself.
-	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=wal_autocheckpoint(1000)",
-		path)
+	// The DSN is a URI: the path MUST be percent-escaped or every URI
+	// metacharacter in the filesystem path ('#' worst-case — the fragment
+	// delimiter silently TRUNCATES the path, pointing every connection at
+	// one shared file; '?' and '%' are just as fatal) corrupts the open.
+	u := url.URL{Scheme: "file", Path: path}
+	dsn := u.String() + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=wal_autocheckpoint(1000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %s: %w", path, err)
@@ -265,6 +281,20 @@ func open(path string) (*Store, error) {
 	if err := upgrade(db, stored); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("storage: %s: %w", path, err)
+	}
+	// The §9.3 node-plane namespace (see SchemaVersion): the identity-card
+	// table, created idempotently at every open OUTSIDE the §15.3
+	// user_version chain — protocol.md §17 pins §9's own tables as untouched
+	// by the node plane, and a plain CREATE TABLE IF NOT EXISTS touches no
+	// §9 contract while giving the federation merge its storage.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS directory_cards (
+  pubkey      TEXT PRIMARY KEY,  -- the card's ed key, canonical Base64 (the §3.4 dedup key)
+  card        TEXT NOT NULL,     -- the §3.1 card exactly as published (canonical Base64)
+  source      INTEGER NOT NULL DEFAULT 1, -- 0 local upsert, 1 federated merge (§3.4 rule 5)
+  received_at INTEGER NOT NULL   -- unix seconds, node clock at the last merge/upsert
+)`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("storage: %s: create directory_cards: %w", path, err)
 	}
 
 	// Fail fast if WAL was not actually engaged (e.g. unsupported filesystem).
@@ -695,8 +725,15 @@ func placeholders(n int) string {
 // never verifies its signature (§1) and never mutates it — or NULL when
 // nil, which is what a POST without the member stores (the documented
 // downgrade self-heal: a legacy republication clears any stale bundle, §9).
-// The POST body shape is otherwise unchanged: clients cannot influence the
-// epoch, only observe it.
+// card is the §9.3 identity card exactly as blind-validated at the API door
+// (§3.2's hook, wire-compatible): stored VERBATIM in the card column or
+// cleared when empty (§3.2: absence stores NULL, legacy clients unaffected).
+// A local upsert ALWAYS sets source = 0 (§3.4 rule 5: presence at this node
+// is a local fact — a federated row the owner re-visits becomes local) and
+// follows §3.2's rules, never the §3.4 sequence rules: the local visit is
+// the one input that overwrites a row unconditionally. The POST body shape
+// is otherwise unchanged: clients cannot influence the epoch, only observe
+// it.
 //
 // Capacity guard (issue #14, NODE-01): a registration for a pubkey NOT yet
 // present is rejected with ErrCapacity once maxDirectoryEntries rows exist —
@@ -710,7 +747,7 @@ func placeholders(n int) string {
 // connection, so a cap-legal batch racing another writer may overshoot the
 // cap by at most a handful of rows — the same accepted tolerance as
 // InsertEnvelopes (≤ 100 there), and irrelevant at a 5000-row bound.
-func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error {
+func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte, card string) error {
 	var exists int
 	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM directory WHERE pubkey = ?)`, pubkey).Scan(&exists); err != nil {
 		return fmt.Errorf("storage: check directory %s: %w", pubkey, err)
@@ -736,7 +773,238 @@ func (s *Store) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, ep
 	if err != nil {
 		return fmt.Errorf("storage: upsert directory %s: %w", pubkey, err)
 	}
+	// The §9.3 card rides the node-plane namespace (see SchemaVersion): a
+	// published card is stored verbatim with source = 0 (§3.4 rule 5 — the
+	// local visit is a local fact); §3.2's absence clears any stored card
+	// (the legacy-republication downgrade self-heal).
+	if card != "" {
+		_, err = s.db.Exec(
+			`INSERT INTO directory_cards (pubkey, card, source, received_at) VALUES (?, ?, 0, ?)
+			 ON CONFLICT(pubkey) DO UPDATE SET card = excluded.card, source = 0, received_at = excluded.received_at`,
+			pubkey, card, lastSeen,
+		)
+	} else {
+		_, err = s.db.Exec(`DELETE FROM directory_cards WHERE pubkey = ?`, pubkey)
+	}
+	if err != nil {
+		return fmt.Errorf("storage: upsert directory card %s: %w", pubkey, err)
+	}
 	return nil
+}
+
+// DirectoryRow is the full internal row of one directory entry: the served
+// DirectoryEntry fields PLUS the two internal §9.3 columns the GET response
+// never serves (card, source). Test and merge introspection only.
+type DirectoryRow struct {
+	Pubkey   string
+	X25519   string
+	Alias    string
+	LastSeen int64
+	Epoch    int64
+	Prekeys  sql.NullString
+	Card     sql.NullString // Base64 of the card COSE, NULL when the entry carries none
+	Source   int            // 0 local upsert, 1 federated merge (§3.4 rule 5)
+}
+
+// DirectoryRowOf returns one directory row by pubkey (nil, nil when absent).
+func (s *Store) DirectoryRowOf(pubkey string) (*DirectoryRow, error) {
+	var r DirectoryRow
+	err := s.db.QueryRow(
+		`SELECT d.pubkey, d.x25519, d.alias, d.last_seen, d.epoch, d.prekeys, dc.card, COALESCE(dc.source, 0)
+		 FROM directory d LEFT JOIN directory_cards dc ON dc.pubkey = d.pubkey
+		 WHERE d.pubkey = ?`,
+		pubkey,
+	).Scan(&r.Pubkey, &r.X25519, &r.Alias, &r.LastSeen, &r.Epoch, &r.Prekeys, &r.Card, &r.Source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: directory row %s: %w", pubkey, err)
+	}
+	return &r, nil
+}
+
+// storedSeqOf decodes a stored card TEXT and returns its §3.4 sequence —
+// the merge ordering key of the row. A NULL card, an undecodable string or
+// an unparseable card reads as the implied sequence 0 (§3.4 rule 2): the
+// column only ever receives cards the API door or the merge verified, so
+// the fallback is a corruption guard, not a validation path.
+func storedSeqOf(card sql.NullString) uint64 {
+	if !card.Valid || card.String == "" {
+		return 0
+	}
+	raw, err := base64.StdEncoding.DecodeString(card.String)
+	if err != nil {
+		return 0
+	}
+	parsed, err := directory.ParseCard(raw)
+	if err != nil {
+		return 0
+	}
+	return parsed.Seq
+}
+
+// MergeFederatedCard applies the §3.4 merge rules VERBATIM to one verified
+// card (docs/offline-maintenance.md §3.4, via node-network.md §9.3). The
+// caller has verified the card's self-signature (directory.VerifyCard);
+// this method owns the SEQUENCE rules and the eviction policy:
+//
+//	rule 1 — dedup key is the pubkey: absent → INSERT (alias/x25519/card
+//	         from the card, last_seen/epoch server-set, source = 1);
+//	rule 2 — stored sequence (a NULL card has the implied sequence 0)
+//	         lower than the card's → replace alias/x25519/card and refresh
+//	         last_seen/epoch — the only way a served X25519 key ever
+//	         changes: across a HIGHER-SEQUENCE SIGNED record;
+//	rule 3 — higher stored sequence → stale: dropped (the row is not even
+//	         touched — a stale card must not refresh liveness);
+//	rule 4 — equal sequence: byte-equal card → no-op; differing content →
+//	         KEEP THE EXISTING ROW (the SPA continuity path stays
+//	         consistent: the row keeps its old key). Equal-sequence ties
+//	         NEVER overwrite — the first verified claim wins; the tie is an
+//	         attack signal, not a race;
+//	rule 5 — source promotion: a federated merge on a source = 0 row
+//	         updates keys/card per rules 2–4 and KEEPS source = 0 (presence
+//	         at this node is a local fact, key truth is a sequence fact).
+//
+// Eviction (§3.4, adapted to THIS node's caps — the hard table cap stays
+// the existing maxDirectoryEntries, the §8.1 class): when a rule-1 INSERT
+// would exceed the cap, the source = 1 rows with the OLDEST last_seen are
+// evicted first (pubkey ASC tie-break, exactly the serving-cap ordering
+// applied to eviction); source = 0 rows are NEVER auto-evicted. Deviation
+// from §3.4's literal soft-cap sentence, recorded: when no federated row is
+// evictable the card is DROPPED (MergeDroppedAtCap) rather than inserted —
+// this phase's binding requirement is that a card flood respects the
+// 5000-row cap, and the unauthenticated directory must never grow past it
+// (the issue-#14 NODE-01 stance). The HTTP path's own ErrCapacity behavior
+// is untouched: a NEW local registration at a full table still sheds with
+// 429 (user-plane caps/behavior unchanged); only the FEDERATED input
+// evicts.
+//
+// One transaction (the single-connection store serializes everything else
+// out of the way). The whole batch of one card either lands or not.
+func (s *Store) MergeFederatedCard(c directory.CardMerge) (directory.MergeResult, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return directory.MergeResult{}, fmt.Errorf("storage: begin federated merge: %w", err)
+	}
+	defer tx.Rollback()
+
+	var (
+		x25519, alias string
+		card          sql.NullString
+		source        int
+	)
+	err = tx.QueryRow(
+		`SELECT x25519, alias FROM directory WHERE pubkey = ?`, c.Pubkey,
+	).Scan(&x25519, &alias)
+	if err == nil {
+		// The stored card and its provenance live in the §9.3 namespace.
+		err = tx.QueryRow(
+			`SELECT card, source FROM directory_cards WHERE pubkey = ?`, c.Pubkey,
+		).Scan(&card, &source)
+		if errors.Is(err, sql.ErrNoRows) {
+			// A pre-federation row: the implied sequence 0 (§3.4 rule 2)
+			// and local provenance (rule 5 — every row that predates
+			// federation was created by a local visit).
+			err = nil
+		}
+	}
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Rule 1: absent → INSERT (after §3.4 eviction under cap pressure).
+		evictions := 0
+		var count int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM directory`).Scan(&count); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: count directory: %w", err)
+		}
+		for count >= maxDirectoryEntries {
+			var victim string
+			// §3.4 eviction: source = 1 rows first, oldest last_seen first
+			// (the serving-cap ordering applied to eviction); §9's local
+			// rows are never auto-evicted.
+			err := tx.QueryRow(
+				`SELECT dc.pubkey FROM directory_cards dc
+				 JOIN directory d ON d.pubkey = dc.pubkey
+				 WHERE dc.source = 1
+				 ORDER BY d.last_seen ASC, dc.pubkey ASC LIMIT 1`,
+			).Scan(&victim)
+			if errors.Is(err, sql.ErrNoRows) {
+				// A full table of locals: the card is dropped (see the
+				// recorded deviation — the cap holds either way).
+				return directory.MergeResult{Outcome: directory.MergeDroppedAtCap, Evictions: evictions}, nil
+			}
+			if err != nil {
+				return directory.MergeResult{}, fmt.Errorf("storage: select evictee: %w", err)
+			}
+			if _, err := tx.Exec(`DELETE FROM directory WHERE pubkey = ?`, victim); err != nil {
+				return directory.MergeResult{}, fmt.Errorf("storage: evict %s: %w", victim, err)
+			}
+			if _, err := tx.Exec(`DELETE FROM directory_cards WHERE pubkey = ?`, victim); err != nil {
+				return directory.MergeResult{}, fmt.Errorf("storage: evict card %s: %w", victim, err)
+			}
+			evictions++
+			count--
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO directory (pubkey, x25519, alias, last_seen, epoch, prekeys)
+			 VALUES (?, ?, ?, ?, ?, NULL)`,
+			c.Pubkey, c.X25519, c.Alias, c.LastSeen, c.LastSeen/HintEpochSeconds,
+		); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: federated insert %s: %w", c.Pubkey, err)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO directory_cards (pubkey, card, source, received_at) VALUES (?, ?, 1, ?)`,
+			c.Pubkey, c.CardB64, c.LastSeen,
+		); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: federated card insert %s: %w", c.Pubkey, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: commit federated insert: %w", err)
+		}
+		return directory.MergeResult{Outcome: directory.MergeInsert, Evictions: evictions}, nil
+	case err != nil:
+		return directory.MergeResult{}, fmt.Errorf("storage: federated lookup %s: %w", c.Pubkey, err)
+	}
+
+	// Rules 2–4 against the stored row (a NULL/unreadable card is implied
+	// sequence 0 — rule 2's own words).
+	storedSeq := storedSeqOf(card)
+	switch {
+	case c.Seq > storedSeq:
+		// Rule 2: replace alias/x25519/card, refresh last_seen/epoch;
+		// source is deliberately untouched (rule 5: promotion works in one
+		// direction only — a local row stays local).
+		if _, err := tx.Exec(
+			`UPDATE directory SET x25519 = ?, alias = ?, last_seen = ?, epoch = ? WHERE pubkey = ?`,
+			c.X25519, c.Alias, c.LastSeen, c.LastSeen/HintEpochSeconds, c.Pubkey,
+		); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: federated replace %s: %w", c.Pubkey, err)
+		}
+		// The card column of the §9.3 namespace: replaced on rule 2 with
+		// the provenance deliberately untouched (rule 5).
+		if _, err := tx.Exec(
+			`INSERT INTO directory_cards (pubkey, card, source, received_at) VALUES (?, ?, ?, ?)
+			 ON CONFLICT(pubkey) DO UPDATE SET card = excluded.card, received_at = excluded.received_at`,
+			c.Pubkey, c.CardB64, source, c.LastSeen,
+		); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: federated card replace %s: %w", c.Pubkey, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return directory.MergeResult{}, fmt.Errorf("storage: commit federated replace: %w", err)
+		}
+		return directory.MergeResult{Outcome: directory.MergeReplace}, nil
+	case c.Seq < storedSeq:
+		// Rule 3: stale — silent drop, the row untouched (no liveness
+		// refresh, no counter state in SQL; the caller counts).
+		return directory.MergeResult{Outcome: directory.MergeStale}, nil
+	default:
+		// Rule 4: byte-equal → no-op; differing → keep the existing row.
+		storedRaw, decErr := base64.StdEncoding.DecodeString(card.String)
+		if decErr == nil && bytes.Equal(storedRaw, c.Raw) {
+			return directory.MergeResult{Outcome: directory.MergeDuplicate}, nil
+		}
+		return directory.MergeResult{Outcome: directory.MergeConflict}, nil
+	}
 }
 
 // GetDirectory returns up to limit entries ordered by last_seen DESC with

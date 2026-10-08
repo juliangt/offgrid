@@ -50,6 +50,15 @@ const AdminEID = "dtn://og-admin/"
 // MailGroupEID is the anonymous mail group of P-4 (dtn:og-mail).
 const MailGroupEID = "dtn:og-mail"
 
+// DirEID is the well-known directory group of §9.3 (dtn://og-dir/): the
+// destination federated identity cards carry (P3.8). It is deliberately
+// NOT a management address (§7.3: cards are not management) — Classify
+// keeps them bulk, and the §9.3 sink consumes them before the store the
+// way §8.5 does for og-admin. Keep in sync with directory.DirEID's literal
+// (forward must not import the directory package; the shared vectors and
+// the §11 row-k tests catch drift).
+const DirEID = "dtn://og-dir/"
+
 // Class is the local priority class of §7.3: management > mail > bulk.
 // The numeric order IS the priority order (lower = more important), which
 // the eviction rule and the send scheduler both exploit. It is never a wire

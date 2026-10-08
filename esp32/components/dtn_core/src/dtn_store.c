@@ -1177,11 +1177,24 @@ static void compact_envelopes(dtn_store *st)
     super_write(st, DTN_STORAGE_SCHEMA_VERSION, ++st->super_seq);
 }
 
-/* ---- directory (§10.3) ---- */
+/* ---- directory (§10.3, §9.3) ---- */
 
 int dtn_store_dir_upsert(dtn_store *st, const char *alias, const char *pubkey,
                          const char *x25519, const char *prekeys_raw,
                          int64_t now)
+{
+    return dtn_store_dir_upsert_full(st, alias, pubkey, x25519, prekeys_raw,
+                                     NULL, 0, now);
+}
+
+/* DIR_UPS body: pubkey(44) x25519(44) last_seen(8) epoch(8) alias_len(2)
+ * alias prekeys_len(2) prekeys [P3.8 tail: source(1) card_len(2) card] —
+ * the tail is OPTIONAL; frames written without it (the pre-P3.8 format)
+ * parse unchanged everywhere. */
+int dtn_store_dir_upsert_full(dtn_store *st, const char *alias,
+                              const char *pubkey, const char *x25519,
+                              const char *prekeys_raw, const char *card_b64,
+                              int source, int64_t now)
 {
     /* the adapter validates shapes (alias regex, 32-byte keys, §10.3
      * prekeys blind validation) and owns the error codes; the store stores
@@ -1189,9 +1202,12 @@ int dtn_store_dir_upsert(dtn_store *st, const char *alias, const char *pubkey,
      * influence the epoch) */
     size_t alias_len = strlen(alias);
     size_t pre_len = prekeys_raw ? strlen(prekeys_raw) : 0;
-    if (alias_len > 24 || pre_len > 2048) return -1;
+    size_t card_len = card_b64 ? strlen(card_b64) : 0;
+    if (alias_len > 24 || pre_len > 2048 || card_len > DTN_DIR_CARD_B64_MAX - 1) {
+        return -1;
+    }
 
-    uint8_t *payload = malloc(108 + alias_len + 2 + pre_len);
+    uint8_t *payload = malloc(108 + alias_len + 2 + pre_len + 3 + card_len);
     if (!payload) return -1;
     memcpy(payload, pubkey, 44);
     memcpy(payload + 44, x25519, 44);
@@ -1205,6 +1221,13 @@ int dtn_store_dir_upsert(dtn_store *st, const char *alias, const char *pubkey,
     memcpy(payload + 106 + alias_len, &pl, 2);
     if (pre_len) memcpy(payload + 108 + alias_len, prekeys_raw, pre_len);
     uint32_t plen = (uint32_t)(108 + alias_len + pre_len);
+    if (card_len || source != 0) {
+        payload[plen] = (uint8_t)(source != 0);
+        uint16_t cl = (uint16_t)card_len;
+        memcpy(payload + plen + 1, &cl, 2);
+        if (card_len) memcpy(payload + plen + 3, card_b64, card_len);
+        plen = (uint32_t)(plen + 3 + card_len);
+    }
 
     fseek(st->dir_log, 0, SEEK_END);
     long off = ftell(st->dir_log);
@@ -1246,6 +1269,70 @@ int dtn_store_dir_upsert(dtn_store *st, const char *alias, const char *pubkey,
     fseek(st->dir_log, 0, SEEK_END);
     st->dir_size = ftell(st->dir_log);
     return 0;
+}
+
+/* dir_parse_row decodes one DIR_UPS payload into a full row (the §9.3
+ * tail is read only when the frame is long enough — old frames read as
+ * source 0, no card; the prekeys member reads as "" when absent). */
+static void dir_parse_row(const uint8_t *payload, uint32_t len,
+                          dtn_dir_row *out)
+{
+    uint16_t al;
+    memcpy(&al, payload + 104, 2);
+    if (al > 24) al = 24;
+    memcpy(out->alias, payload + 106, al);
+    out->alias[al] = '\0';
+    memcpy(out->x25519, payload + 44, 44);
+    memcpy(&out->last_seen, payload + 88, 8);
+    memcpy(&out->epoch, payload + 96, 8);
+    out->source = 0;
+    out->prekeys[0] = '\0';
+    out->card[0] = '\0';
+    uint16_t pl = 0;
+    if (len > (uint32_t)(108 + al)) {
+        memcpy(&pl, payload + 106 + al, 2);
+        if (pl > 0 && pl <= 2048 && len >= (uint32_t)(108 + al + pl)) {
+            memcpy(out->prekeys, payload + 108 + al, pl);
+            out->prekeys[pl] = '\0';
+        }
+    }
+    uint32_t tail = (uint32_t)(108 + al + pl);
+    if (len >= tail + 3) {
+        out->source = payload[tail] != 0;
+        uint16_t cl;
+        memcpy(&cl, payload + tail + 1, 2);
+        if (cl > 0 && cl <= DTN_DIR_CARD_B64_MAX - 1 &&
+            len >= (uint32_t)(tail + 3 + cl)) {
+            memcpy(out->card, payload + tail + 3, cl);
+            out->card[cl] = '\0';
+        }
+    }
+}
+
+int dtn_store_dir_find(dtn_store *st, const char *pubkey, dtn_dir_row *out)
+{
+    if (!pubkey || strlen(pubkey) != 44 || !out) return -1;
+    for (int32_t k = 0; k < st->dir_cap; k++) {
+        if (!st->dslots[k].used ||
+            memcmp(st->dslots[k].pubkey, pubkey, 45) != 0) {
+            continue;
+        }
+        dir_slot *ds = &st->dslots[k];
+        if (fseek(st->dir_rd, (long)ds->off, SEEK_SET) != 0) return -1;
+        uint8_t type;
+        uint8_t *payload = NULL;
+        uint32_t len = 0;
+        if (frame_read(st->dir_rd, &type, &payload, &len) != 1 ||
+            type != REC_DIR_UPS || len < 108) {
+            free(payload);
+            return -1; /* unreadable: absent for every caller's purpose */
+        }
+        memset(out, 0, sizeof(*out));
+        dir_parse_row(payload, len, out);
+        free(payload);
+        return 0;
+    }
+    return -1; /* absent */
 }
 
 static int cmp_dir_ent(const void *a, const void *b, void *unused)
