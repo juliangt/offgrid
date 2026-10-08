@@ -41,6 +41,11 @@
 #   hardening/disable-readonly-root.sh -> /usr/local/sbin/dtn-disable-readonly-root.sh
 #   ../node/dtn-node-linux-arm64|armv7|armv6 -> /opt/dtn-node/dtn-node
 #                                 (picked by uname -m: aarch64/armv7l/armv6l)
+#   nodeid/node.seed           -> /opt/dtn-node/nodeid/node.seed (0600, optional
+#                                 node-identity kit; absent kit = explicit SKIP,
+#                                 docs/node-network.md §2.6)
+#   nodeid/node_cert.cbor      -> /opt/dtn-node/nodeid/node_cert.cbor (0644)
+#   nodeid/anchor.pub          -> /opt/dtn-node/nodeid/anchor.pub (0644)
 #
 # DESIGN RULES
 #   * Strictly idempotent: every step first checks whether its result already
@@ -129,7 +134,7 @@ install_file() {
 # --- step 1: preflight --------------------------------------------------------
 
 preflight() {
-    log "step 1/10: preflight"
+    log "step 1/11: preflight"
     verify "running as root" test "$(id -u)" -eq 0
     verify "Raspberry Pi hardware" grep -q "Raspberry Pi" /proc/device-tree/model
     verify "OS release file present" test -f /etc/os-release
@@ -163,7 +168,7 @@ preflight() {
 # ap_isolate), so it is disabled and masked and ifupdown is installed instead.
 # Legacy (dhcpcd-based) images already use the classic stack: nothing to do.
 disable_networkmanager() {
-    log "step 2/10: network manager selection"
+    log "step 2/11: network manager selection"
     if ! systemctl cat NetworkManager.service >/dev/null 2>&1; then
         log "no NetworkManager unit: legacy stack in place, nothing to do"
         verify_not "NetworkManager absent" systemctl cat NetworkManager.service
@@ -181,7 +186,7 @@ disable_networkmanager() {
 # --- step 3: packages ---------------------------------------------------------
 
 install_packages() {
-    log "step 3/10: packages"
+    log "step 3/11: packages"
     apt-get update -qq >/dev/null
     # hostapd (AP), dnsmasq (DHCP+DNS), iptables (firewall), iw (used by the
     # post-up power_save line in interfaces.d/wlan0).
@@ -221,7 +226,7 @@ install_packages() {
 # same-origin design (docs/protocol.md §12: all nodes must share the
 # gateway IP). Wi-Fi power save stays OFF for AP beacon stability.
 static_ip() {
-    log "step 4/10: static IP 10.42.0.1/24 on wlan0"
+    log "step 4/11: static IP 10.42.0.1/24 on wlan0"
     local tmp
     tmp="$(mktemp)"
     cat > "$tmp" <<'EOF'
@@ -305,7 +310,7 @@ EOF
 # --- step 5: config files -------------------------------------------------------
 
 install_configs() {
-    log "step 5/10: config files"
+    log "step 5/11: config files"
     local tmp
     tmp="$(mktemp)"
 
@@ -449,7 +454,7 @@ install_configs() {
 # --- step 6: service user, data dir and binary ----------------------------------
 
 install_binary() {
-    log "step 6/10: service user, data dir and binary"
+    log "step 6/11: service user, data dir and binary"
     if id "$NODE_USER" >/dev/null 2>&1; then
         echo "[SKIP] user $NODE_USER already exists"
     else
@@ -476,10 +481,58 @@ install_binary() {
     verify "binary installed 0755 root" test "$(stat -c '%a %U' "$INSTALL_DIR/dtn-node")" = "755 root"
 }
 
-# --- step 7: enable units (nothing is started) -----------------------------------
+# --- step 7: node identity (issue #33 P3.1, optional kit) -------------------------
+
+# The node-plane identity (docs/node-network.md §2.6): a provisioned node
+# carries its own Ed25519 seed, its anchor-signed role certificate and the
+# pinned anchor public key. The kit is produced OFFLINE with capsuletool
+# (anchor keygen → rolecert keygen/request/sign — the §2.6 ceremony) and
+# dropped into this tree as nodeid/{node.seed,node_cert.cbor,anchor.pub}.
+# Idempotent like every step: identical files are a no-op, a differing kit
+# replaces it (keeping the .dtn-bak). An ABSENT kit is an explicit,
+# loud SKIP — identity is a provisioning FACT, never improvised on the
+# node, and never a side effect of an upgrade (rotation is the ceremony
+# of §2.6 with seq+1, not this step).
+install_nodeid() {
+    log "step 7/11: node identity (role cert + anchor pin, issue #33 P3.1)"
+    local kit="$SCRIPT_DIR/nodeid"
+    local dest="$INSTALL_DIR/nodeid"
+    if [ ! -d "$kit" ]; then
+        log "SKIP: no node-identity kit in the provisioning tree ($kit)"
+        log "      to provision identity, run the capsuletool ceremony of"
+        log "      docs/node-network.md §2.6 offline and place nodeid/{node.seed,"
+        log "      node_cert.cbor,anchor.pub} next to this script; the node will"
+        log "      boot WITHOUT a role cert meanwhile (mail works, management does not)"
+        verify "node identity skipped by operator choice (kit absent)" true
+        return 0
+    fi
+    # A PARTIAL kit is an operator mistake — fail closed, never half-identity.
+    for f in node.seed node_cert.cbor anchor.pub; do
+        verify "kit file $kit/$f present" test -f "$kit/$f"
+    done
+    install -d -m 0750 -o root -g root "$dest"
+    verify "identity dir 0750 root:root" \
+        test "$(stat -c '%a %U %G' "$dest")" = "750 root root"
+    install_file "$kit/node.seed" "$dest/node.seed" 0600
+    install_file "$kit/node_cert.cbor" "$dest/node_cert.cbor" 0644
+    install_file "$kit/anchor.pub" "$dest/anchor.pub" 0644
+    verify "node.seed installed 0600 root" \
+        test "$(stat -c '%a %U' "$dest/node.seed")" = "600 root"
+    verify "node_cert.cbor installed 0644 root" \
+        test "$(stat -c '%a %U' "$dest/node_cert.cbor")" = "644 root"
+    verify "anchor.pub installed 0644 root" \
+        test "$(stat -c '%a %U' "$dest/anchor.pub")" = "644 root"
+    # Honest bound, recorded where the operator reads it: the FILES are
+    # root-owned; granting the daemon (user dtn) read access to its own
+    # identity is part of the P3.2+ daemon wiring, deliberately not widened
+    # silently here.
+    log "identity files are root-owned; the daemon reads them from P3.2+ (documented, not silently widened)"
+}
+
+# --- step 8: enable units (nothing is started) -----------------------------------
 
 enable_units() {
-    log "step 7/10: enable units (no service is started; reboot activates)"
+    log "step 8/11: enable units (no service is started; reboot activates)"
     systemctl daemon-reload
     # networking: brings up wlan0 (10.42.0.1) via ifupdown at boot.
     # hostapd + dnsmasq: the classic AP stack. The dtn-* units: firewall,
@@ -513,7 +566,7 @@ enable_units() {
 # deliberately NOT part of provisioning: it is an explicit operator step
 # (see the header note and final_report's checklist).
 field_hardening() {
-    log "step 8/10: field hardening (ssh surface, unprivileged daemon, security upgrades)"
+    log "step 9/11: field hardening (ssh surface, unprivileged daemon, security upgrades)"
     # Each script is fail-fast and idempotent; these verifies pin the
     # on-disk end state this step promises.
     /usr/local/sbin/dtn-harden-services.sh
@@ -534,7 +587,7 @@ field_hardening() {
 # --- step 9: firewall persistence --------------------------------------------------
 
 persist_firewall() {
-    log "step 9/10: firewall persistence"
+    log "step 10/11: firewall persistence"
     if command -v netfilter-persistent >/dev/null 2>&1; then
         verify "rules saved to /etc/iptables/rules.v4" test -f /etc/iptables/rules.v4
     else
@@ -546,7 +599,7 @@ persist_firewall() {
 # --- step 10: operator handoff ------------------------------------------------------
 
 final_report() {
-    log "step 10/10: done — every step verified"
+    log "step 11/11: done — every step verified"
     cat <<EOF
 
 =====================================================================
@@ -605,10 +658,14 @@ EOF
 # one-time setup and a reflash keeps the full default. Every step stays
 # individually idempotent (install_file compares before replacing and keeps a
 # .dtn-bak of the previous file).
-STEPS="${STEPS:-preflight disable_networkmanager install_packages static_ip install_configs install_binary enable_units field_hardening persist_firewall final_report}"
+# install_nodeid rides the FRESH-INSTALL default list only: the upgrade
+# subset (install.sh --upgrade) never touches node identity — rotation is
+# the explicit §2.6 ceremony, mirroring the release-key idempotence rule of
+# offline-maintenance §2.2.3.
+STEPS="${STEPS:-preflight disable_networkmanager install_packages static_ip install_configs install_binary install_nodeid enable_units field_hardening persist_firewall final_report}"
 for step_name in $STEPS; do
     case "$step_name" in
-        preflight | disable_networkmanager | install_packages | static_ip | install_configs | install_binary | enable_units | field_hardening | persist_firewall | final_report)
+        preflight | disable_networkmanager | install_packages | static_ip | install_configs | install_binary | install_nodeid | enable_units | field_hardening | persist_firewall | final_report)
             "$step_name"
             ;;
         *) die "unknown step in STEPS: $step_name" ;;

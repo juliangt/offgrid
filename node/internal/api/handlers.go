@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"offgrid/dtn-node/internal/directory"
 	"offgrid/dtn-node/internal/envelope"
 	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/status"
@@ -43,7 +44,7 @@ const (
 type Store interface {
 	InsertEnvelopes(envs []envelope.Envelope) (int, error)
 	PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error)
-	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error
+	UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte, card string) error
 	GetDirectory(limit int) ([]storage.DirectoryEntry, error)
 	EnvelopeCount() (int64, error)
 	DirectoryCount() (int64, error)
@@ -87,6 +88,19 @@ type server struct {
 	healthCachedAt time.Time
 
 	status *status.Engine
+
+	// nodePlane is the optional P3.6 node-plane status source (nil on
+	// servers built without WithNodePlane — the node_plane member then
+	// renders null, the §10.7 N/A convention).
+	nodePlane NodePlaneSource
+
+	// cardEmitter is the optional §9.3 federation emission hook (nil on
+	// servers built without WithDirectoryCard — registrations then behave
+	// exactly as before, the wire-compatible default). The handler hands it
+	// the blind-validated card COSE bytes after a successful upsert; the
+	// daemon's closure owns the federation-policy decision and the bundle
+	// plane. The API layer never imports the node plane.
+	cardEmitter func(cardCose []byte)
 }
 
 // Option customizes a server built by New/NewWithCounters.
@@ -99,6 +113,16 @@ type Option func(*server)
 // null — the documented §10.7 N/A convention.
 func WithStatusEngine(e *status.Engine) Option {
 	return func(s *server) { s.status = e }
+}
+
+// WithDirectoryCard attaches the §9.3 federation emission hook: after a
+// successful directory upsert that stored a blind-validated card, the
+// handler calls cardEmitter with the card's COSE bytes. Passing nil (or not
+// passing this option) leaves registrations exactly as before — the
+// wire-compatible default (no card member, no emission). The daemon wires
+// the closure that checks its federation policy and emits the bundle.
+func WithDirectoryCard(cardEmitter func(cardCose []byte)) Option {
+	return func(s *server) { s.cardEmitter = cardEmitter }
 }
 
 // noteClientActivity feeds the active-clients aggregate (issue #36). It is
@@ -332,6 +356,7 @@ const (
 	codeInvalidPubkey      = "invalid_pubkey"
 	codeInvalidX25519      = "invalid_x25519"
 	codeInvalidPrekeys     = "invalid_prekeys"
+	codeInvalidCard        = "invalid_card"
 	codeNodeFull           = "node_full"
 	codeRateLimited        = "rate_limited"
 	codeStorageUnavailable = "storage_unavailable"
@@ -497,11 +522,16 @@ func (s *server) handleGetDirectory(w http.ResponseWriter, r *http.Request) {
 // RawMessage so the exact published bytes are blind-validated and stored
 // verbatim; an absent member or an explicit null stores NULL (which clears
 // any previously stored bundle — the documented downgrade self-heal, §9).
+// Card is the OPTIONAL §9.3 identity card (offline-maintenance §3.2's hook,
+// additive since node-network 1.8.0): a Base64 string of the card COSE
+// bytes, blind-validated and stored verbatim; absent or empty stores NULL
+// (clearing any previously stored card — the same self-heal shape).
 type directoryRequest struct {
 	Alias   string          `json:"alias"`
 	Pubkey  string          `json:"pubkey"`
 	X25519  string          `json:"x25519"`
 	Prekeys json.RawMessage `json:"prekeys,omitempty"`
+	Card    string          `json:"card,omitempty"`
 }
 
 // §4.6 prekey-bundle admission bounds (blind shape only — the node NEVER
@@ -574,12 +604,50 @@ func validatePrekeysBundle(raw json.RawMessage) ([]byte, error) {
 	return raw, nil
 }
 
+// validateCard blind-validates the OPTIONAL §9.3 card member of a directory
+// POST (offline-maintenance §3.2, via node-network.md §9.3): absent/empty →
+// nothing stored; anything present must be canonical Base64 (§3.3) decoding
+// to a card whose SHAPE passes directory.ParseCard — exact member set, v
+// == 1, alias regex, 32-byte keys, ts > 0, seq ≥ 1, 64-byte signature
+// field, whole member ≤ directory.CardMaxBytes — plus §3.2's two blind
+// consistency equalities: card.ed == body.pubkey and card.x == body.x25519
+// (pure shape equality — a card about a different identity than the entry
+// it rides is malformed). The signature is NOT verified at this door
+// (§3.2: "§3.4 does that at merge time" — the node never verifies a
+// message signature at registration, §1/§10.3). Returns the raw COSE bytes
+// to store verbatim and to hand the federation emitter.
+func validateCard(cardB64, pubkey, x25519 string) ([]byte, error) {
+	if cardB64 == "" {
+		return nil, nil
+	}
+	if strings.ContainsAny(cardB64, "\r\n") {
+		return nil, fmt.Errorf("card contains newline characters")
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(cardB64)
+	if err != nil {
+		return nil, fmt.Errorf("card must be canonical Base64: %w", err)
+	}
+	card, err := directory.ParseCard(raw)
+	if err != nil {
+		return nil, err
+	}
+	if card.PubkeyB64() != pubkey {
+		return nil, fmt.Errorf("card.ed does not equal the entry pubkey (§3.2 blind equality)")
+	}
+	if card.X25519B64() != x25519 {
+		return nil, fmt.Errorf("card.x does not equal the entry x25519 (§3.2 blind equality)")
+	}
+	return raw, nil
+}
+
 // handlePostDirectory upserts a directory entry keyed by the Ed25519 public
 // key with last_seen = now and epoch = floor(now / HintEpochSeconds) — both
 // set from the NODE clock (§10.3, §6.1: the server, never the client, owns
 // the time reference). Invalid alias or keys → 400; an invalid §4.6 prekeys
-// member → 400 invalid_prekeys (blind shape validation only — the node
-// never verifies the bundle signature, §1/§4.6). At the storage layer's
+// member → 400 invalid_prekeys; an invalid §9.3 card member → 400
+// invalid_card (both blind shape validation only — the node never verifies
+// a published signature at this door, §1/§10.3; cards verify at merge
+// time, §3.4). At the storage layer's
 // directory cap (storage.MaxDirectoryEntries, issue #14 NODE-01) a NEW
 // pubkey is shed with 429 node_full — the same capacity class the sync
 // endpoint answers at envelope capacity, and a status this endpoint already
@@ -588,7 +656,12 @@ func validatePrekeysBundle(raw json.RawMessage) ([]byte, error) {
 // lock existing users out of republication). The POST body shape is
 // otherwise unchanged since pre-1.6 builds (epoch is additive in the GET
 // response only, §15.4; prekeys is additive since 1.7.0 and its absence
-// clears any stored bundle, §9).
+// clears any stored bundle, §9; card is additive since node-network 1.8.0
+// and its absence clears any stored card, §3.2). The register RESPONSE is
+// unchanged — §3.2 is wire-compatible and protocol.md §10.3 is untouched.
+// On a successful upsert that stored a card, the card's COSE bytes are
+// handed to the federation emitter (the §9.3 emission hook — the daemon
+// decides, per its federation policy, whether a bundle leaves the node).
 func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 	var req directoryRequest
 	if _, ok := decodeJSON(w, r, &req); !ok {
@@ -611,14 +684,27 @@ func (s *server) handlePostDirectory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, codeInvalidPrekeys)
 		return
 	}
+	card, err := validateCard(req.Card, req.Pubkey, req.X25519)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, codeInvalidCard)
+		return
+	}
 	now := timeNow().Unix()
-	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds, prekeys); err != nil {
+	if err := s.store.UpsertDirectory(req.Pubkey, req.X25519, req.Alias, now, now/storage.HintEpochSeconds, prekeys, req.Card); err != nil {
 		if errors.Is(err, storage.ErrCapacity) {
 			writeError(w, http.StatusTooManyRequests, codeNodeFull)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, codeInternal)
 		return
+	}
+	// The §9.3 emission hook (§3.2's wire-compatible registration card): a
+	// successfully stored card is offered to the federation emitter. The
+	// callback is the daemon's — it owns the federation policy decision
+	// (emission happens only when the policy is on) and the bundle plane.
+	// The API layer never touches the node plane itself.
+	if len(card) > 0 && s.cardEmitter != nil {
+		s.cardEmitter(card)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

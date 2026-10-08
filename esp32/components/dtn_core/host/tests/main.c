@@ -14,6 +14,14 @@ void test_canonical(void);
 void test_budget(void);
 void test_docs(void);
 void test_store(void);
+void test_nodeid(void);
+void test_bundle(void);
+void test_link(void);    /* P3.3 node-plane link layer (issue #33) */
+void test_mac(void);     /* P3.3 node-plane MAC v1 (issue #33) */
+void test_forward(void); /* P3.5 forwarding engine (issue #33) */
+void test_mgmt(void);    /* P3.6 management plane (issue #33) */
+void test_capsule(void); /* P3.7 release capsules + chunk transport (issue #33) */
+void test_dirfed(void);  /* P3.8 directory federation (issue #33) */
 
 int main(void)
 {
@@ -26,6 +34,17 @@ int main(void)
     test_budget();
     test_docs();
     test_store();
+    test_nodeid();
+    test_bundle();
+    printf("dtn_core host tests — issue #33 P3.3 (node plane)\n");
+    test_link();
+    test_mac();
+    test_forward();
+    printf("dtn_core host tests — issue #33 P3.6 (management plane)\n");
+    test_mgmt();
+    test_capsule();
+    printf("dtn_core host tests — issue #33 P3.8 (directory federation)\n");
+    test_dirfed();
     return t_summary();
 }
 

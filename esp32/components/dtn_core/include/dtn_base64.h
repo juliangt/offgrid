@@ -23,6 +23,14 @@ long dtn_base64_decode(const char *src, size_t src_len,
  * Used by the payload bound check before any buffer is touched. */
 long dtn_base64_decoded_len(const char *src, size_t src_len);
 
+/* Encode src into out as canonical padded standard-alphabet Base64 (the
+ * §3.3 wire encoding, byte-parity with Go's encoding/base64
+ * StdEncoding.EncodeToString). Writes exactly 4*ceil(src_len/3) chars plus
+ * the NUL; returns the number of chars written (excluding the NUL), or -1
+ * when out has no room for them. */
+long dtn_base64_encode(const uint8_t *src, size_t src_len,
+                       char *out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

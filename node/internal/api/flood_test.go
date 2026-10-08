@@ -354,7 +354,7 @@ func (b *brokenStore) InsertEnvelopes(envs []envelope.Envelope) (int, error) {
 func (b *brokenStore) PullEnvelopes(knownIDs []string, limit int, now int64) ([]envelope.Envelope, error) {
 	return nil, b.err
 }
-func (b *brokenStore) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte) error {
+func (b *brokenStore) UpsertDirectory(pubkey, x25519, alias string, lastSeen int64, epoch int64, prekeys []byte, card string) error {
 	return b.err
 }
 func (b *brokenStore) GetDirectory(limit int) ([]storage.DirectoryEntry, error) {

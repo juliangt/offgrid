@@ -13,12 +13,24 @@
 //	           [-battery-i2c /dev/i2c-1] [-battery-addr 0x40]
 //	           [-battery-capacity-wh 128] [-battery-dod-floor 20]
 //	           [-battery-full-v 13.6] [-battery-empty-v 12.0]
+//	           [-tcpcl -tcpcl-node-seed nodeid/node.seed [-tcpcl-addr :4556]
+//	            [-tcpcl-peers host:port,...] [-tcpcl-pins node_tcpcl_pins.json]
+//	            [-tcpcl-mtls required|optional] [-tcpcl-budget-mib 64]
+//	            [-tcpcl-keepalive 30] [-tcpcl-store node_bundles.db]
+//	            [-tcpcl-store-cap 5000] [-tcpcl-dial-interval 30]
+//	            [-tcpcl-updates -tcpcl-release-key release.pub
+//	             [-tcpcl-updates-dir staged/] [-tcpcl-updates-arch esp32s3]]
+//	            [-tcpcl-federation] [-tcpcl-debug]]
 //
 // The daemon is a single static binary (see build.sh): the web UI travels
 // inside it via go:embed, so a node is deployed by copying one file. Every
 // battery flag is optional — with none set the status page renders the
 // battery section as N/A (the reading chain degrades gracefully and never
-// becomes a dependency, docs/protocol.md §10.7).
+// becomes a dependency, docs/protocol.md §10.7). The node-plane flags
+// (issue #33 P3.4/P3.5) are OFF by default: the daemon is a pure user-plane
+// mailbox until -tcpcl turns on the Wi-Fi convergence layer (nodeplane.go;
+// received bundles land in the §7.5 bundle store and epidemic-sync at every
+// contact — docs/node-network.md §7).
 package main
 
 import (
@@ -35,11 +47,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"offgrid/dtn-node/internal/api"
 	"offgrid/dtn-node/internal/cleanup"
+	"offgrid/dtn-node/internal/forward"
 	"offgrid/dtn-node/internal/health"
 	"offgrid/dtn-node/internal/power"
 	"offgrid/dtn-node/internal/sdnotify"
@@ -73,6 +87,37 @@ const cleanupInterval = 15 * time.Minute
 // resolve. node/build.sh stamps exactly this way (issue #22: the upgrade
 // health gate identities the serving binary by this member).
 var build = "dev"
+
+// releaseVersion is this build's own §2.1.2 release integer (the anti-
+// rollback floor of offline-maintenance §2.6; the node-network §9.1
+// staging gate). It is stamped at link time as a STRING (the -X linker
+// flag only writes strings) and parsed once at boot:
+//
+//	go build -ldflags "-X main.releaseVersion=1012000"
+//
+// Empty (the default) or 0 means "unknown": a build that predates the
+// capsule stamp — the anti-rollback floor then rests on the staged capsule
+// alone, and a capsule whose min_upgrade_from exceeds the (unknown)
+// running release is refused rather than blind-staged (internal/capsule
+// Stager.RunningRelease). Stamping this from build.sh is #37 §2.4.3's
+// work; the variable and its parsing exist now so the node plane is
+// already version-aware.
+var releaseVersion = ""
+
+// parseReleaseVersion decodes the -X main.releaseVersion stamp (a decimal
+// string; empty or malformed = 0 = unknown, the pre-capsule-build stance —
+// never a boot failure: version knowledge degrades, the daemon does not).
+func parseReleaseVersion(s string) uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
 
 // shutdownTimeout bounds the graceful-drain window on SIGINT/SIGTERM.
 const shutdownTimeout = 10 * time.Second
@@ -179,6 +224,40 @@ func main() {
 	batteryFullV := flag.Float64("battery-full-v", 13.6, "resting full voltage of the pack (4S LiFePO4 default; SoC voltage-estimate anchor)")
 	batteryEmptyV := flag.Float64("battery-empty-v", 12.0, "resting empty voltage of the pack (4S LiFePO4 default; SoC voltage-estimate anchor)")
 
+	// Node-plane TCPCLv4 (issue #33 P3.4, docs/node-network.md §6.3) —
+	// OPTIONAL and OFF by default: the fleet behavior and every existing
+	// test are untouched unless the operator turns it on. P3.5 wires the
+	// real forwarding core behind it (§7 store + sync).
+	tcpclEnabled := flag.Bool("tcpcl", false, "serve + dial the node plane (TCPCLv4, RFC 9174 subset) over Wi-Fi/IP; default off")
+	tcpclAddr := flag.String("tcpcl-addr", ":4556", "TCPCL listen address (4556 is the IANA TCPCL port)")
+	tcpclPeers := flag.String("tcpcl-peers", "", "comma-separated host:port list of node-plane peers to dial opportunistically")
+	tcpclNodeSeed := flag.String("tcpcl-node-seed", "", "path to node.seed (64-hex Ed25519 seed, the §2.6 ceremony file); required with -tcpcl")
+	tcpclPins := flag.String("tcpcl-pins", "node_tcpcl_pins.json", "path to the TOFU pin store (0600, checkpointed every minute and on shutdown)")
+	tcpclMTLS := flag.String("tcpcl-mtls", "required", "client-certificate policy: required|optional (§6.2 item 4: mTLS optional-but-defined)")
+	tcpclBudgetMiB := flag.Int("tcpcl-budget-mib", 64, "per-contact transfer budget in MiB (§7.4: 64 MiB, enforced on ingress and egress)")
+	tcpclKeepalive := flag.Int("tcpcl-keepalive", 30, "advertised keepalive interval in seconds (RFC 9174 §5.1.1 recommends 30–600; 0 → 30)")
+	tcpclStore := flag.String("tcpcl-store", "", "bundle store path (§7.5; default: the -db path with _bundles.db)")
+	tcpclStoreCap := flag.Int("tcpcl-store-cap", forward.DefaultCap, "bundle store cap (§7.5: Pi default 5000)")
+	tcpclDialInterval := flag.Int("tcpcl-dial-interval", 30, "opportunistic dial interval in seconds (±25% jitter; 0 → 30)")
+	tcpclDebug := flag.Bool("tcpcl-debug", false, "log node-plane counter snapshots every minute (RAM-only bookkeeping)")
+	// P3.6 management plane (issue #33, docs/node-network.md §8): both files
+	// come from the §2.6 provisioning kit. Without the pinned anchor the
+	// management plane is OFF (no command or cert could ever verify); without
+	// the own cert the node enforces but carries no authority of its own.
+	tcpclAnchorPub := flag.String("tcpcl-anchor-pub", "", "path to anchor.pub (the §2.6 pinned trust root); the management plane is OFF without it")
+	tcpclNodeCert := flag.String("tcpcl-node-cert", "", "path to node_cert.cbor (the §2.2 provisioned role cert; optional)")
+	// P3.7 updates over the plane (issue #33, docs/node-network.md §9):
+	// updates_enabled is OFF by default — updates are L2/L3 policy. When on,
+	// capsule-chunk bundles are accepted, reassembled and — after signature
+	// verification against the PINNED RELEASE KEY and the anti-rollback
+	// check — staged atomically into -tcpcl-updates-dir. Nothing is ever
+	// AUTO-APPLIED over the plane (the #22 apply path stays operator-gated).
+	tcpclUpdates := flag.Bool("tcpcl-updates", false, "accept capsule-chunk bundles (§9.4 updates_enabled; default OFF — chunk cargo is refused and counted)")
+	tcpclUpdatesDir := flag.String("tcpcl-updates-dir", "", "staging directory (§2.4.4: <data>/staged/update.capsule; default: the -db directory + /staged)")
+	tcpclReleaseKey := flag.String("tcpcl-release-key", "", "path to release.pub (the pinned release key, offline-maintenance §2.2.3); WITHOUT it staging is unavailable and every capsule is refused + counted (fail-closed)")
+	tcpclUpdatesArch := flag.String("tcpcl-updates-arch", "", "this node's arch (§9.1 enum: armv6|armv7|arm64|esp32s3|esp32); empty disables the arch gate (stamp from provisioning when #37 lands)")
+	tcpclFederation := flag.Bool("tcpcl-federation", false, "directory federation over the node plane (§9.3; default OFF for the fleet: no card emission, no card absorption — transit relay stays unconditional; the L2 federation_on/off commands flip it at runtime when a management plane is provisioned)")
+
 	flag.Parse()
 
 	// Cold start: create the -db parent directory when missing (log it, since
@@ -238,17 +317,66 @@ func main() {
 		System:   sysres.DefaultReaders(*dbPath),
 	})
 
-	// The embedded web assets (index.html + css/js) are validated and loaded
-	// here as well: a broken embed must fail startup, not first request.
-	handler, err := api.NewWithCounters(store, counters, build, webFS, api.WithStatusEngine(statusEngine))
-	if err != nil {
-		log.Fatalf("cannot load embedded web assets: %v", err)
-	}
-
 	// Shutdown context: cancelled by SIGINT/SIGTERM; stop() restores the
 	// default signal behavior afterwards so a second signal still kills us.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The node plane (P3.4 wiring, P3.5 forwarding core, P3.6 management
+	// plane): started ONLY when -tcpcl is set, BEFORE the HTTP handler so
+	// the diagnostics surface can read its snapshot (§10.7 node_plane).
+	// Its lifetime rides the same signal context, and stop() runs the §6.1
+	// graceful SESS_TERM per live session and closes the bundle store before
+	// exit. The bundle store defaults to a sibling of the envelope database
+	// (its own §7.5 namespace).
+	tcpclStorePath := *tcpclStore
+	if tcpclStorePath == "" {
+		tcpclStorePath = deriveStorePath(*dbPath)
+	}
+	// The §2.4.4 staging directory defaults to a sibling of the envelope
+	// database: on a provisioned Pi (-db /var/lib/dtn-node/node_storage.db,
+	// ReadWritePaths=/var/lib/dtn-node) that is exactly the #22 convention
+	// /var/lib/dtn-node/staged/update.capsule — the file the upgrade
+	// machinery and the future #37 boot-apply unit consume.
+	tcpclUpdatesPath := *tcpclUpdatesDir
+	if tcpclUpdatesPath == "" {
+		tcpclUpdatesPath = filepath.Join(filepath.Dir(*dbPath), "staged")
+	}
+	nodePlane, err := startNodePlane(ctx, buildTCPCLOptions(
+		*tcpclEnabled, *tcpclAddr, *tcpclPeers, *tcpclNodeSeed, *tcpclPins,
+		*tcpclMTLS, *tcpclBudgetMiB, *tcpclKeepalive,
+		tcpclStorePath, *tcpclStoreCap, *tcpclDialInterval, *tcpclDebug,
+		*tcpclNodeCert, *tcpclAnchorPub,
+		tcpclUpdatesOptions{
+			Enabled:    *tcpclUpdates,
+			Dir:        tcpclUpdatesPath,
+			ReleaseKey: *tcpclReleaseKey,
+			Arch:       *tcpclUpdatesArch,
+			OwnRelease: parseReleaseVersion(releaseVersion),
+		}, *tcpclFederation, store), log.Default())
+	if err != nil {
+		log.Fatalf("cannot start the node plane: %v", err)
+	}
+	var planeStatus api.NodePlaneSource
+	if nodePlane != nil {
+		planeStatus = nodePlane // nil members inside render the §10.7 N/A way
+	}
+
+	// The embedded web assets (index.html + css/js) are validated and loaded
+	// here as well: a broken embed must fail startup, not first request.
+	// WithDirectoryCard wires the §9.3 emission hook: a registration card
+	// becomes an og-dir bundle when the federation policy is on (nil plane →
+	// nil hook → registrations behave exactly as before).
+	var cardEmitter func([]byte)
+	if nodePlane != nil {
+		cardEmitter = nodePlane.emitCard
+	}
+	handler, err := api.NewWithCounters(store, counters, build, webFS,
+		api.WithStatusEngine(statusEngine), api.WithNodePlane(planeStatus),
+		api.WithDirectoryCard(cardEmitter))
+	if err != nil {
+		log.Fatalf("cannot load embedded web assets: %v", err)
+	}
 
 	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
 	defer cancelCleanup()
@@ -302,6 +430,9 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("graceful shutdown timed out: %v", err)
+		}
+		if nodePlane != nil {
+			nodePlane.stop() // §6.1 SESS_TERM per session + the pin checkpoint
 		}
 		cancelCleanup() // stop the janitor before the database handle
 		cancelStatus()  // stop the status sampler (issue #36)

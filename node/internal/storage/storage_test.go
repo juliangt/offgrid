@@ -307,24 +307,24 @@ func TestDirectoryUpsertRefreshAndOrdering(t *testing.T) {
 	keyB := strings.Repeat("B", 44)
 	keyC := strings.Repeat("C", 44)
 
-	if err := s.UpsertDirectory(keyA, keyA, "alice", 100, 0, nil); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 100, 0, nil, ""); err != nil {
 		t.Fatalf("upsert alice: %v", err)
 	}
-	if err := s.UpsertDirectory(keyB, keyB, "bob", 200, 0, nil); err != nil {
+	if err := s.UpsertDirectory(keyB, keyB, "bob", 200, 0, nil, ""); err != nil {
 		t.Fatalf("upsert bob: %v", err)
 	}
 	// Tie case: carol and dave share last_seen -> pubkey ASC tie-break.
-	if err := s.UpsertDirectory(keyC, keyC, "carol", 300, 0, nil); err != nil {
+	if err := s.UpsertDirectory(keyC, keyC, "carol", 300, 0, nil, ""); err != nil {
 		t.Fatalf("upsert carol: %v", err)
 	}
 	// keyB sorts before the dave key below, so dave must come first at 300.
 	keyD := "D" + strings.Repeat("E", 43)
-	if err := s.UpsertDirectory(keyD, keyD, "dave", 300, 0, nil); err != nil {
+	if err := s.UpsertDirectory(keyD, keyD, "dave", 300, 0, nil, ""); err != nil {
 		t.Fatalf("upsert dave: %v", err)
 	}
 
 	// Refresh alice: new alias and newer last_seen.
-	if err := s.UpsertDirectory(keyA, keyA, "alice_prime", 400, 4, nil); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice_prime", 400, 4, nil, ""); err != nil {
 		t.Fatalf("refresh alice: %v", err)
 	}
 
@@ -504,7 +504,7 @@ PRAGMA user_version = 2;`); err != nil {
 
 	// A fresh upsert stamps the server-set epoch; the other entry stays at
 	// the backfilled 0 until its owner re-publishes.
-	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072000, 1791072000/HintEpochSeconds, nil); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072000, 1791072000/HintEpochSeconds, nil, ""); err != nil {
 		t.Fatalf("post-migration upsert: %v", err)
 	}
 	entries, err = s.GetDirectory(10)
@@ -1044,7 +1044,7 @@ PRAGMA user_version = 3;`); err != nil {
 	// The next upsert stores the bundle VERBATIM (§4.6: the node never
 	// verifies the signature and never mutates the member).
 	bundle := []byte(`{"v":1,"spk":"` + keyA + `","spk_sig":"` + strings.Repeat("s", 88) + `","ts":1791072000,"opks":["` + keyA + `","` + keyB + `"]}`)
-	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072000, 1791072000/HintEpochSeconds, bundle); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072000, 1791072000/HintEpochSeconds, bundle, ""); err != nil {
 		t.Fatalf("post-migration upsert with bundle: %v", err)
 	}
 	entries, err = s.GetDirectory(10)
@@ -1065,7 +1065,7 @@ PRAGMA user_version = 3;`); err != nil {
 
 	// A POST without the member clears the stored bundle (§9 downgrade
 	// self-heal) while keeping the rest of the row.
-	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072100, 1791072100/HintEpochSeconds, nil); err != nil {
+	if err := s.UpsertDirectory(keyA, keyA, "alice", 1791072100, 1791072100/HintEpochSeconds, nil, ""); err != nil {
 		t.Fatalf("clearing upsert: %v", err)
 	}
 	entries, err = s.GetDirectory(10)
@@ -1095,13 +1095,13 @@ func TestDirectoryUpsertCapacityGuard(t *testing.T) {
 	key := func(n int) string { return strings.Repeat(string(rune('A'+n)), 44) }
 
 	for i := 0; i < 3; i++ {
-		if err := s.UpsertDirectory(key(i), key(i), "user", 100, 0, nil); err != nil {
+		if err := s.UpsertDirectory(key(i), key(i), "user", 100, 0, nil, ""); err != nil {
 			t.Fatalf("upsert %d below cap: %v", i, err)
 		}
 	}
 
 	// At the cap: a NEW pubkey is rejected with the typed error.
-	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 100, 0, nil); !errors.Is(err, ErrCapacity) {
+	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 100, 0, nil, ""); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("new registration at cap: want ErrCapacity, got %v", err)
 	}
 
@@ -1113,7 +1113,7 @@ func TestDirectoryUpsertCapacityGuard(t *testing.T) {
 
 	// An EXISTING pubkey keeps refreshing at the cap: new alias/keys/prekeys
 	// land, last_seen moves — never locked out.
-	if err := s.UpsertDirectory(key(0), key(1), "alice_prime", 200, 0, []byte(`{"v":1}`)); err != nil {
+	if err := s.UpsertDirectory(key(0), key(1), "alice_prime", 200, 0, []byte(`{"v":1}`), ""); err != nil {
 		t.Fatalf("existing-pubkey refresh at cap: %v", err)
 	}
 	entries, err = s.GetDirectory(10)
@@ -1136,7 +1136,7 @@ func TestDirectoryUpsertCapacityGuard(t *testing.T) {
 	if _, err := s.db.Exec(`DELETE FROM directory WHERE pubkey = ?`, key(2)); err != nil {
 		t.Fatalf("delete row: %v", err)
 	}
-	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 300, 0, nil); err != nil {
+	if err := s.UpsertDirectory(key(9), key(9), "newcomer", 300, 0, nil, ""); err != nil {
 		t.Fatalf("new registration under the cap after a delete must succeed: %v", err)
 	}
 }
@@ -1150,14 +1150,14 @@ func TestDirectoryUpsertDefaultCap(t *testing.T) {
 
 	keyAt := func(n int) string { return fmt.Sprintf("%044d", n) }
 	for i := 0; i < maxDirectoryEntries; i++ {
-		if err := s.UpsertDirectory(keyAt(i), keyAt(i), "user", 100, 0, nil); err != nil {
+		if err := s.UpsertDirectory(keyAt(i), keyAt(i), "user", 100, 0, nil, ""); err != nil {
 			t.Fatalf("registration %d below default cap: %v", i, err)
 		}
 	}
-	if err := s.UpsertDirectory(keyAt(maxDirectoryEntries), keyAt(maxDirectoryEntries), "over", 100, 0, nil); !errors.Is(err, ErrCapacity) {
+	if err := s.UpsertDirectory(keyAt(maxDirectoryEntries), keyAt(maxDirectoryEntries), "over", 100, 0, nil, ""); !errors.Is(err, ErrCapacity) {
 		t.Fatalf("registration past the default cap: want ErrCapacity, got %v", err)
 	}
-	if err := s.UpsertDirectory(keyAt(0), keyAt(0), "refresh", 200, 0, nil); err != nil {
+	if err := s.UpsertDirectory(keyAt(0), keyAt(0), "refresh", 200, 0, nil, ""); err != nil {
 		t.Fatalf("existing-pubkey refresh at the full cap must succeed: %v", err)
 	}
 	if got := MaxDirectoryEntries(); got != 5000 {

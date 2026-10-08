@@ -28,7 +28,11 @@
 //      empty sign-off block in place, and NO pre-filled results anywhere
 //      (no tick glyphs, no checked boxes, no PASS/FAIL result cells). This
 //      keeps the scaffold honest: nothing may be marked as observed until a
-//      human observed it.
+//      human observed it. Extended additively for the Phase 3 node-plane
+//      session (issue #33 P3.9): §15 exists with cases N1..N14, its honest
+//      P3.3-bring-up boundary statement names the enforcing host suites, the
+//      Result-line count covers the N-cases too, and the same no-fabrication
+//      rules hold across the whole document.
 //
 // It needs `go` (it builds its own daemon binary into a temp dir) and owns
 // 127.0.0.1 ports 18201-18202 (disjoint from the E2E's 18091-18095, the
@@ -485,8 +489,8 @@ try {
   for (let i = 1; i <= 10; i++) {
     ok(doc.includes(`## T${i} —`), `field-test.md defines case T${i}`);
   }
-  ok((doc.match(/\[ \] pass/g) || []).length === 10,
-     "all ten Result lines are UNCHECKED checkboxes (nothing pre-observed)");
+  ok((doc.match(/\[ \] pass/g) || []).length === 24,
+     "all 24 Result lines (T1..T10 + N1..N14) are UNCHECKED checkboxes (nothing pre-observed)");
   const pendingCount = (doc.match(/PENDING/g) || []).length;
   ok(pendingCount >= 20, `results scaffolds carry the PENDING markers (${pendingCount} found)`);
   ok(doc.includes("PROTOCOL READY — EXECUTION PENDING") &&
@@ -501,6 +505,51 @@ try {
      "no result table cell is pre-filled with a verdict");
   ok(doc.includes("docs/hardware.md` §10"),
      "T6 cites the channel-planning guidance of docs/hardware.md §10");
+
+  console.log("== D2. the Phase 3 node-plane session, §15 (issue #33 P3.9) — structure + honesty ==");
+  ok(doc.includes("## 15. Phase 3 node-plane session"),
+     "field-test.md defines the §15 Phase 3 node-plane session");
+  ok(doc.includes("protocol; execution pending"),
+     "the §15 heading states protocol-only, execution-pending status");
+  for (let i = 1; i <= 14; i++) {
+    ok(doc.includes(`### N${i} —`), `field-test.md defines node-plane case N${i}`);
+  }
+  ok((doc.match(/^### N\d+ —/gm) || []).length === 14,
+     "the §15 case family counts exactly N1..N14 (nothing extra, nothing missing)");
+  for (const sub of [
+    "### 15.2 Prerequisites — the Phase 3 kit",
+    "### 15.3 Bench tier — cases N1–N5",
+    "### 15.4 Field tier — cases N6–N13",
+    "### 15.5 Solar repeater soak — case N14 (72 h, unattended)",
+    "### 15.6 Results matrices",
+    "### 15.7 Defect log (Phase 3 session)",
+    "### 15.8 Sign-off — left EMPTY until the Phase 3 physical session happens",
+  ]) {
+    ok(doc.includes(sub), `§15 subsection present: ${sub}`);
+  }
+  // The boundary statement: the section's first, load-bearing honesty pin.
+  ok(doc.indexOf("**BOUNDARY — read this before planning anything else.**") !== -1 &&
+     doc.indexOf("**BOUNDARY — read this before planning anything else.**") < doc.indexOf("### N1 —"),
+     "the boundary statement sits at the top of §15, before the first case");
+  ok(doc.includes("requires the **P3.3 hardware bring-up**") &&
+     doc.includes("dtn_session_store") && doc.includes("dtn_radio"),
+     "the boundary names the P3.3 bring-up dependencies (sx126x driver, NVS behind the HAL seams)");
+  ok(doc.includes("the C host suite") && doc.includes("tests/node_plane_e2e.sh") &&
+     doc.includes("node/internal/forward/integration_test.go") &&
+     doc.includes("node/internal/mgmt/integration_test.go"),
+     "the boundary names the enforcing host suites while the hardware is pending");
+  ok(doc.includes("NOT a claim of results"),
+     "the boundary states the section is a protocol, not a claim of results");
+  // §4 acceptance items mapped one-to-one into the field tier.
+  for (const marker of ["2-hop", "Passive capture", "below its required level", "L3 ceremony",
+                        "capsule crosses the plane", "composable from C",
+                        "budget bounds a flooding peer", "never starves mail"]) {
+    ok(doc.includes(marker), `the §4 acceptance mapping covers: ${marker}`);
+  }
+  ok(doc.includes("72 h solar soak") && doc.includes("no replay-window rewind"),
+     "the soak case pins the 72 h cycle and the persisted-sequence resume criterion");
+  ok(doc.includes("left EMPTY until the Phase 3 physical session happens"),
+     "the §15.8 sign-off block is present and empty");
 
   console.log(`\nPASS: ${passed} assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard`);
 } finally {

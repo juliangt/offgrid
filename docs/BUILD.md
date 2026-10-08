@@ -281,7 +281,7 @@ matters):
 15. The field-equivalents test (issue #20) ends with:
 
     ```
-    PASS: 62 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
+    PASS: 100 assertions on the issue-#20 field equivalents (seed restore, cross-node store, status agreement) and the field-test.md guard
     ```
 
 16. The install-node guide structure test (issue #35) ends with:
@@ -302,7 +302,7 @@ matters):
 17. The audit-deliverables docs structure test (issue #14) ends with:
 
     ```
-    PASS: <n> assertions on the security-audit and known-limitations docs and the README wiring
+    PASS: <n> assertions on the security-audit and known-limitations docs, the README wiring and the node-network spec
     ```
 
     It is pure file-structure checking (no daemon, no network): the
@@ -313,8 +313,10 @@ matters):
     and covers every accepted residual section with its source citations;
     the README links both docs, records the audit as complete and carries
     the corrected hint-linkability claim with the pre-audit overclaim gone;
-    and the suite wiring itself (Makefile `test`, the §4 step list with
-    consistent numbering) is pinned.
+    `docs/node-network.md` exists with its 1.0.0/2026-10-07 header, its
+    user-plane cross-reference, its RFC 9171 profile base and its
+    self-certifying EID scheme (issue #33 P3.0); and the suite wiring itself
+    (Makefile `test`, the §4 step list with consistent numbering) is pinned.
 
 Lint gates (as used in CI of record): `gofmt -l .` and `go vet ./...` inside `node/` must produce no output/errors — `make lint` wraps them.
 
@@ -386,7 +388,7 @@ sudo ./install.sh --offline /media/usb --country AR   # checksum-verified too
    reboot
    ```
 
-   `provision.sh` (10 verified steps) detects the board model and userland ISA, masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables` plus the watchdog probe tools, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files (on single-core ARMv6 boards the daemon's watchdog ceiling is relaxed to 60 s), creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the matching binary at `/opt/dtn-node/dtn-node`, enables every unit, and runs the Track-3 field hardening (keys-only sshd drop-in, journald made volatile, security-only unattended upgrades — the read-only root stays an explicit operator step, OFF by default) — verifying each step with `[OK]`/`[FAIL]` and failing fast.
+   `provision.sh` (11 verified steps) detects the board model and userland ISA, masks NetworkManager and installs the classic ifupdown stack, installs `hostapd`/`dnsmasq`/`iptables` plus the watchdog probe tools, sets the static `10.42.0.1/24` on `wlan0`, installs the configs and unit files (on single-core ARMv6 boards the daemon's watchdog ceiling is relaxed to 60 s), creates the unprivileged `dtn` user with `/var/lib/dtn-node` (0750), installs the matching binary at `/opt/dtn-node/dtn-node`, installs the OPTIONAL node-identity kit (`nodeid/{node.seed,node_cert.cbor,anchor.pub}` from the provisioning tree → `/opt/dtn-node/nodeid/`, root-owned; an absent kit is a loud SKIP — the `capsuletool` ceremony is `docs/node-network.md` §2.6), enables every unit, and runs the Track-3 field hardening (keys-only sshd drop-in, journald made volatile, security-only unattended upgrades — the read-only root stays an explicit operator step, OFF by default) — verifying each step with `[OK]`/`[FAIL]` and failing fast.
 
 ### Path 4 — upgrade a deployed node (no reflash, no data loss; issue #22)
 

@@ -9,8 +9,9 @@
 #                    docs structure tests (install-node guide, issue #35;
 #                    audit deliverables, issue #14), the curl E2E, the node
 #                    upgrade/rollback E2E (issue #22), the Pi hardening
-#                    structure test and the dtn_core ESP32 host tests
-#                    (issue #39)
+#                    structure test, the node-plane multi-hop E2E
+#                    (issue #33 P3.5 — ~15 s, `make test-node-plane` runs
+#                    it alone) and the dtn_core ESP32 host tests (#39)
 #   make lint        the CI lint gates: gofmt -l (no output allowed) + go vet
 #   make chaos       the chaos suite (tests/chaos/run_all.sh — break it on
 #                    purpose, assert degrade + auto-recover; see
@@ -25,8 +26,9 @@
 #                    container invocation is printed when idf.py is missing
 #
 # No root is needed for any target. The test targets start and stop their
-# own daemons on 127.0.0.1 ports 18091-18099 (sync E2E + chaos) and 18101
-# (upgrade E2E) and clean up after themselves.
+# own daemons on 127.0.0.1 ports 18091-18099 (sync E2E + chaos), 18101
+# (upgrade E2E) and 18271-18283 (node-plane E2E: HTTP 18271-18273, TCPCL
+# 18281-18283) and clean up after themselves.
 
 .PHONY: build build-all test lint chaos fuzz field-kit \
 	firmware firmware-merge firmware-clean
@@ -62,8 +64,18 @@ test:
 	node tests/docs_structure.mjs
 	bash tests/sync_e2e.sh
 	bash tests/upgrade_e2e.sh
+	bash tests/node_plane_e2e.sh
 	bash tests/hardening_structure.sh
 	$(MAKE) test-esp32-core
+
+# The node-plane multi-hop gate alone (issue #33 P3.5, §11 row g): three
+# real daemons on a line topology, the §7.1 epidemic sync end to end.
+# Wired into `make test` as well — it costs ~15 s — this target exists for
+# iterating on the node plane without the rest of the suite.
+test-node-plane:
+	bash tests/node_plane_e2e.sh
+
+.PHONY: test-node-plane
 
 # dtn_core host suite (issue #39): the ESP32 firmware's portable core runs
 # the §15.7-adapted assertions next to the Go/SPA/E2E gates. Needs any C99
@@ -77,21 +89,25 @@ test-esp32-core:
 
 .PHONY: test-esp32-core
 
-# Field-session entry point (issue #20): the physical acceptance cases of
-# docs/field-test.md CANNOT be automated here — this target only verifies the
-# kit is complete and prints what to bring/print. Execution results go into
-# docs/field-test.md by hand, on site.
+# Field-session entry point (issue #20, extended by issue #33 P3.9): the
+# physical acceptance cases of docs/field-test.md CANNOT be automated here —
+# this target only verifies the kit is complete and prints what to bring/print.
+# Execution results go into docs/field-test.md by hand, on site.
 field-kit:
-	@echo "field kit — issue #20 session checklist"
+	@echo "field kit — issue #20 session checklist (+ the issue #33 P3.9 node-plane session, §15)"
 	@test -f docs/field-test.md || { echo "MISSING docs/field-test.md"; exit 1; }
 	@test -f docs/quick-start.md || { echo "MISSING docs/quick-start.md"; exit 1; }
 	@test -f docs/BUILD.md && grep -q 'Path 4' docs/BUILD.md \
 		|| { echo "MISSING the release-kit path (docs/BUILD.md §5 Path 4)"; exit 1; }
+	@grep -q '## 15. Phase 3 node-plane session' docs/field-test.md \
+		|| { echo "MISSING the Phase 3 node-plane session in docs/field-test.md (issue #33 P3.9 §15)"; exit 1; }
 	@echo "  [ok] docs/field-test.md   — the T1..T10 protocol + report scaffold (print 2)"
+	@echo "  [ok] docs/field-test.md   — the Phase 3 node-plane session N1..N14 (issue #33 P3.9; §15.2 kit; boundary: needs P3.3 bring-up)"
 	@echo "  [ok] docs/quick-start.md  — the end-user guide (print 2; also served at /guide)"
 	@echo "  [ok] release USB kit      — build per docs/BUILD.md §5 Path 4 (offline checklist there)"
 	@echo "  hardware, phones and meter: see docs/field-test.md §1 (prerequisites table)"
-	@echo "  after the session: fill the §12 matrices + §13 defect log, sign §14."
+	@echo "  node-plane hardware: see docs/field-test.md §15.2 (heads, attenuator, solar repeater kit)"
+	@echo "  after a session: fill the §12/§15.6 matrices + the §13/§15.7 defect logs, sign §14/§15.8."
 
 # Lint gates (docs/BUILD.md §4): gofmt must report nothing, vet nothing.
 lint:

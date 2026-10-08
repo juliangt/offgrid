@@ -87,6 +87,34 @@ int dtn_store_dir_upsert(dtn_store *st, const char *alias, const char *pubkey,
                          const char *x25519, const char *prekeys_raw,
                          int64_t now);
 
+/* The §9.3 directory-federation extension (issue #33 P3.8): the same upsert
+ * with the two internal columns the merge rules need — card_b64 is the
+ * identity card exactly as published (canonical Base64 of the COSE, ≤
+ * DTN_DIR_CARD_B64_MAX-1 chars; NULL/"" clears, the §3.2 self-heal) and
+ * source is the row provenance (0 = local upsert, 1 = federated merge —
+ * §3.4 rule 5). The tail is written as an OPTIONAL record extension: frames
+ * written without it (the pre-P3.8 format) parse unchanged. */
+int dtn_store_dir_upsert_full(dtn_store *st, const char *alias,
+                              const char *pubkey, const char *x25519,
+                              const char *prekeys_raw, const char *card_b64,
+                              int source, int64_t now);
+
+/* One full directory row by pubkey (the merge's lookup): the served fields
+ * plus the two internal §9.3 columns. Returns 0 found (out filled; card is
+ * "" when the entry carries none), -1 absent or I/O error. */
+#define DTN_DIR_CARD_B64_MAX 1372 /* Base64 of a 1024-byte card, + NUL */
+typedef struct {
+    char alias[25];
+    char x25519[45];
+    int64_t last_seen;
+    int64_t epoch;
+    int source; /* 0 local upsert, 1 federated merge (§3.4 rule 5) */
+    char prekeys[2049]; /* the §4.6 bundle as stored, "" when none — the
+                         * federated replace (rule 2) preserves it */
+    char card[DTN_DIR_CARD_B64_MAX];
+} dtn_dir_row;
+int dtn_store_dir_find(dtn_store *st, const char *pubkey, dtn_dir_row *out);
+
 /* GET: at most limit entries (≤ 500), ordered last_seen DESC, pubkey ASC
  * (deterministic tie-break). prekeys_cb receives NULL when the entry has no
  * bundle. served (optional) receives the count. Returns 0 ok, -1 io. */
