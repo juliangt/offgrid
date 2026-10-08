@@ -110,19 +110,23 @@ node tests/qr_identity.mjs         # 73 assertions on the §4.7 identity QR (pay
 node tests/spa_structure.mjs       # 262 assertions on the SPA layout, CSP, API surface and the /guide page
 node tests/pwa_assets.mjs          # 46 assertions on the §12.1 PWA-lite assets (manifest, icons, zero external URLs)
 bash tests/sync_e2e.sh             # 383 assertions: five real daemons + full mule walk (curl only)
+bash tests/node_plane_e2e.sh       # 25 assertions: three daemons in a line topology exchanging bundles over TCPCLv4 (issue #33)
+sh esp32/components/dtn_core/host/run_tests.sh   # the ESP32 firmware's portable core, host-tested (issue #39 + #33)
+go run ./cmd/capsuletool --help    # from node/: the offline identity/capsule/admin ceremony tool (issue #33)
 ```
 
-`tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.
+`tests/sync_e2e.sh` simulates the complete Alice → node A → mule → node B → Bob journey and asserts payload byte integrity (sha256) through the mule, dedup, TTL filtering, limit rejections and the captive-portal redirects. `make test` runs the full documented suite in one command (including the two E2Es, the dtn_core host suite and the node-plane E2E); `make chaos` and `make fuzz` cover the failure-injection and parser-fuzzing suites. Expected outputs: [`docs/BUILD.md`](docs/BUILD.md) §4.
 
 ## Repository layout
 
 ```
 offgrid/
 ├── .github/         # release workflow: binaries + per-model DEPLOY.md per tag
-├── docs/            # protocol spec, build/hardware docs, per-model matrix
-├── node/            # Go daemon (internal: storage, api, cleanup, envelope; web/: SPA)
+├── docs/            # protocol + node-network specs, build/hardware docs, per-model matrix
+├── esp32/           # optional ESP32 node firmware (issue #39): dtn_core (C99, host-tested) + dtn_node
+├── node/            # Go daemon (internal: storage, api, envelope, bundle, nodeid, link, tcpcl, forward, mgmt, capsule, directory; web/: SPA)
 ├── raspberry/       # install.sh, provision.sh, hostapd, dnsmasq, firewall, power, systemd
-├── tests/           # crypto round-trip (Node), SPA structure, E2E sync (bash/curl)
+├── tests/           # crypto round-trip (Node), SPA structure, E2E sync + node-plane E2E (bash/curl), shared crypto/format vectors
 └── tools/           # gen_icons.mjs — deterministic regeneration of the §12.1 PWA icons
 ```
 
@@ -131,6 +135,7 @@ offgrid/
 | Document | Contents |
 |---|---|
 | [`docs/protocol.md`](docs/protocol.md) | **Normative protocol spec**: envelope format, canonical serialization, key derivations, crypto primitives, binding limits, node schema and API, threat model, Phase 2 (BLE) / Phase 3 (LoRa) mapping |
+| [`docs/node-network.md`](docs/node-network.md) | **Normative node-plane spec** (issue #33 Phase 3): the two-plane model — the user plane of `protocol.md` stays byte-frozen — with node identity and anchor-signed role certificates (roles, authority levels L0–L3, revocation without a server), the Offgrid BPv7 profile (an RFC 9171 subset) with measured byte budgets, the LoRa radio plan and link-security spec (EDHOC-shaped sessions, persisted anti-replay), epidemic forwarding with contact budgets, the management plane (signed admin commands, telemetry replies), updates and directory federation over the plane, the threat-model delta and the conformance matrix |
 | [`docs/rfc4838-alignment.md`](docs/rfc4838-alignment.md) | **RFC 4838 alignment audit** (issue #40): the DTN architecture claim validated concept-by-concept against RFC 4838 — 16-row mapping table, verdicts, deviation register (intentional vs unintentional) and what Bundle-Protocol conformance would mean (informational) |
 | [`docs/security-audit.md`](docs/security-audit.md) | **Security audit report** (issue #14, FINAL v1.0.0): five-phase audit — node daemon, SPA + crypto engine, protocol/threat model, Pi network stack, supply chain — 30 findings by severity with reproductions and fixes, the §13 claim-by-claim threat-model verdict table, and the consolidated register of accepted residuals and deferred follow-ups |
 | [`docs/known-limitations.md`](docs/known-limitations.md) | **Known limitations** (issue #14): the residual risks accepted by design, in plain language — no TLS, node-served app code, permanent directory-holder linkability, unauthenticated directory entries, replay after expiry, store-fill censorship, shared devices, SD-card extraction, unsigned release hashes, mule withholding — each citing its spec section and audit finding |
@@ -141,7 +146,7 @@ offgrid/
 | [`docs/hardening.md`](docs/hardening.md) | Defensive hardening design (issue #16): adversarial assumptions, the four defense tracks with their regression tests, deliberate non-defenses, the shed → survive → self-recover contract |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Field operator runbook: reading the counters-only telemetry, detecting abuse, restoring a node in minutes (quarantine, remount cycle, reflash), upgrading a deployed node + rollback, escalation |
 | [`docs/quick-start.md`](docs/quick-start.md) | **End-user quick-start guide** (issue #23): the printable, translatable one-pager a field pilot hands out — join the Wi-Fi, open the full browser, register, back up the seed, send, be a mule — also served by every node at `http://offgrid.local:8080/guide` |
-| [`docs/field-test.md`](docs/field-test.md) | **Field acceptance protocol + report** (issue #20): the executable T1–T10 cases for the on-hardware session (two-node mule walk, device matrix, seed restore, isolation, cold start, coexistence, power draw) with PENDING results matrices, a defect log and an empty sign-off — plus the software-verifiable half automated as `tests/field_equiv.mjs` |
+| [`docs/field-test.md`](docs/field-test.md) | **Field acceptance protocol + report** (issue #20): the executable T1–T10 cases for the on-hardware session (two-node mule walk, device matrix, seed restore, isolation, cold start, coexistence, power draw) with PENDING results matrices, a defect log and an empty sign-off — plus the software-verifiable half automated as `tests/field_equiv.mjs` — extended (issue #33 P3.9) with the §15 node-plane session N1–N14 (bench + field tiers, 72 h solar soak; execution pending the radio hardware bring-up) |
 | [`docs/offline-maintenance.md`](docs/offline-maintenance.md) | **Offline island maintenance design** (issue #37): the complete design for mule-delivered signed release capsules (byte-exact format, offline signing ritual, staging endpoint, anti-rollback policy, apply via the #22 machinery) and directory federation (signed identity cards, merge policy, privacy accounting) — **design record only**: the staging/federation endpoints are not yet implemented; the unknown-recipient conformance pin it carries is already normative and tested in `docs/protocol.md` §10.5 |
 | [`docs/DEVELOPMENT_PLAN.md`](docs/DEVELOPMENT_PLAN.md) | Design decisions and rationale (same-origin trick, threat model, byte budgets, OS choices) |
 | [`docs/MASTER_DEVELOPMENT_PROMPT.md`](docs/MASTER_DEVELOPMENT_PROMPT.md) | Original master specification (source of truth for requirements) |
@@ -151,4 +156,4 @@ offgrid/
 - **Security audit — complete** (issue #14): all five phases done across the node daemon, client, protocol, Pi network stack and supply chain — no critical or high findings; fixes, spec corrections and accepted residuals are documented in [`docs/security-audit.md`](docs/security-audit.md), with the user/operator-facing residual list in [`docs/known-limitations.md`](docs/known-limitations.md).
 - **Phase 1 (this repository) — software complete**: Wi-Fi dead-drop nodes + browser data mules over HTTP, covered by the automated test suite above. The remaining manual item is on-hardware acceptance with physical Pis and phones: the executable protocol and report scaffold are [`docs/field-test.md`](docs/field-test.md) (T1–T10, every result PENDING until executed — `make field-kit` prints the session checklist).
 - **Phase 2 — BLE**: direct phone-to-phone transfer over BLE L2CAP connection-oriented channels with `hop_count ≤ 7`; the envelope format and the code-level mapping are already defined in [`docs/protocol.md`](docs/protocol.md) §14.
-- **Phase 3 — LoRa**: long-range radio backhaul between zones, envelope packed as CBOR within the 222-byte SX1262 MTU at 915 MHz (same spec section).
+- **Phase 3 — node-to-node network — software complete** (issue #33, spec [`docs/node-network.md`](docs/node-network.md)): nodes are now identified, authenticated DTN peers on a dedicated node plane that leaves the user plane byte-frozen — a frozen BPv7 profile (RFC 9171 subset) as the bundle layer, TCPCLv4 over TLS 1.3 on the Wi-Fi plane today with the LoRa convergence layer (EDHOC-shaped encrypted link sessions, SX1262 MAC, window reassembly) host-tested and awaiting the radio hardware bring-up, controlled-epidemic forwarding with contact budgets, anchor-signed role certificates with management levels L0–L3 (island-wide revocation without any server), software capsules and signed directory cards riding the same plane. The physical acceptance — bench radio tests, multi-km links, the 72 h solar repeater soak — is the executable protocol of [`docs/field-test.md`](docs/field-test.md) §15 (N1–N14, results PENDING until the hardware session).
